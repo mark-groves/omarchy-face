@@ -1,7 +1,6 @@
 import QtQuick
 
 QtObject {
-  property string kind: "face"
   property bool active: true
   property string glyph: "\uDB80\uDE08"
   property string hint: "Look at the camera"
