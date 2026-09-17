@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "markgroves.polkit-face",
+  "name": "Face Scan Card",
+  "version": "1.0.0",
+  "author": "Mark Groves",
+  "description": "Animated scan ring for the Omarchy polkit face card.",
+  "kinds": ["polkit-chrome"],
+  "entryPoints": {
+    "polkitFace": "PolkitFaceCard.qml"
+  }
+}
