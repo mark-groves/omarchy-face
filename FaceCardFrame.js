@@ -6,16 +6,21 @@
 // frames, and has no route to anything in the host. It exports two pure
 // functions and nothing else.
 //
-//   render(ctx, size, spec)   paint one frame into a host-owned 2D context
-//   holdMs(state)             how long the host should hold that state
+//   frame(size, spec)   return one frame as a list of numeric draw ops
+//   holdMs(state)       how long the host should hold that state
 //
-// spec is a plain value object supplied by the host:
+// The host does NOT hand this module a drawing context. Handing one over is
+// the whole leak: a 2D context exposes `canvas`, the canvas is a host Item,
+// and its parent chain reaches the password field. Measured on this build.
+// So the module paints into its own recorder and returns numbers.
+//
+// spec carries only values:
 //   state        "scanning" | "recognized" | "notRecognized"
 //   clock        free-running milliseconds, drives the scan sweep
 //   elapsed      milliseconds since `state` was entered
-//   accent       "#rrggbb", theme accent
-//   foreground   "#rrggbb", theme text
-//   errorColor   "#rrggbb", theme error
+//
+// Colours are not in the spec. Ops carry a role index and the host resolves
+// it against the live theme.
 //
 // Determinism is a security property here, not a nicety. Nothing calls
 // Math.random() after buildParticles, no frame-to-frame accumulator exists,
@@ -273,13 +278,10 @@ function acquisition(p, plane, hy) {
   return Math.exp(-(-d) / 0.055)
 }
 
-function rgba(hex, a) {
-  var h = String(hex).replace("#", "")
-  if (h.length === 8) h = h.slice(2)
-  var r = parseInt(h.slice(0, 2), 16)
-  var g = parseInt(h.slice(2, 4), 16)
-  var b = parseInt(h.slice(4, 6), 16)
-  return "rgba(" + r + "," + g + "," + b + "," + clamp01(a).toFixed(3) + ")"
+// A paint token, not a colour. The host resolves the role against the live
+// theme, so this module never sees or chooses a colour.
+function rgba(role, a) {
+  return [role, clamp01(a)]
 }
 
 // Closed-form position under linear drag. Keeping this analytic is what makes
@@ -288,7 +290,7 @@ function dragOffset(v0, tau, k) {
   return v0 * (1 - Math.exp(-k * tau)) / k
 }
 
-function render(ctx, size, spec) {
+function paintInto(ctx, size, spec) {
   var state = spec.state || "scanning"
   var t = spec.clock || 0
   var rt = spec.elapsed || 0
@@ -307,7 +309,7 @@ function render(ctx, size, spec) {
 
   var ok = state === "recognized"
   var bad = state === "notRecognized"
-  var tint = bad ? spec.errorColor : spec.accent
+  var tint = bad ? ROLE_ERROR : ROLE_ACCENT
 
   var curve = CURVE_SCAN
   var squint = 0
@@ -334,7 +336,7 @@ function render(ctx, size, spec) {
   // --- ambient instrument chrome -------------------------------------------
   if (!micro && scanning) {
     ctx.save()
-    ctx.strokeStyle = rgba(spec.foreground, 0.07)
+    ctx.strokeStyle = rgba(ROLE_FG, 0.07)
     ctx.lineWidth = Math.max(1, size * 0.005)
     for (var rb = 0; rb < 5; rb++) {
       var by = cy + ((rb / 4) * 2 - 1) * R * 1.02
@@ -753,7 +755,7 @@ function render(ctx, size, spec) {
     // Error wave: a ring that races out as the anchors let go.
     var ew = bump(rt, 0, 340)
     if (ew > 0.01) {
-      ctx.strokeStyle = rgba(spec.errorColor, ew * 0.6)
+      ctx.strokeStyle = rgba(ROLE_ERROR, ew * 0.6)
       ctx.lineWidth = Math.max(1, size * 0.018)
       ctx.beginPath()
       ctx.arc(cx, cy, R * mix(0.1, 1.35, easeOutCubic(seg(rt, 0, 340))), 0, Math.PI * 2)
@@ -763,7 +765,7 @@ function render(ctx, size, spec) {
     // Broken rim: dashes that drift apart once the lock is gone.
     var brk = easeOutCubic(seg(rt, 240, 620))
     if (brk > 0.02) {
-      ctx.strokeStyle = rgba(spec.errorColor, 0.45 * (1 - brk * 0.4))
+      ctx.strokeStyle = rgba(ROLE_ERROR, 0.45 * (1 - brk * 0.4))
       ctx.lineWidth = Math.max(1, size * 0.012)
       for (var di = 0; di < 10; di++) {
         var da = (di / 10) * Math.PI * 2 + brk * 0.22 * (di % 2 ? 1 : -1)
@@ -780,4 +782,78 @@ function holdMs(state) {
   if (state === "recognized") return 1050
   if (state === "notRecognized") return 820
   return 0
+}
+
+// --- the value-spec boundary ------------------------------------------------
+
+var ROLE_ACCENT = 0
+var ROLE_FG = 1
+var ROLE_ERROR = 2
+
+var OP_PATH = 0   // [OP_PATH, role, alpha, lineWidth, cmds]
+var OP_RECT = 1   // [OP_RECT, role, alpha, x, y, w, h]
+var OP_GRAD = 2   // [OP_GRAD, role, alphaFrom, alphaTo, x, y, w, h, yFrom, yTo]
+
+// Path commands, all numeric:
+//   [0, x, y]                 moveTo
+//   [1, x, y]                 lineTo
+//   [2, cx, cy, x, y]         quadraticCurveTo
+//   [3, cx, cy, r, a0, a1]    arc
+
+// Stands in for a 2D context so the drawing code above is unchanged, and
+// records what it would have drawn instead of drawing it.
+function recorder() {
+  var ops = []
+  var cmds = null
+  var stack = []
+  var st = { stroke: [ROLE_ACCENT, 1], fill: [ROLE_ACCENT, 1], width: 1 }
+
+  var rec = {
+    ops: ops,
+    reset: function () { ops.length = 0; cmds = null },
+    save: function () { stack.push({ stroke: st.stroke, fill: st.fill, width: st.width }) },
+    restore: function () { var p = stack.pop(); if (p) st = p },
+    beginPath: function () { cmds = [] },
+    moveTo: function (x, y) { if (cmds) cmds.push([0, x, y]) },
+    lineTo: function (x, y) { if (cmds) cmds.push([1, x, y]) },
+    quadraticCurveTo: function (cx, cy, x, y) { if (cmds) cmds.push([2, cx, cy, x, y]) },
+    arc: function (cx, cy, r, a0, a1) { if (cmds) cmds.push([3, cx, cy, r, a0, a1]) },
+    stroke: function () {
+      if (cmds && cmds.length) ops.push([OP_PATH, st.stroke[0], st.stroke[1], st.width, cmds])
+      cmds = null
+    },
+    fillRect: function (x, y, w, h) {
+      if (st.fill && st.fill.__grad) {
+        var g = st.fill
+        ops.push([OP_GRAD, g.role, g.from, g.to, x, y, w, h, g.y0, g.y1])
+      } else {
+        ops.push([OP_RECT, st.fill[0], st.fill[1], x, y, w, h])
+      }
+    },
+    createLinearGradient: function (x0, y0, x1, y1) {
+      var g = { __grad: true, role: ROLE_ACCENT, from: 0, to: 0, y0: y0, y1: y1 }
+      g.addColorStop = function (at, token) {
+        g.role = token[0]
+        if (at <= 0) g.from = token[1]
+        else g.to = token[1]
+      }
+      return g
+    }
+  }
+
+  function prop(name, set) { Object.defineProperty(rec, name, { set: set, get: function () { return undefined } }) }
+  prop("strokeStyle", function (v) { st.stroke = v })
+  prop("fillStyle", function (v) { st.fill = v })
+  prop("lineWidth", function (v) { st.width = v })
+  prop("lineCap", function () {})
+  prop("lineJoin", function () {})
+  prop("globalAlpha", function () {})
+  return rec
+}
+
+// One frame as data. Numbers and small arrays of numbers, nothing else.
+function frame(size, spec) {
+  var rec = recorder()
+  paintInto(rec, size, spec)
+  return rec.ops
 }

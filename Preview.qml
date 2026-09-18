@@ -1,13 +1,16 @@
 import QtQuick
 import Quickshell
-import "FaceCardPaint.js" as FaceCard
+import "FaceCardFrame.js" as FaceCard
 
 // Developer harness for the face card. Not shipped and not loaded by the host.
 //
-// It is also the reference for how the host is meant to drive this plugin. The
-// Canvas below belongs to the harness, not to the plugin. The plugin is the
-// imported `.js` and nothing else, so there is no plugin Item anywhere in this
-// tree, and there would be none in a credential dialog either.
+// It is also the reference for how the host is meant to drive this plugin.
+// The plugin returns a frame as numbers. The harness owns the Canvas, owns the
+// palette, and does the drawing. It never hands the plugin a context, because
+// a context exposes its canvas, the canvas is an Item, and an Item's parent
+// chain reaches the password field on a credential surface.
+//
+// `paintOps` below mirrors the host painter in shell/Commons/FaceCardPainter.js.
 //
 //   quickshell -p Preview.qml
 ShellRoot {
@@ -30,14 +33,41 @@ ShellRoot {
     onTriggered: root.clock += frameTime * 1000
   }
 
-  function specFor(state, elapsed) {
-    return {
-      state: state,
-      clock: root.clock,
-      elapsed: elapsed,
-      accent: root.accent,
-      foreground: root.foreground,
-      errorColor: root.errorColor
+  function roleColor(role, alpha) {
+    var c = role === 2 ? root.errorColor : (role === 1 ? root.foreground : root.accent)
+    return Qt.rgba(c.r, c.g, c.b, Math.max(0, Math.min(1, alpha)))
+  }
+
+  // Mirrors the host painter. Ops are numbers; anything else is not drawn.
+  function paintOps(ctx, size, list) {
+    ctx.reset()
+    ctx.lineCap = "round"
+    ctx.lineJoin = "round"
+    for (var i = 0; i < list.length; i++) {
+      var op = list[i]
+      if (op[0] === 0) {
+        ctx.strokeStyle = root.roleColor(op[1], op[2])
+        ctx.lineWidth = op[3]
+        ctx.beginPath()
+        var cmds = op[4]
+        for (var c = 0; c < cmds.length; c++) {
+          var k = cmds[c]
+          if (k[0] === 0) ctx.moveTo(k[1], k[2])
+          else if (k[0] === 1) ctx.lineTo(k[1], k[2])
+          else if (k[0] === 2) ctx.quadraticCurveTo(k[1], k[2], k[3], k[4])
+          else if (k[0] === 3) ctx.arc(k[1], k[2], k[3], k[4], k[5])
+        }
+        ctx.stroke()
+      } else if (op[0] === 1) {
+        ctx.fillStyle = root.roleColor(op[1], op[2])
+        ctx.fillRect(op[3], op[4], op[5], op[6])
+      } else if (op[0] === 2) {
+        var g = ctx.createLinearGradient(0, op[8], 0, op[9])
+        g.addColorStop(0, root.roleColor(op[1], op[2]))
+        g.addColorStop(1, root.roleColor(op[1], op[3]))
+        ctx.fillStyle = g
+        ctx.fillRect(op[4], op[5], op[6], op[7])
+      }
     }
   }
 
@@ -51,7 +81,8 @@ ShellRoot {
     renderTarget: Canvas.Image
     renderStrategy: Canvas.Cooperative
 
-    onPaint: FaceCard.render(getContext("2d"), side, root.specFor(state_, elapsed))
+    onPaint: root.paintOps(getContext("2d"), side,
+      FaceCard.frame(side, { state: state_, clock: root.clock, elapsed: elapsed }))
     onElapsedChanged: requestPaint()
     onState_Changed: requestPaint()
     Component.onCompleted: requestPaint()
