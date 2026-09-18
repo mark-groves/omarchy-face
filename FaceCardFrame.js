@@ -30,6 +30,22 @@
 //
 // Hints, glyphs, card geometry and the failure shake stay host-owned.
 
+// --- the op vocabulary the host replays ------------------------------------
+
+var ROLE_ACCENT = 0
+var ROLE_FG = 1
+var ROLE_ERROR = 2
+
+var OP_PATH = 0   // [OP_PATH, role, alpha, lineWidth, cmds]
+var OP_RECT = 1   // [OP_RECT, role, alpha, x, y, w, h]
+var OP_GRAD = 2   // [OP_GRAD, role, alphaFrom, alphaTo, x, y, w, h, yFrom, yTo]
+
+// Path commands, all numeric:
+//   [0, x, y]                 moveTo
+//   [1, x, y]                 lineTo
+//   [2, cx, cy, x, y]         quadraticCurveTo
+//   [3, cx, cy, r, a0, a1]    arc
+
 function mulberry32(a) {
   return function () {
     a |= 0
@@ -785,20 +801,6 @@ function holdMs(state) {
 }
 
 // --- the value-spec boundary ------------------------------------------------
-
-var ROLE_ACCENT = 0
-var ROLE_FG = 1
-var ROLE_ERROR = 2
-
-var OP_PATH = 0   // [OP_PATH, role, alpha, lineWidth, cmds]
-var OP_RECT = 1   // [OP_RECT, role, alpha, x, y, w, h]
-var OP_GRAD = 2   // [OP_GRAD, role, alphaFrom, alphaTo, x, y, w, h, yFrom, yTo]
-
-// Path commands, all numeric:
-//   [0, x, y]                 moveTo
-//   [1, x, y]                 lineTo
-//   [2, cx, cy, x, y]         quadraticCurveTo
-//   [3, cx, cy, r, a0, a1]    arc
 
 // Stands in for a 2D context so the drawing code above is unchanged, and
 // records what it would have drawn instead of drawing it.
