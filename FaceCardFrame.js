@@ -1690,13 +1690,9 @@ function holoFeatures() {
       pts.push(onSurface(e * 0.25 + Math.cos(a) * 0.10, -0.18 + Math.sin(a) * 0.045))
     }
     f.push(pts)
-    pts = []
-    for (i = 0; i <= 6; i++) {
-      var bx = 0.13 + 0.25 * i / 6
-      pts.push(onSurface(e * bx, -0.29 - 0.025 * Math.sin(Math.PI * i / 6)))
-    }
-    f.push(pts)
   }
+  // No brow strokes: drawn brows give the mask an expression. The brow
+  // ridge is still in the relief, so the mesh carries it.
   pts = []
   for (i = 0; i <= 6; i++) pts.push(onSurface(0, mix(-0.14, 0.11, i / 6)))
   f.push(pts)
