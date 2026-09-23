@@ -19,18 +19,50 @@ ShellRoot {
   property real clock: 0
   property string cardState: "scanning"
   property real enteredAt: 0
-  property bool replay: true
+  property bool sequence: true
+  property bool dark: true
 
-  readonly property color accent: "#1e66f5"
-  readonly property color foreground: "#4c4f69"
-  readonly property color errorColor: "#d20f39"
-  readonly property color surface: "#eff1f5"
+  // Scripted walk through every state and transition, the way a lock screen
+  // sees them: scan, lock, rescan, miss.
+  readonly property var script: [
+    { s: "scanning", ms: 3400 },
+    { s: "recognized", ms: FaceCard.holdMs("recognized") + 900 },
+    { s: "scanning", ms: 3000 },
+    { s: "notRecognized", ms: FaceCard.holdMs("notRecognized") + 900 }
+  ]
+  property int scriptAt: 0
+  property real scriptEnteredAt: 0
+
+  readonly property color surface: dark ? "#16161e" : "#eff1f5"
+  readonly property color panel: dark ? "#1a1b26" : "#e6e9ef"
+  readonly property color accent: dark ? "#7aa2f7" : "#1e66f5"
+  readonly property color foreground: dark ? "#c0caf5" : "#4c4f69"
+  readonly property color errorColor: dark ? "#f7768e" : "#d20f39"
+
+  property real paintMs: 0
+  property int opCount: 0
 
   onCardStateChanged: enteredAt = clock
 
   FrameAnimation {
     running: true
-    onTriggered: root.clock += frameTime * 1000
+    onTriggered: {
+      // Capped like the host's presented-frame step, so a stall is not a jump.
+      root.clock += Math.min(frameTime * 1000, 50)
+      if (root.sequence && root.clock - root.scriptEnteredAt >= root.script[root.scriptAt].ms) {
+        root.scriptAt = (root.scriptAt + 1) % root.script.length
+        root.scriptEnteredAt = root.clock
+        root.cardState = root.script[root.scriptAt].s
+      }
+    }
+  }
+
+  function startSequence() {
+    root.sequence = true
+    root.scriptAt = 0
+    root.scriptEnteredAt = root.clock
+    root.cardState = "scanning"
+    root.enteredAt = root.clock
   }
 
   function roleColor(role, alpha) {
@@ -71,19 +103,36 @@ ShellRoot {
     }
   }
 
+  function hintFor(s) {
+    return s === "notRecognized" ? "Face not recognized"
+      : (s === "recognized" ? "Face recognized" : "Look at the camera")
+  }
+
   component Card: Canvas {
+    id: card
     property string state_: "scanning"
     property real elapsed: 0
-    property int side: 120
+    property int side: 116
+    property bool measure: false
 
     width: side
     height: side
     renderTarget: Canvas.Image
     renderStrategy: Canvas.Cooperative
 
-    onPaint: root.paintOps(getContext("2d"), side,
-      FaceCard.frame(side, { state: state_, clock: root.clock, elapsed: elapsed }))
-    onElapsedChanged: requestPaint()
+    onPaint: {
+      var began = measure ? Date.now() : 0
+      var ops = FaceCard.frame(side, { state: state_, clock: root.clock, elapsed: elapsed })
+      root.paintOps(getContext("2d"), side, ops)
+      if (measure) {
+        root.paintMs = root.paintMs * 0.9 + (Date.now() - began) * 0.1
+        root.opCount = ops.length
+      }
+    }
+    Connections {
+      target: root
+      function onClockChanged() { card.requestPaint() }
+    }
     onState_Changed: requestPaint()
     Component.onCompleted: requestPaint()
   }
@@ -96,7 +145,7 @@ ShellRoot {
     implicitWidth: chipText.implicitWidth + 20
     implicitHeight: 26
     radius: 4
-    color: chip.on ? Qt.rgba(0.12, 0.4, 0.96, 0.22) : Qt.rgba(0.3, 0.31, 0.4, 0.08)
+    color: chip.on ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
     border.width: 1
     border.color: chip.on ? root.accent : "transparent"
     Text {
@@ -116,92 +165,161 @@ ShellRoot {
 
   FloatingWindow {
     title: "omarchy-face card preview"
-    implicitWidth: 720
-    implicitHeight: 430
+    implicitWidth: 900
+    implicitHeight: 540
 
     Rectangle {
       anchors.fill: parent
       color: root.surface
 
-      Column {
-        anchors.centerIn: parent
-        spacing: 18
-
-        Row {
-          spacing: 7
-          anchors.horizontalCenter: parent.horizontalCenter
-          Repeater {
-            model: [
-              { s: "scanning", l: "Scanning" },
-              { s: "recognized", l: "Recognized" },
-              { s: "notRecognized", l: "Not recognized" }
-            ]
-            Chip {
-              label: modelData.l
-              on: root.cardState === modelData.s
-              onPicked: { root.replay = false; root.cardState = modelData.s }
-            }
-          }
+      Row {
+        id: chips
+        spacing: 7
+        anchors.top: parent.top
+        anchors.topMargin: 18
+        anchors.horizontalCenter: parent.horizontalCenter
+        Chip {
+          label: "sequence"
+          on: root.sequence
+          onPicked: root.startSequence()
+        }
+        Repeater {
+          model: [
+            { s: "scanning", l: "Scanning" },
+            { s: "recognized", l: "Recognized" },
+            { s: "notRecognized", l: "Not recognized" }
+          ]
           Chip {
-            label: "replay all"
-            on: root.replay
-            onPicked: root.replay = true
-          }
-        }
-
-        // The three states at once, each replaying on its own declared hold.
-        Row {
-          spacing: 26
-          anchors.horizontalCenter: parent.horizontalCenter
-          Repeater {
-            model: ["scanning", "recognized", "notRecognized"]
-            Column {
-              spacing: 6
-              Card {
-                side: 132
-                state_: modelData
-                elapsed: modelData === "scanning" ? 0 : (root.clock % (FaceCard.holdMs(modelData) + 900))
-              }
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: modelData === "notRecognized" ? "Face not recognized"
-                  : (modelData === "recognized" ? "Face recognized" : "Look at the camera")
-                color: modelData === "notRecognized" ? root.errorColor : root.foreground
-                font.family: "monospace"
-                font.pixelSize: 11
-              }
+            label: modelData.l
+            on: !root.sequence && root.cardState === modelData.s
+            onPicked: {
+              root.sequence = false
+              root.cardState = modelData.s
+              root.enteredAt = root.clock
             }
           }
         }
+        Chip {
+          label: root.dark ? "dark" : "light"
+          on: false
+          onPicked: root.dark = !root.dark
+        }
+      }
 
-        // The size ladder. 30 px is the lock in-field slot, 26 px the polkit
-        // glyph slot. Under 48 px the cloud is rendered as a vector glyph.
-        Row {
-          spacing: 16
-          anchors.horizontalCenter: parent.horizontalCenter
-          Repeater {
-            model: [120, 96, 64, 44, 30, 24]
-            Column {
-              spacing: 4
-              Item {
-                width: modelData
-                height: 120
-                Card {
-                  anchors.centerIn: parent
-                  side: modelData
-                  state_: root.replay ? "recognized" : root.cardState
-                  elapsed: root.replay
-                    ? (root.clock % (FaceCard.holdMs("recognized") + 900))
-                    : root.clock - root.enteredAt
+      Row {
+        anchors.top: chips.bottom
+        anchors.topMargin: 22
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: 40
+
+        // The hero: the card at a large size, walking the script.
+        Rectangle {
+          width: 330
+          height: 400
+          radius: 10
+          color: root.panel
+
+          Card {
+            id: hero
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 24
+            side: 282
+            measure: true
+            state_: root.cardState
+            elapsed: root.clock - root.enteredAt
+          }
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: hero.y + hero.height + 18
+            text: root.hintFor(root.cardState)
+            color: root.cardState === "notRecognized" ? root.errorColor : root.foreground
+            font.family: "monospace"
+            font.pixelSize: 13
+          }
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: hero.y + hero.height + 40
+            text: root.opCount + " ops · " + root.paintMs.toFixed(1) + " ms/frame"
+            color: root.foreground
+            opacity: 0.35
+            font.family: "monospace"
+            font.pixelSize: 10
+          }
+        }
+
+        Column {
+          spacing: 26
+
+          Text {
+            text: "116 px, the real lock / polkit / sudo slot"
+            color: root.foreground
+            opacity: 0.5
+            font.family: "monospace"
+            font.pixelSize: 10
+          }
+
+          // The three states at the real slot size, each replaying on its hold.
+          Row {
+            spacing: 22
+            Repeater {
+              model: ["scanning", "recognized", "notRecognized"]
+              Column {
+                spacing: 8
+                Rectangle {
+                  width: 132
+                  height: 132
+                  radius: 8
+                  color: root.panel
+                  Card {
+                    anchors.centerIn: parent
+                    side: 116
+                    state_: modelData
+                    elapsed: modelData === "scanning" ? 4000 + root.clock : (root.clock % (FaceCard.holdMs(modelData) + 900))
+                  }
+                }
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: root.hintFor(modelData)
+                  color: modelData === "notRecognized" ? root.errorColor : root.foreground
+                  font.family: "monospace"
+                  font.pixelSize: 10
                 }
               }
-              Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: modelData
-                color: root.foreground
-                opacity: 0.5
-                font.family: "monospace"
-                font.pixelSize: 10
+            }
+          }
+
+          Text {
+            text: "size ladder: chrome drops below 100 / 76 px, vector glyph below 48 px"
+            color: root.foreground
+            opacity: 0.5
+            font.family: "monospace"
+            font.pixelSize: 10
+          }
+
+          Row {
+            spacing: 16
+            Repeater {
+              model: [96, 64, 44, 30, 24]
+              Column {
+                spacing: 4
+                Item {
+                  width: modelData
+                  height: 100
+                  Card {
+                    anchors.centerIn: parent
+                    side: modelData
+                    state_: root.cardState
+                    elapsed: root.clock - root.enteredAt
+                  }
+                }
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: modelData
+                  color: root.foreground
+                  opacity: 0.5
+                  font.family: "monospace"
+                  font.pixelSize: 10
+                }
               }
             }
           }
