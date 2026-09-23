@@ -19,6 +19,9 @@
 //   clock        free-running milliseconds, drives every ambient motion
 //   elapsed      milliseconds since `state` was entered
 //   style        optional, "hud" | "radar" | "holo"; overrides STYLE below
+//   host         optional op level the host paints; 2 adds glow, additive
+//                blending and roles 3..5. Absent means a level-1 host, and
+//                the frame is exactly what a level-1 host has always drawn.
 //
 // Three styles share the op vocabulary, the timing contract and the corner
 // readouts: the Depth Lattice HUD, the Phosphor Radar and the Holographic
@@ -46,10 +49,28 @@
 var ROLE_ACCENT = 0
 var ROLE_FG = 1
 var ROLE_ERROR = 2
+// Level 2 roles, derived by the host from the theme. On a level-1 host they
+// are remapped to the foreground before they leave the module.
+var ROLE_HOT = 3    // the accent pushed toward white: the core of a lit stroke
+var ROLE_ALT = 4    // the theme's most distinct second hue
+var ROLE_ALT2 = 5   // its next most distinct hue
 
-var OP_PATH = 0   // [OP_PATH, role, alpha, lineWidth, cmds]
-var OP_RECT = 1   // [OP_RECT, role, alpha, x, y, w, h]
-var OP_GRAD = 2   // [OP_GRAD, role, alphaFrom, alphaTo, x, y, w, h, yFrom, yTo]
+var OP_PATH = 0   // [OP_PATH, role, alpha, lineWidth, cmds, glow?]
+var OP_RECT = 1   // [OP_RECT, role, alpha, x, y, w, h, glow?]
+var OP_GRAD = 2   // [OP_GRAD, role, alphaFrom, alphaTo, x, y, w, h, yFrom, yTo, glow?]
+var OP_BLEND = 3  // [OP_BLEND, mode], level 2 only: 0 normal, 1 additive
+
+// Set per frame from spec.host. When true the frame uses glow (an op's alpha
+// on the host's blurred bloom layer), additive blending and roles 3..5, and
+// drops the stacked-stroke halos a level-1 host needs to fake a glow.
+var LUMEN = false
+
+// Structural roles for secondary instrumentation. On a level-2 host they are
+// the theme's second and third hues, so the instrument reads as layered
+// systems rather than one colour; in a miss, and on a level-1 host, they are
+// the foreground they have always been. Set per frame in paintInto.
+var FG2 = 1
+var FG3 = 1
 
 // Path commands, all numeric:
 //   [0, x, y]                 moveTo
@@ -204,8 +225,8 @@ var SEG7 = {
   "L": "def", "-": "g", " ": ""
 }
 
-function buildParticles(seed) {
-  var key = "p2" + seed
+function buildParticles(seed, step) {
+  var key = "p2" + seed + ":" + step
   if (CACHE[key]) return CACHE[key]
 
   var rnd = mulberry32(seed)
@@ -221,7 +242,6 @@ function buildParticles(seed) {
   // A jittered lattice over the relief-mapped face. Shading from the surface
   // slope under a light from the upper left is what makes the sockets, the
   // nose ridge and the cheekbones appear: nothing is drawn as a feature.
-  var step = 0.066
   var lx = -0.45, ly = -0.55, lz = 0.7
   var ll = Math.hypot(lx, ly, lz)
   for (var gy = -0.8; gy <= 0.8; gy += step) {
@@ -340,21 +360,39 @@ function dragOffset(v0, tau, k) {
   return v0 * (1 - Math.exp(-k * tau)) / k
 }
 
+// Default bloom gains on a level-2 host: ordinary strokes glow faintly, halo
+// pens (which a level-1 frame draws at about 0.16 of the stroke) glow hard.
+var GLOW_CRISP = 0.5
+var GLOW_HALO = 5
+
 // Batches strokes that share a role, alpha and width into one path op.
 // Alpha is quantised into 1/32 steps, which is below what a 1 px line can
 // show and turns hundreds of mesh edges into a handful of ops.
-function pen(ctx) {
+//
+// On a level-2 host every stroke also carries a glow: `gain` times its alpha
+// by default. A halo pen (`halo` true) paints only the bloom: its strokes
+// have no sharp alpha, just glow.
+function pen(ctx, gain, halo) {
   var order = []
   var groups = {}
+  var gk = gain === undefined ? GLOW_CRISP : gain
 
   function group(role, a, w) {
     var qa = Math.round(clamp01(a) * 32) / 32
     if (qa <= 0) return null
+    var qg = 0
+    if (LUMEN) {
+      qg = Math.round(clamp01(a * gk) * 16) / 16
+      if (halo) {
+        if (qg <= 0) return null
+        qa = 0
+      }
+    }
     var qw = Math.max(0.25, Math.round(w * 4) / 4)
-    var key = role + ":" + qa + ":" + qw
+    var key = role + ":" + qa + ":" + qw + ":" + qg
     var g = groups[key]
     if (!g) {
-      g = groups[key] = { role: role, a: qa, w: qw, cmds: [] }
+      g = groups[key] = { role: role, a: qa, w: qw, g: qg, cmds: [] }
       order.push(g)
     }
     return g
@@ -388,6 +426,7 @@ function pen(ctx) {
           while (end < cmds.length && cmds[end][0] !== 0) end++
           ctx.strokeStyle = rgba(g.role, g.a)
           ctx.lineWidth = g.w
+          ctx.glow = g.g
           ctx.beginPath()
           for (var c = at; c < end; c++) {
             var k = cmds[c]
@@ -399,22 +438,38 @@ function pen(ctx) {
           at = end
         }
       }
+      ctx.glow = 0
       order = []
       groups = {}
     }
   }
 }
 
+function haloPen(ctx) { return pen(ctx, GLOW_HALO, true) }
+
+// The white-hot core colour for a stroke in `role`. A miss stays in the
+// error role, and a level-1 host has no hot role at all.
+function hotOf(role) { return role === ROLE_ERROR ? ROLE_ERROR : ROLE_HOT }
+// The theme's second and third hues, except in a miss.
+function altOf(role) { return role === ROLE_ERROR ? ROLE_ERROR : ROLE_ALT }
+function alt2Of(role) { return role === ROLE_ERROR ? ROLE_ERROR : ROLE_ALT2 }
+
 // A line with bloom: a wide faint pass under the crisp one. Two pens keep the
 // halo under every crisp stroke of the same layer.
+//
+// On a level-2 host the halo lights the bloom layer instead, and a thin hot
+// core runs down the middle of the stroke, which is what makes it read as
+// light rather than as paint.
 function glowLine(halo, crisp, role, a, w, x0, y0, x1, y1) {
   halo.line(role, a * 0.16, w * 3.6, x0, y0, x1, y1)
   crisp.line(role, a, w, x0, y0, x1, y1)
+  if (LUMEN) crisp.line(hotOf(role), a * 0.85, Math.max(0.5, w * 0.42), x0, y0, x1, y1)
 }
 
 function glowArc(halo, crisp, role, a, w, x, y, r, a0, a1) {
   halo.arc(role, a * 0.16, w * 3.6, x, y, r, a0, a1)
   crisp.arc(role, a, w, x, y, r, a0, a1)
+  if (LUMEN) crisp.arc(hotOf(role), a * 0.85, Math.max(0.5, w * 0.42), x, y, r, a0, a1)
 }
 
 var SEG_LINES = {
@@ -477,7 +532,10 @@ function paintHud(ctx, size, spec) {
   var micro = size < 48
   var hud = size >= 100
 
-  var P = buildParticles(1337)
+  // The large card on a level-2 host gets a finer lattice: about twice the
+  // points, each smaller, so the cloud reads as a dense depth scan.
+  var dense = LUMEN && size >= 160
+  var P = buildParticles(1337, dense ? 0.048 : 0.066)
   var ps = P.all
   var cx = size / 2
   var cy = size / 2
@@ -544,7 +602,7 @@ function paintHud(ctx, size, spec) {
   }
   function toPx(x, y) { return { x: cx + x * RF, y: cy + y * RF } }
 
-  var halo = pen(ctx)
+  var halo = haloPen(ctx)
   var crisp = pen(ctx)
   function flush() { halo.flush(); crisp.flush() }
 
@@ -643,7 +701,7 @@ function paintHud(ctx, size, spec) {
     for (var di = 0; di < 48; di++) {
       if (di / 48 > dashK) break
       var da = dsh + di * TAU / 48
-      crisp.arc(ROLE_FG, 0.20 * dim, hair, cx, cy, dashR, da, da + 0.055)
+      crisp.arc(FG2, (LUMEN ? 0.42 : 0.20) * dim, hair, cx, cy, dashR, da, da + 0.055)
     }
 
     // Lock clamps at the cardinals. They idle just outside the data ring and
@@ -756,7 +814,7 @@ function paintHud(ctx, size, spec) {
   }
 
   // --- the cloud --------------------------------------------------------------
-  var dotBase = Math.max(1, size * (compact ? 0.030 : 0.0168))
+  var dotBase = Math.max(1, size * (compact ? 0.030 : (dense ? 0.0128 : 0.0168)))
 
   if (!compact) {
     var meshFade = ok ? 1 - easeInOutCubic(seg(rt, 390, 620)) : 1
@@ -813,9 +871,18 @@ function paintHud(ctx, size, spec) {
       s *= 1 - gone * 0.9
     }
 
-    ctx.fillStyle = rgba(tint, alpha)
+    if (dense) alpha *= ok ? 0.62 : 0.8
+    if (LUMEN) {
+      // Each dot lights the bloom, and the crest riding the scan plane burns
+      // white-hot, so the wake reads as light sweeping across a surface.
+      ctx.glow = alpha * (0.55 + 0.45 * l)
+      ctx.fillStyle = rgba(scanning && l > 0.72 ? hotOf(tint) : tint, alpha)
+    } else {
+      ctx.fillStyle = rgba(tint, alpha)
+    }
     ctx.fillRect(pos[i2].x - s / 2, pos[i2].y - s / 2, s, s)
   }
+  ctx.glow = 0
 
   // Chromatic split on a miss: a foreground ghost of the cloud slips off
   // register while the lock tears, as a failing sensor would.
@@ -1010,10 +1077,10 @@ function paintHud(ctx, size, spec) {
     if (!scanning) vxu = mix(vxu, 0, easeInOutCubic(seg(rt, 0, 240)))
     var vh = Math.sqrt(Math.max(0, 1 - vxu * vxu)) * R
     var vx = cx + vxu * R
-    crisp.line(ROLE_FG, 0.3 * planeK, fine, vx, cy - vh, vx, cy + vh)
+    crisp.line(FG2, (LUMEN ? 0.5 : 0.3) * planeK, fine, vx, cy - vh, vx, cy + vh)
     for (var vt = -8; vt <= 8; vt++) {
       var vty = cy + vt * vh / 9
-      crisp.line(ROLE_FG, 0.35 * planeK, fine, vx, vty, vx + R * (vt % 4 === 0 ? 0.035 : 0.016), vty)
+      crisp.line(FG2, 0.35 * planeK, fine, vx, vty, vx + R * (vt % 4 === 0 ? 0.035 : 0.016), vty)
     }
     var hy0 = cy + plane.y * R
     if (Math.abs(hy0 - cy) < vh) {
@@ -1203,7 +1270,7 @@ function paintHudReadouts(p, size, state, t, rt, boot, tint) {
     if (ok) hK = mix(live, 0.55 + 0.35 * Math.cos(b * 0.9), easeOutCubic(seg(rt, 200, 620)))
     if (bad) hK = live * (1 - easeOutCubic(seg(rt, 100, 500))) * 0.8 + 0.06
     var bx = g.m + b * bw * 1.35 + bw / 2
-    p.line(ROLE_FG, 0.12 * boot, bw, bx, g.base, bx, g.base - bh)
+    p.line(FG3, 0.12 * boot, bw, bx, g.base, bx, g.base - bh)
     p.line(bad ? ROLE_ERROR : tint, 0.75 * boot, bw, bx, g.base, bx, g.base - bh * hK * boot)
   }
 
@@ -1306,7 +1373,7 @@ function readoutDetail(p, g, size, state, t, rt, tint) {
     if (ok && rt > REC_PASS) on = i % 3 !== 2
     if (bad) on = hash(Math.floor(rt / 45) * 11 + i) > 0.35
     var x = g.m + i * cell * 1.45
-    p.line(on ? (bad ? ROLE_ERROR : tint) : ROLE_FG, (on ? 0.7 : 0.12) * g.boot, g.w * 1.1, x, y, x + cell, y)
+    p.line(on ? (bad ? ROLE_ERROR : (LUMEN && i % 4 === 3 ? FG2 : tint)) : ROLE_FG, (on ? 0.7 : 0.12) * g.boot, g.w * 1.1, x, y, x + cell, y)
   }
   var rw = g.pitch * 3
   var rx = size - g.m - rw
@@ -1315,7 +1382,7 @@ function readoutDetail(p, g, size, state, t, rt, tint) {
   for (var k = 0; k <= 20; k++) {
     var tx = rx + rw * k / 20
     var th = size * (k % 5 === 0 ? 0.012 : 0.006)
-    p.line(ROLE_FG, 0.28 * g.boot, fine, tx, ry, tx, ry + th)
+    p.line(FG3, 0.28 * g.boot, fine, tx, ry, tx, ry + th)
   }
   var caret = ok ? mix(frac(t / 1300), 1, easeOutCubic(seg(rt, 150, 700))) : frac(t / 1300)
   if (bad) caret = clamp01(frac((t - rt) / 1300) + (hash(Math.floor(rt / 50)) - 0.5) * 0.4)
@@ -1330,7 +1397,7 @@ function readoutDetail(p, g, size, state, t, rt, tint) {
     for (var wd = 0; wd < 4; wd++) {
       var wl = size * (0.008 + 0.018 * hash(seed + wd * 3))
       if (xx + wl > g.m + size * 0.085) break
-      p.line(bad ? ROLE_ERROR : (wd === 0 ? tint : ROLE_FG), (wd === 0 ? 0.6 : 0.3) * g.boot, fine, xx, lyy, xx + wl, lyy)
+      p.line(bad ? ROLE_ERROR : (wd === 0 ? tint : FG2), (wd === 0 ? 0.6 : 0.3) * g.boot, fine, xx, lyy, xx + wl, lyy)
       xx += wl + size * 0.006
     }
   }
@@ -1344,14 +1411,14 @@ function readoutDetail(p, g, size, state, t, rt, tint) {
     if (bad) v = (hash(Math.floor(rt / 40) * 31 + ti) - 0.5) * 2
     tr.push([rx + rw * tu, ty + v * size * 0.008])
   }
-  p.poly(bad ? ROLE_ERROR : tint, 0.7 * g.boot, fine, tr)
+  p.poly(bad ? ROLE_ERROR : FG2 === ROLE_ALT ? ROLE_ALT : tint, 0.7 * g.boot, fine, tr)
 
   var cm = size * 0.012
   var corners = [[cm, cm], [size - cm, cm], [cm, size - cm], [size - cm, size - cm]]
   for (var c = 0; c < 4; c++) {
     var q = corners[c]
-    p.line(ROLE_FG, 0.3 * g.boot, fine, q[0] - cm * 0.6, q[1], q[0] + cm * 0.6, q[1])
-    p.line(ROLE_FG, 0.3 * g.boot, fine, q[0], q[1] - cm * 0.6, q[0], q[1] + cm * 0.6)
+    p.line(FG3, 0.3 * g.boot, fine, q[0] - cm * 0.6, q[1], q[0] + cm * 0.6, q[1])
+    p.line(FG3, 0.3 * g.boot, fine, q[0], q[1] - cm * 0.6, q[0], q[1] + cm * 0.6)
   }
 }
 
@@ -1377,7 +1444,7 @@ function telemetryColumns(p, cx, cy, R, size, state, t, rt, boot, tint, xu) {
       if (edge <= 0) continue
       var seed = (base + r) * 7 + (side + 1) * 131
       var hot = ok ? rt > 700 && (r + side) % 3 === 0 : (Math.floor(tt / 190) % rows === r)
-      var role = bad ? ROLE_ERROR : (hot ? tint : ROLE_FG)
+      var role = bad ? ROLE_ERROR : (hot ? tint : FG3)
       var a = (hot ? 0.75 : 0.3) * edge * boot
       if (digits) {
         seg7(p, role, a, 0, fine, x, y - R * 0.018, R * 0.017, R * 0.034, R * 0.026, hex4(hash(seed) * 65535).slice(1), 0)
@@ -1392,10 +1459,10 @@ function telemetryColumns(p, cx, cy, R, size, state, t, rt, boot, tint, xu) {
 // HUD backplate: a fine polar grid behind the cloud, with registration
 // crosses at its major intersections.
 function hudGraticule(p, cx, cy, R, fine, hair, boot, tint, t) {
-  for (var r = 1; r <= 5; r++) p.arc(ROLE_FG, 0.085 * boot, fine, cx, cy, R * r * 0.15, 0, TAU)
+  for (var r = 1; r <= 5; r++) p.arc(FG3, 0.085 * boot, fine, cx, cy, R * r * 0.15, 0, TAU)
   for (var s = 0; s < 24; s++) {
     var a = s * TAU / 24
-    p.line(ROLE_FG, (s % 2 ? 0.045 : 0.075) * boot, fine,
+    p.line(FG3, (s % 2 ? 0.045 : 0.075) * boot, fine,
       cx + Math.cos(a) * R * 0.1, cy + Math.sin(a) * R * 0.1, cx + Math.cos(a) * R * 0.76, cy + Math.sin(a) * R * 0.76)
   }
   var k = R * 0.018
@@ -1438,7 +1505,7 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
       v = v * (1 - drain) + (hash(Math.floor(rt / 45) * 7 + i) > 0.86 ? 0.9 : 0.05) * drain
     }
     var len = R * 0.075 * v
-    crisp.line(tint, (0.24 + 0.62 * v) * dim, i % 2 === 0 ? hair : fine,
+    crisp.line(LUMEN && v <= 0.62 && tint !== ROLE_ERROR ? FG2 : tint, (0.24 + 0.62 * v) * dim, i % 2 === 0 ? hair : fine,
       cx + Math.cos(ang) * rb, cy + Math.sin(ang) * rb, cx + Math.cos(ang) * (rb + len), cy + Math.sin(ang) * (rb + len))
   }
 
@@ -1448,7 +1515,7 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
     if (vi / 144 > boot) break
     var va = vr + vi * TAU / 144
     var vl = R * (vi % 12 === 0 ? 0.03 : 0.016)
-    crisp.line(ROLE_FG, (vi % 12 === 0 ? 0.55 : 0.3) * dim * (1 + passFlash), fine,
+    crisp.line(FG2, (vi % 12 === 0 ? 0.55 : 0.3) * dim * (1 + passFlash), fine,
       cx + Math.cos(va) * R * 0.936, cy + Math.sin(va) * R * 0.936,
       cx + Math.cos(va) * (R * 0.936 + vl), cy + Math.sin(va) * (R * 0.936 + vl))
   }
@@ -1472,7 +1539,7 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
   if (bad) sp1 = t0 / 350 + (hash(Math.floor(rt / 50)) - 0.5) * 3
   crisp.arc(tint, 0.7 * dim * boot * spA, hair, cx, cy, R * 0.889, sp1, sp1 + 0.35)
   crisp.arc(tint, 0.35 * dim * boot * spA, fine, cx, cy, R * 0.889, sp1 + Math.PI, sp1 + Math.PI + 0.2)
-  for (var sq = 0; sq < 6; sq++) crisp.arc(ROLE_FG, 0.3 * dim * boot, fine, cx, cy, R * 0.899, sp2 + sq * TAU / 6, sp2 + sq * TAU / 6 + 0.12)
+  for (var sq = 0; sq < 6; sq++) crisp.arc(FG3, 0.3 * dim * boot, fine, cx, cy, R * 0.899, sp2 + sq * TAU / 6, sp2 + sq * TAU / 6 + 0.12)
 
   // Satellites on the dashed ring, each with a fading tail.
   var sats = [[t / 1300, 1], [-t / 2900 + 1, -1], [t / 4700 + 3, 1]]
@@ -1760,7 +1827,7 @@ function paintRadar(ctx, size, spec) {
   var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
   var tears = bad ? glitchTears(rt) : []
 
-  var halo = pen(ctx)
+  var halo = haloPen(ctx)
   var crisp = pen(ctx)
   function flush() { halo.flush(); crisp.flush() }
 
@@ -1821,7 +1888,7 @@ function paintRadar(ctx, size, spec) {
         if (st / nt > seg(boot, 0, 0.9)) break
         var sa0 = st * TAU / nt
         var tl = R * (st % 6 === 0 ? 0.022 : 0.011)
-        crisp.line(ROLE_FG, 0.16 * boot, fine,
+        crisp.line(FG3, 0.16 * boot, fine,
           cx + Math.cos(sa0) * rad, cy + Math.sin(sa0) * rad,
           cx + Math.cos(sa0) * (rad - tl), cy + Math.sin(sa0) * (rad - tl))
       }
@@ -1830,7 +1897,7 @@ function paintRadar(ctx, size, spec) {
     for (var sp = 0; sp < 36; sp++) {
       var sa = sp * TAU / 36
       var heavy = sp % 3 === 0
-      crisp.line(ROLE_FG, (heavy ? 0.075 : 0.035) * boot, heavy ? hair : fine,
+      crisp.line(FG3, (heavy ? 0.075 : 0.035) * boot, heavy ? hair : fine,
         cx + Math.cos(sa) * R * 0.05, cy + Math.sin(sa) * R * 0.05,
         cx + Math.cos(sa) * R * 0.975, cy + Math.sin(sa) * R * 0.975)
     }
@@ -1864,7 +1931,7 @@ function paintRadar(ctx, size, spec) {
       var mta = mt * TAU / 180
       var offd = Math.abs(((mta % (Math.PI / 2)) + Math.PI / 2) % (Math.PI / 2) - Math.PI / 4)
       if (offd < 0.3) continue
-      crisp.line(ROLE_FG, 0.2 * boot, fine,
+      crisp.line(FG3, 0.2 * boot, fine,
         cx + Math.cos(mta) * R * 1.075, cy + Math.sin(mta) * R * 1.075,
         cx + Math.cos(mta) * R * (mt % 5 === 0 ? 1.1 : 1.088), cy + Math.sin(mta) * R * (mt % 5 === 0 ? 1.1 : 1.088))
     }
@@ -1935,10 +2002,10 @@ function paintRadar(ctx, size, spec) {
       var lim = secC + (sl ? 1 : -1) * 0.85
       for (var dd = 0; dd < 12; dd += 2) {
         var d0 = R * (0.1 + dd * 0.07), d1 = R * (0.1 + (dd + 1) * 0.07)
-        crisp.line(ROLE_FG, 0.2 * secK, fine, cx + Math.cos(lim) * d0, cy + Math.sin(lim) * d0, cx + Math.cos(lim) * d1, cy + Math.sin(lim) * d1)
+        crisp.line(FG2, 0.2 * secK, fine, cx + Math.cos(lim) * d0, cy + Math.sin(lim) * d0, cx + Math.cos(lim) * d1, cy + Math.sin(lim) * d1)
       }
     }
-    crisp.arc(ROLE_FG, 0.22 * secK, fine, cx, cy, R * 0.94, secC - 0.85, secC + 0.85)
+    crisp.arc(FG2, 0.22 * secK, fine, cx, cy, R * 0.94, secC - 0.85, secC + 0.85)
     for (var sb = 0; sb < 10; sb++) {
       var sba = secBeam - Math.cos(t / 850) * sb * 0.012
       crisp.line(tint, 0.3 * Math.exp(-sb / 3) * secK, fine, cx + Math.cos(sba) * R * 0.12, cy + Math.sin(sba) * R * 0.12,
@@ -1987,7 +2054,15 @@ function paintRadar(ctx, size, spec) {
     var qr = q.r * R
     if (bad && jamK > 0) qr += (hash(jitStep * 7 + i) - 0.5) * 0.05 * R * jamK
     {
-      crisp.arc(tint, alpha, lw, cx + ox, cy, qr, q.a - w, q.a + w)
+      var qrole = tint
+      if (LUMEN) {
+        // P7-style phosphor: a fresh return flashes white-hot, then decays
+        // through the accent into the theme's second hue.
+        alpha *= ok ? 0.72 : 0.85
+        if (echo > 0.3 || (scanning && fresh > 0.72)) qrole = hotOf(tint)
+        else if (fresh < 0.3 && !ok) qrole = altOf(tint)
+      }
+      crisp.arc(qrole, alpha, lw, cx + ox, cy, qr, q.a - w, q.a + w)
       // Phosphor bloom on fresh returns.
       if (!compact && q.kind === "topo" && fresh > 0.6 && i % 2 === 0) halo.arc(tint, alpha * 0.2 * fresh, lw * 4, cx + ox, cy, qr, q.a - w, q.a + w)
     }
@@ -2130,8 +2205,8 @@ function paintRadarReadouts(p, size, state, t, rt, boot, tint, arm, returns, age
   var wA = size * 0.23
   var hA = size * 0.075
   var yb = g.base
-  for (var gx = 0; gx <= 6; gx++) p.line(ROLE_FG, 0.1 * boot, fine, x0 + wA * gx / 6, yb, x0 + wA * gx / 6, yb - hA)
-  for (var gy = 1; gy <= 2; gy++) p.line(ROLE_FG, 0.1 * boot, fine, x0, yb - hA * gy / 3, x0 + wA, yb - hA * gy / 3)
+  for (var gx = 0; gx <= 6; gx++) p.line(FG3, 0.1 * boot, fine, x0 + wA * gx / 6, yb, x0 + wA * gx / 6, yb - hA)
+  for (var gy = 1; gy <= 2; gy++) p.line(FG3, 0.1 * boot, fine, x0, yb - hA * gy / 3, x0 + wA, yb - hA * gy / 3)
   p.line(ROLE_FG, 0.22 * boot, g.hair, x0, yb, x0 + wA, yb)
   var n = 48
   var noiseStep = Math.floor(t / 50)
@@ -2604,7 +2679,7 @@ function paintHolo(ctx, size, spec) {
     return a
   }
 
-  var halo = pen(ctx)
+  var halo = haloPen(ctx)
   var crisp = pen(ctx)
   function flush() { halo.flush(); crisp.flush() }
 
@@ -2702,7 +2777,7 @@ function paintHolo(ctx, size, spec) {
           var front = clamp01((Z + 0.8) / 1.6)
           al.push((0.05 + 0.32 * front * front) * cageA * (dashed && i % 2 ? 0 : 1))
         }
-        strip(crisp, tint, fine, pts, al)
+        strip(crisp, LUMEN ? altOf(tint) : tint, fine, pts, al)
       }
       for (var cm = 0; cm < 12; cm++) {
         var ph = cm * TAU / 12
@@ -2841,7 +2916,7 @@ function paintHolo(ctx, size, spec) {
   }
   for (var ln = 0; ln < mesh.length; ln++) {
     var L = mesh[ln]
-    var pts = [], al = [], cpts = [], cal = [], rpts = [], ral = []
+    var pts = [], al = [], cpts = [], cal = [], rpts = [], ral = [], hal = []
     for (var sj = 0; sj < L.length; sj++) {
       var Q = project(L[sj])
       var x0 = Q.x, y0 = Q.y
@@ -2867,6 +2942,7 @@ function paintHolo(ctx, size, spec) {
       var a = baseA * flick * (0.06 + fr * 0.34 * (0.2 + 1.1 * L[sj][6]) + 0.42 * rim) + bandBoost(y0) * boot * (0.25 + 0.75 * fr)
       if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
       al.push(a)
+      hal.push(bad ? 0 : baseA * flick * 0.7 * rim)
       cal.push(a * 0.45 * fr)
       ral.push(a * 0.38 * fr)
     }
@@ -2882,10 +2958,11 @@ function paintHolo(ctx, size, spec) {
     // The offset copy rides every third slice; that is enough to read as
     // colour fringing at a fraction of the cost.
     if (!compact && chroma > 0.02 && ln < nSl && ln % 3 === 0) {
-      strip(crisp, ROLE_FG, fine, cpts, cal)
-      // The opposite fringe in the error colour, which is what makes the
-      // split read as chromatic. A miss keeps only the foreground fringe.
-      if (!bad) strip(crisp, ROLE_ERROR, fine, rpts, ral)
+      strip(crisp, LUMEN ? FG2 : ROLE_FG, fine, cpts, cal)
+      // The opposite fringe in a second colour, which is what makes the
+      // split read as chromatic: the error colour on a level-1 host, the
+      // theme's third hue on a level-2 one. A miss keeps only one fringe.
+      if (!bad) strip(crisp, LUMEN ? FG3 : ROLE_ERROR, fine, rpts, ral)
     }
     if (ok && ln < nSl) {
       // The lock solidifies the head from the top down behind the scanner ring.
@@ -2894,6 +2971,8 @@ function paintHolo(ctx, size, spec) {
       for (var sa = 0; sa < al.length; sa++) al[sa] *= sol
     }
     strip(crisp, tint, ln < nSl && ln % 2 === 0 ? mw2 * 1.3 : mw2, pts, al)
+    // The rim light burns white-hot where the surface turns away.
+    if (LUMEN && !bad) strip(crisp, hotOf(tint), fine, pts, hal)
   }
   crisp.flush()
 
@@ -2916,9 +2995,11 @@ function paintHolo(ctx, size, spec) {
         var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((CQ.f - 0.05) / 0.3) * cloudA * flick
         if (pa3 <= 0.02) continue
         var CP = toPx(cxq, cyq)
-        ctx.fillStyle = rgba(tint, pa3)
+        if (LUMEN) ctx.glow = pa3 * 0.8
+        ctx.fillStyle = rgba(LUMEN && shimmer > 0.85 && !bad ? hotOf(tint) : tint, pa3)
         ctx.fillRect(CP.x - dsz / 2, CP.y - dsz / 2, dsz, dsz)
       }
+      ctx.glow = 0
     }
   }
 
@@ -2929,7 +3010,7 @@ function paintHolo(ctx, size, spec) {
   for (var oj2 = 0; oj2 < silR.length; oj2++) outline.push([silR[oj2].x, silR[oj2].y])
   for (var oc = 0; oc < outline.length; oc++) choutline.push([outline[oc][0] + chX * 1.5, outline[oc][1] + chY * 1.5])
   var outA = (0.4 + 0.2 * solid + 0.2 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
-  if (!compact && chroma > 0.02) crisp.poly(ROLE_FG, outA * 0.3, fine, choutline)
+  if (!compact && chroma > 0.02) crisp.poly(LUMEN ? FG2 : ROLE_FG, outA * 0.3, fine, choutline)
   if (bad && frag > 0.05) {
     for (var od = 0; od + 1 < outline.length; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
   } else {
@@ -3215,6 +3296,9 @@ function paintInto(ctx, size, spec) {
       s = { state: "notRecognized", clock: tf + fr * km, elapsed: fr * km }
     }
   }
+  var missing = s.state === "notRecognized"
+  FG2 = LUMEN && !missing ? ROLE_ALT : ROLE_FG
+  FG3 = LUMEN && !missing ? ROLE_ALT2 : ROLE_FG
   if (style === "radar") paintRadar(ctx, size, s)
   else if (style === "holo") paintHolo(ctx, size, s)
   else paintHud(ctx, size, s)
@@ -3237,12 +3321,26 @@ function recorder() {
   var ops = []
   var cmds = null
   var stack = []
-  var st = { stroke: [ROLE_ACCENT, 1], fill: [ROLE_ACCENT, 1], width: 1 }
+  var st = { stroke: [ROLE_ACCENT, 1], fill: [ROLE_ACCENT, 1], width: 1, glow: 0 }
+
+  // Roles past the error role only exist on a level-2 host.
+  function role(r) { return LUMEN || r <= ROLE_ERROR ? r : ROLE_FG }
+  function lit(op) {
+    if (LUMEN && st.glow > 0) op.push(clamp01(st.glow))
+    ops.push(op)
+  }
 
   var rec = {
     ops: ops,
-    reset: function () { ops.length = 0; cmds = null },
-    save: function () { stack.push({ stroke: st.stroke, fill: st.fill, width: st.width }) },
+    // A dark card adds light where strokes cross, so dense regions run hot.
+    // The host ignores additive blending on a light surface.
+    reset: function () {
+      ops.length = 0
+      cmds = null
+      st.glow = 0
+      if (LUMEN) ops.push([OP_BLEND, 1])
+    },
+    save: function () { stack.push({ stroke: st.stroke, fill: st.fill, width: st.width, glow: st.glow }) },
     restore: function () { var p = stack.pop(); if (p) st = p },
     beginPath: function () { cmds = [] },
     moveTo: function (x, y) { if (cmds) cmds.push([0, x, y]) },
@@ -3250,17 +3348,19 @@ function recorder() {
     quadraticCurveTo: function (cx, cy, x, y) { if (cmds) cmds.push([2, cx, cy, x, y]) },
     arc: function (cx, cy, r, a0, a1) { if (cmds) cmds.push([3, cx, cy, r, a0, a1]) },
     stroke: function () {
-      if (cmds && cmds.length) ops.push([OP_PATH, st.stroke[0], st.stroke[1], st.width, cmds])
+      if (cmds && cmds.length) lit([OP_PATH, role(st.stroke[0]), st.stroke[1], st.width, cmds])
       cmds = null
     },
     fillRect: function (x, y, w, h) {
       if (st.fill && st.fill.__grad) {
         var g = st.fill
-        ops.push([OP_GRAD, g.role, g.from, g.to, x, y, w, h, g.y0, g.y1])
+        lit([OP_GRAD, role(g.role), g.from, g.to, x, y, w, h, g.y0, g.y1])
       } else {
-        ops.push([OP_RECT, st.fill[0], st.fill[1], x, y, w, h])
+        lit([OP_RECT, role(st.fill[0]), st.fill[1], x, y, w, h])
       }
     },
+    // Level 2 only: switch later ops between normal and additive light.
+    blend: function (mode) { if (LUMEN) ops.push([OP_BLEND, mode ? 1 : 0]) },
     createLinearGradient: function (x0, y0, x1, y1) {
       var g = { __grad: true, role: ROLE_ACCENT, from: 0, to: 0, y0: y0, y1: y1 }
       g.addColorStop = function (at, token) {
@@ -3279,11 +3379,14 @@ function recorder() {
   prop("lineCap", function () {})
   prop("lineJoin", function () {})
   prop("globalAlpha", function () {})
+  // Alpha of later ops on the host's bloom layer. Ignored on a level-1 host.
+  prop("glow", function (v) { st.glow = Number(v) || 0 })
   return rec
 }
 
 // One frame as data. Numbers and small arrays of numbers, nothing else.
 function frame(size, spec) {
+  LUMEN = !!spec && Number(spec.host) >= 2
   var rec = recorder()
   paintInto(rec, size, spec)
   return rec.ops
