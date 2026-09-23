@@ -2155,22 +2155,25 @@ function paintRadarReadouts(p, size, state, t, rt, boot, tint, arm, returns, age
 
 // --- Holographic Wireframe ---------------------------------------------------
 //
-// A projected face mask, built in layers: a relief-mapped half ellipsoid
-// wired by a dense latitude/longitude mesh in true perspective, a vertex
-// point cloud, iso-depth contours of the relief, a cage turning the other
-// way outside it, and two tilted orbit rings. It rises from an emitter
-// through projection beams and a volumetric cone. It turns no more than about
-// 22 degrees, with a bold silhouette, so it stays a legible face at 116 px
-// while the parallax sells the depth. The mouth is a level line on the
-// surface in every state.
+// A projected head, built in layers: structured-light slices round a whole
+// head and neck in true perspective, lit from the upper left, with the
+// silhouette traced from the slices and a rim light where the surface turns
+// away. Over it, a vertex point cloud; outside it, a cage turning the other
+// way and two tilted orbit rings. It rises from an emitter through projection
+// beams and a volumetric cone, and turns far enough that the brow, nose and
+// jaw show in the slices and the skull behind them shows in the outline.
 
+// The mask's ellipsoid, which the HUD and the radar still lay their relief on.
 var HOLO_A = 0.60
 var HOLO_B = 0.78
 var HOLO_C = 0.55
-var HOLO_CY = -0.10
+var HOLO_CY = -0.06
+// The projected rig is drawn a little under the disc radius so the crown
+// clears the corner readouts.
+var HOLO_K = 0.86
 var HOLO_F = 3.4
 var HOLO_BAND_MS = 2300
-var HOLO_SLICES = 24
+var HOLO_SLICES = 26
 
 // The face's bone structure as relief on the mask. Every style draws the
 // face from this surface alone (its depth, slope and contours), never from
@@ -2214,14 +2217,6 @@ function holoTaper(y) {
   return base * (1 + 0.05 * Math.exp(-((y - 0.05) / 0.16) * ((y - 0.05) / 0.16)))
 }
 
-function holoSurface(u, v) {
-  var cv = Math.cos(v)
-  var y = HOLO_B * Math.sin(v)
-  var x = HOLO_A * Math.sin(u) * cv * holoTaper(y)
-  var z = HOLO_C * Math.cos(u) * cv + holoRelief(x, y) * HOLO_RELIEF * Math.max(0, Math.cos(u))
-  return [x, y, z]
-}
-
 function holoInside(x, y) {
   var xt = x / holoTaper(y)
   return 1 - (xt / HOLO_A) * (xt / HOLO_A) - (y / HOLO_B) * (y / HOLO_B)
@@ -2236,69 +2231,161 @@ function classicZAt(x, y) {
   return HOLO_C * Math.sqrt(Math.max(0, holoInside(x, y))) + reliefClassic(x, y)
 }
 
-function holoYaw(t) { return 0.38 * Math.sin(t / 6400 * TAU) + 0.04 * Math.sin(t / 1900 * TAU) }
-// The camera sits a little above the mask, so the slices bend with the
+// The head turns far enough, about 45 degrees, that the nose leaves the
+// cheek line and the skull shows behind the face: a turning profile is what
+// reads as a person rather than an egg.
+function holoYaw(t) { return 0.76 * Math.sin(t / 6400 * TAU) + 0.04 * Math.sin(t / 1900 * TAU) }
+// The camera sits a little above the head, so the slices bend with the
 // relief even face-on.
 var HOLO_TILT = -0.18
-// The projected mask exaggerates the relief so the slices visibly bend over
-// the brow, nose, cheekbones and chin at 116 px.
-var HOLO_RELIEF = 2.0
 
 function holoPitch(t) { return HOLO_TILT + 0.08 * Math.sin(t / 8100 * TAU + 0.7) }
 
-// Slope shading under a light from the upper left, so the relief (sockets,
-// nose ridge, cheekbones) shows in the line brightness even face-on.
-function holoShade(x, y) {
-  if (holoInside(x, y) <= 0) return 0.5
-  var e = 0.012
-  var zx = (holoZAt(x + e, y) - holoZAt(x - e, y)) / (2 * e)
-  var zy = (holoZAt(x, y + e) - holoZAt(x, y - e)) / (2 * e)
-  var nl = Math.hypot(zx, zy, 1)
-  return clamp01(0.5 + 0.7 * ((0.45 * zx + 0.55 * zy + 0.7) / nl - 0.55) * 1.6)
+// --- the projected head ---------------------------------------------------------
+//
+// A whole head, not a mask: lofted between a side profile (front and back of
+// the skull) and a front profile (its half width), sampled from crown to
+// chin. At each height the cross-section is a squared-off ellipse from face
+// to nape, with the face's relief laid on its front and the ears on its
+// sides. A cranium that runs back behind the face, a jaw, ears and a neck are
+// what make it read as a person when it turns; a symmetric shell reads as an
+// egg.
+var HEAD_Y = [-0.78, -0.72, -0.6, -0.45, -0.3, -0.15, 0, 0.15, 0.3, 0.42, 0.52, 0.6, 0.66]
+var HEAD_FRONT = [-0.08, 0.14, 0.3, 0.4, 0.45, 0.43, 0.44, 0.45, 0.44, 0.41, 0.39, 0.34, 0.18]
+var HEAD_BACK = [-0.08, -0.34, -0.52, -0.62, -0.64, -0.6, -0.52, -0.42, -0.32, -0.24, -0.18, -0.14, -0.1]
+var HEAD_HALF = [0, 0.28, 0.44, 0.52, 0.55, 0.55, 0.54, 0.5, 0.44, 0.37, 0.29, 0.2, 0.08]
+var HEAD_TOP = -0.78
+var HEAD_CHIN = 0.66
+var NECK_TOP = 0.56
+var NECK_BASE = 1.0
+
+function profileAt(ys, vs, y) {
+  var n = ys.length
+  if (y <= ys[0]) return vs[0]
+  if (y >= ys[n - 1]) return vs[n - 1]
+  var i = 0
+  while (i < n - 2 && y > ys[i + 1]) i++
+  var k = (y - ys[i]) / (ys[i + 1] - ys[i])
+  var p0 = vs[Math.max(0, i - 1)], p1 = vs[i], p2 = vs[i + 1], p3 = vs[Math.min(n - 1, i + 2)]
+  var k2 = k * k, k3 = k2 * k
+  return 0.5 * (2 * p1 + (p2 - p0) * k + (2 * p0 - 5 * p1 + 4 * p2 - p3) * k2 + (3 * p1 - p0 - 3 * p2 + p3) * k3)
 }
 
+// The face on the front of the head: brow ridge, eye sockets, the nose from
+// bridge to tip, cheekbones, lips and chin. It only ever shows as the way the
+// slices bend and shade, never as drawn features.
+function headRelief(x, y) {
+  var ax = Math.abs(x)
+  function g(dx, sx, dy, sy) { return Math.exp(-((dx / sx) * (dx / sx) + (dy / sy) * (dy / sy))) }
+  var brow = 0.045 * g(ax - 0.18, 0.17, y + 0.29, 0.05)
+  var sock = -0.085 * g(ax - 0.2, 0.1, y + 0.16, 0.075)
+  var bridge = 0.05 * g(x, 0.04, y + 0.1, 0.08)
+  var nose = 0.19 * g(x, 0.05, y - 0.06, 0.12)
+  var tip = 0.07 * g(x, 0.045, y - 0.15, 0.045)
+  var wings = 0.035 * g(ax - 0.075, 0.035, y - 0.16, 0.035)
+  var cheek = 0.05 * g(ax - 0.29, 0.1, y - 0.02, 0.09)
+  var hollow = -0.035 * g(ax - 0.33, 0.08, y - 0.28, 0.1)
+  var lips = 0.03 * g(x, 0.13, y - 0.35, 0.05)
+  var chin = 0.045 * g(x, 0.13, y - 0.56, 0.065)
+  return brow + sock + bridge + nose + tip + wings + cheek + hollow + lips + chin
+}
+
+function sgnPow(a, p) { return a < 0 ? -Math.pow(-a, p) : Math.pow(a, p) }
+
+// A point on the head at bearing u (0 faces the viewer) and height y.
+function headPoint(u, y) {
+  var F = profileAt(HEAD_Y, HEAD_FRONT, y)
+  var B = profileAt(HEAD_Y, HEAD_BACK, y)
+  var W = Math.max(0, profileAt(HEAD_Y, HEAD_HALF, y))
+  var su = Math.sin(u), cu = Math.cos(u)
+  var ear = 0.11 * Math.exp(-(((Math.abs(u) - 1.72) / 0.22) * ((Math.abs(u) - 1.72) / 0.22) + ((y + 0.06) / 0.12) * ((y + 0.06) / 0.12)))
+  var x = W * sgnPow(su, 0.78) * (1 + ear)
+  var z = (F + B) / 2 + (F - B) / 2 * sgnPow(cu, 0.85)
+  var front = Math.max(0, cu)
+  z += headRelief(x, y) * front * front
+  return [x, y, z]
+}
+
+// The neck, a flared cylinder set back under the jaw, down to the emitter.
+function neckPoint(u, y) {
+  var k = clamp01((y - NECK_TOP) / (NECK_BASE - NECK_TOP))
+  var flare = 1 + 0.3 * k * k * k
+  return [Math.sin(u) * 0.19 * flare, y, -0.1 + Math.cos(u) * 0.17 * flare]
+}
+
+// A vertex with its outward normal and a slope shade under a light from the
+// upper left: [x, y, z, nx, ny, nz, shade].
+function headVertex(fn, u, y) {
+  var P = fn(u, y)
+  var e = 0.004
+  var Pu = fn(u + e, y), Pv = fn(u, y + e)
+  var ux = Pu[0] - P[0], uy = Pu[1] - P[1], uz = Pu[2] - P[2]
+  var vx = Pv[0] - P[0], vy = Pv[1] - P[1], vz = Pv[2] - P[2]
+  var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx
+  var nl = Math.hypot(nx, ny, nz) || 1
+  nx /= nl; ny /= nl; nz /= nl
+  if (nx * Math.sin(u) + nz * Math.cos(u) < 0) { nx = -nx; ny = -ny; nz = -nz }
+  var shade = clamp01(0.45 + 1.5 * (nx * -0.45 + ny * -0.55 + nz * 0.7 - 0.55))
+  return [P[0], P[1], P[2], nx, ny, nz, shade]
+}
+
+// Bearings round the head, packed densest at the face so the nose and the
+// sockets resolve, sparse round the back.
+function headBearing(s) { return Math.PI * s * (0.42 + 0.58 * s * s) }
+
 function holoMesh(compact) {
-  var key = compact ? "holoC" : "holo3"
+  var key = compact ? "headC" : "head"
   if (CACHE[key]) return CACHE[key]
   var lines = []
-  // Structured light: dense horizontal slices that bend over the relief, a
-  // few verticals to hold them together.
-  var nLat = compact ? 5 : HOLO_SLICES
-  var nLon = compact ? 5 : 7
+  // Structured light: dense horizontal slices round the whole head, then a
+  // few meridians and the neck to hold them together. Slices come first.
+  var nLat = compact ? 9 : HOLO_SLICES
+  var nU = compact ? 22 : 40
+  var nLon = compact ? 6 : 10
   var i, j, pts
   for (i = 0; i < nLat; i++) {
-    var v = mix(-1.25, 1.25, i / (nLat - 1))
+    var y = mix(HEAD_TOP + 0.05, HEAD_CHIN - 0.03, i / (nLat - 1))
     pts = []
-    for (j = 0; j <= (compact ? 18 : 24); j++) pts.push(holoSurface(mix(-1.75, 1.75, j / (compact ? 18 : 24)), v))
+    for (j = 0; j <= nU; j++) pts.push(headVertex(headPoint, headBearing(mix(-1, 1, j / nU)), y))
     lines.push(pts)
   }
   for (i = 0; i < nLon; i++) {
-    var u = mix(-1.45, 1.45, i / (nLon - 1))
+    var u = (i + 0.5) / nLon * TAU - Math.PI
     pts = []
-    for (j = 0; j <= (compact ? 16 : 22); j++) pts.push(holoSurface(u, mix(-1.35, 1.35, j / (compact ? 16 : 22))))
+    for (j = 0; j <= (compact ? 12 : 24); j++) pts.push(headVertex(headPoint, u, mix(HEAD_TOP + 0.01, HEAD_CHIN, j / (compact ? 12 : 24))))
     lines.push(pts)
   }
-  for (var li = 0; li < lines.length; li++) {
-    for (var pj = 0; pj < lines[li].length; pj++) lines[li][pj].push(holoShade(lines[li][pj][0], lines[li][pj][1]))
+  var nRings = compact ? 2 : 4
+  for (i = 0; i < nRings; i++) {
+    var ny = mix(NECK_TOP + 0.08, NECK_BASE, i / (nRings - 1))
+    pts = []
+    for (j = 0; j <= 24; j++) pts.push(headVertex(neckPoint, j / 24 * TAU - Math.PI, ny))
+    lines.push(pts)
+  }
+  for (i = 0; i < (compact ? 4 : 8); i++) {
+    var nu = (i + 0.5) / (compact ? 4 : 8) * TAU - Math.PI
+    pts = []
+    for (j = 0; j <= 6; j++) pts.push(headVertex(neckPoint, nu, mix(NECK_TOP + 0.04, NECK_BASE, j / 6)))
+    lines.push(pts)
   }
   CACHE[key] = lines
   return lines
 }
 
-// The vertex cloud: a jittered lattice on the surface, front half only.
+// The vertex cloud: a jittered lattice over the face and the sides of the
+// head. Points facing away are dropped per frame.
 function holoPoints() {
-  if (CACHE.holoP2) return CACHE.holoP2
+  if (CACHE.headP) return CACHE.headP
   var rnd = mulberry32(777)
   var pts = []
-  for (var i = 0; i < 20; i++) {
+  for (var i = 0; i < 22; i++) {
     for (var j = 0; j < 26; j++) {
-      var u = mix(-1.5, 1.5, (j + rnd() * 0.7) / 25.7)
-      var v = mix(-1.3, 1.3, (i + rnd() * 0.7) / 19.7)
-      var P = holoSurface(u, v)
-      pts.push({ P: P, j: rnd(), k: rnd() })
+      var u = headBearing(mix(-0.8, 0.8, (j + rnd() * 0.7) / 25.7))
+      var y = mix(HEAD_TOP + 0.08, HEAD_CHIN - 0.04, (i + rnd() * 0.7) / 21.7)
+      pts.push({ P: headVertex(headPoint, u, y), j: rnd(), k: rnd() })
     }
   }
-  CACHE.holoP2 = pts
+  CACHE.headP = pts
   return pts
 }
 
@@ -2353,7 +2440,7 @@ function reliefContours(key, nx, ny, levels, skipSockets, zfn, skipNose) {
 // wave from the nose outward. Deliberately not the landmark set: a lock
 // diamond in each eye socket reads as pupils.
 function holoNodes() {
-  if (CACHE.holoN3) return CACHE.holoN3
+  if (CACHE.headN) return CACHE.headN
   // A scatter of tracking points on a low-discrepancy sequence: even
   // coverage with no rows or pairs, because rows of points on a curved mask
   // bow into mouths and pairs of them become eyes.
@@ -2364,13 +2451,13 @@ function holoNodes() {
   }
   var nodes = []
   for (var i = 1; i <= 44; i++) {
-    var u = mix(-1.25, 1.25, halton(i, 2))
-    var v = mix(-1.1, 1.05, halton(i, 3))
-    var P = holoSurface(u, v)
+    var u = headBearing(mix(-0.72, 0.72, halton(i, 2)))
+    var y = mix(HEAD_TOP + 0.14, HEAD_CHIN - 0.08, halton(i, 3))
+    var P = headVertex(headPoint, u, y)
     nodes.push({ P: P, order: Math.hypot(P[0], P[1] - 0.05) * 6 + hash(i * 13) })
   }
-  CACHE.holoN3 = { nodes: nodes, edges: [] }
-  return CACHE.holoN3
+  CACHE.headN = { nodes: nodes, edges: [] }
+  return CACHE.headN
 }
 
 function paintHolo(ctx, size, spec) {
@@ -2409,7 +2496,7 @@ function paintHolo(ctx, size, spec) {
     // The lock settles in a slight three-quarter pose, which shows the relief
     // in the silhouette instead of flattening it face-on.
     var still = easeOutCubic(seg(rt, 0, 450))
-    yaw = mix(holoYaw(t0 + rt * (1 - still)), 0.22, still)
+    yaw = mix(holoYaw(t0 + rt * (1 - still)), 0.5, still)
     pitch = mix(holoPitch(t0 + rt * (1 - still)), HOLO_TILT, still)
   } else if (bad) {
     var jstep = Math.min(6, Math.floor(rt / 55))
@@ -2431,9 +2518,9 @@ function paintHolo(ctx, size, spec) {
   var bandY = mix(-1.1, 1.1, frac(t / HOLO_BAND_MS))
   var band2Y = mix(1.1, -1.1, frac(t / 3100 + 0.3))
   var bandK = scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1)
-  var ringY = ok ? mix(HOLO_CY - 0.86, HOLO_CY + 0.8, easeInOutCubic(seg(rt, 150, 700))) : -9
+  var ringY = ok ? mix(HOLO_CY - 0.64, HOLO_CY + 0.62, easeInOutCubic(seg(rt, 150, 700))) : -9
   var ringK = ok ? bump(rt, 150, 760) : 0
-  var ring2Y = ok ? mix(HOLO_CY + 0.8, HOLO_CY - 0.86, easeInOutCubic(seg(rt, 350, 900))) : -9
+  var ring2Y = ok ? mix(HOLO_CY + 0.62, HOLO_CY - 0.64, easeInOutCubic(seg(rt, 350, 900))) : -9
   var ring2K = ok ? bump(rt, 350, 940) : 0
   var solid = ok ? easeOutCubic(seg(rt, 150, 700)) : 0
   var frag = bad ? easeOutCubic(seg(rt, 120, 700)) : 0
@@ -2471,7 +2558,7 @@ function paintHolo(ctx, size, spec) {
 
   // Chromatic offset: a foreground copy of the mesh off register.
   var chroma = (scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1 + 4 * bump(rt, 0, 600))) * boot
-  var chX = size * 0.011 * chroma * (bad ? 1 + (hash(Math.floor(rt / 40)) - 0.5) : 1)
+  var chX = size * 0.015 * chroma * (bad ? 1 + (hash(Math.floor(rt / 40)) - 0.5) : 1)
   var chY = -size * 0.004 * chroma
 
   function project(P) {
@@ -2480,7 +2567,26 @@ function paintHolo(ctx, size, spec) {
     var yr = P[1] * cp - zr * spp
     var z2 = P[1] * spp + zr * cp
     var s = HOLO_F / (HOLO_F - z2)
-    return { x: xr * s, y: yr * s + HOLO_CY + roll, z: z2 }
+    // How squarely the surface faces the camera, where the vertex has a normal.
+    var f = 1
+    if (P.length > 5) {
+      var nxr = P[3] * cyw + P[5] * syw
+      var nzr = -P[3] * syw + P[5] * cyw
+      var nyr = P[4] * cp - nzr * spp
+      var nz2 = P[4] * spp + nzr * cp
+      var vl = Math.hypot(xr, yr, HOLO_F - z2)
+      f = (-nxr * xr - nyr * yr + nz2 * (HOLO_F - z2)) / vl
+    }
+    return { x: xr * s * HOLO_K, y: yr * s * HOLO_K + HOLO_CY + roll, z: z2, f: f }
+  }
+  // Projected half width of the head (or the neck) at height y, and the
+  // offset of its centre, for the rings and beams that wrap it.
+  function headSpan(y) {
+    var fy = (y - HOLO_CY) / HOLO_K
+    if (fy > HEAD_CHIN) return { w: HOLO_K * (0.19 * Math.abs(cyw) + 0.17 * Math.abs(syw)), c: -0.1 * syw * HOLO_K }
+    var F = profileAt(HEAD_Y, HEAD_FRONT, fy), B = profileAt(HEAD_Y, HEAD_BACK, fy)
+    var W = Math.max(0.05, profileAt(HEAD_Y, HEAD_HALF, fy))
+    return { w: HOLO_K * Math.hypot(W * cyw, (F - B) / 2 * syw), c: HOLO_K * (F + B) / 2 * syw }
   }
   function toPx(x, y) { return { x: cx + x * R, y: cy + y * R } }
   function glitchX(x, y) {
@@ -2537,9 +2643,6 @@ function paintHolo(ctx, size, spec) {
   var EY = 0.9
   var erx = 0.46
   var ery = 0.07
-  var outlineW = function (y) {
-    return Math.sqrt(HOLO_A * HOLO_A * cyw * cyw + HOLO_C * HOLO_C * syw * syw) * holoTaper(y - HOLO_CY)
-  }
 
   // --- scanlines and a fine backplate grid --------------------------------------
   if (!compact) {
@@ -2660,7 +2763,7 @@ function paintHolo(ctx, size, spec) {
     }
     var coneA = 0.09 * flick * (bad ? 1 - frag : 1)
     var topY = HOLO_CY + 0.1
-    var tw = outlineW(topY) * 0.98
+    var tw = headSpan(topY).w * 0.98
     crisp.line(tint, coneA, hair, cx - erx * R, cy + EY * R, cx - tw * R, cy + topY * R)
     crisp.line(tint, coneA, hair, cx + erx * R, cy + EY * R, cx + tw * R, cy + topY * R)
     // Volumetric glow: the cone filled with light that fades as it rises,
@@ -2718,10 +2821,23 @@ function paintHolo(ctx, size, spec) {
   }
   flush()
 
-  // --- the mask ------------------------------------------------------------------
+  // --- the head ------------------------------------------------------------------
   var mesh = holoMesh(compact)
+  var nSl = compact ? 9 : HOLO_SLICES
   var baseA = mix(0.7, 1, solid)
   var mw2 = compact ? Math.max(1, size * 0.018) : fine * 1.3
+  // The outline is traced from the slices' extreme points, so it carries the
+  // real profile: the skull behind, the nose and chin when the head turns.
+  var silL = [], silR = []
+  function silEdge(ps, i, sgn) {
+    var n = ps.length - 1
+    var a = ps[(i - 1 + n) % n], b = ps[i % n], c = ps[(i + 1) % n]
+    var den = a.x - 2 * b.x + c.x
+    var d = Math.abs(den) > 1e-6 ? clamp(0.5 * (a.x - c.x) / den, -0.5, 0.5) : 0
+    var x = b.x - 0.25 * (a.x - c.x) * d
+    if (sgn * x < sgn * b.x) x = b.x
+    return { x: x, y: b.y + (d > 0 ? (c.y - b.y) * d : (b.y - a.y) * d) }
+  }
   for (var ln = 0; ln < mesh.length; ln++) {
     var L = mesh[ln]
     var pts = [], al = [], cpts = [], cal = [], rpts = [], ral = []
@@ -2742,29 +2858,41 @@ function paintHolo(ctx, size, spec) {
       pts.push(PX)
       cpts.push({ x: PX.x + chX, y: PX.y + chY })
       rpts.push({ x: PX.x - chX, y: PX.y - chY })
-      var da = clamp01((Q.z + 0.12) / 0.62)
-      var shadeK = L[sj].length > 3 ? 0.2 + 1.1 * L[sj][3] : 1
-      var a = baseA * 0.45 * (0.1 + 0.9 * Math.pow(da, 1.2)) * shadeK * flick + bandBoost(y0) * boot
+      // Faces turned away show faintly through; faces towards the camera are
+      // lit from the upper left, and a rim light runs where the surface turns
+      // away, which is what draws the brow, nose and jaw.
+      var fr = clamp01((Q.f + 0.04) / 0.22)
+      var rim = Math.pow(1 - clamp01(Math.abs(Q.f)), 4) * fr
+      var a = baseA * flick * (0.06 + fr * 0.34 * (0.2 + 1.1 * L[sj][6]) + 0.42 * rim) + bandBoost(y0) * boot * (0.25 + 0.75 * fr)
       if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
       al.push(a)
-      cal.push(a * 0.32)
-      ral.push(a * 0.24)
+      cal.push(a * 0.45 * fr)
+      ral.push(a * 0.38 * fr)
+    }
+    if (ln < nSl) {
+      var mnI = 0, mxI = 0
+      for (var se = 1; se < pts.length - 1; se++) {
+        if (pts[se].x < pts[mnI].x) mnI = se
+        if (pts[se].x > pts[mxI].x) mxI = se
+      }
+      silL.push(silEdge(pts, mnI, -1))
+      silR.push(silEdge(pts, mxI, 1))
     }
     // The offset copy rides every third slice; that is enough to read as
     // colour fringing at a fraction of the cost.
-    if (!compact && chroma > 0.02 && ln < HOLO_SLICES && ln % 3 === 0) {
+    if (!compact && chroma > 0.02 && ln < nSl && ln % 3 === 0) {
       strip(crisp, ROLE_FG, fine, cpts, cal)
       // The opposite fringe in the error colour, which is what makes the
       // split read as chromatic. A miss keeps only the foreground fringe.
       if (!bad) strip(crisp, ROLE_ERROR, fine, rpts, ral)
     }
-    if (ok && ln < HOLO_SLICES) {
-      // The lock solidifies the mask from the top down behind the scanner ring.
-      var ly0 = L[0][1] + HOLO_CY
+    if (ok && ln < nSl) {
+      // The lock solidifies the head from the top down behind the scanner ring.
+      var ly0 = L[0][1] * HOLO_K + HOLO_CY
       var sol = seg(rt, 150, 700) > 0 && ly0 < ringY ? 1.35 : (rt < 700 ? 0.7 : 1)
       for (var sa = 0; sa < al.length; sa++) al[sa] *= sol
     }
-    strip(crisp, tint, ln < HOLO_SLICES && ln % 2 === 0 ? mw2 * 1.3 : mw2, pts, al)
+    strip(crisp, tint, ln < nSl && ln % 2 === 0 ? mw2 * 1.3 : mw2, pts, al)
   }
   crisp.flush()
 
@@ -2773,18 +2901,18 @@ function paintHolo(ctx, size, spec) {
     var cloud = holoPoints()
     var cloudA = ok ? (1 + bump(rt, 150, 400)) * (1 - easeInOutCubic(seg(rt, 450, 800))) : (bad ? 1 - 0.5 * frag : 1)
     if (cloudA > 0.01) {
-      var dsz = Math.max(1, size * 0.0058)
+      var dsz = Math.max(1, size * 0.0075)
       for (var cpi = 0; cpi < cloud.length; cpi++) {
         var cpt = cloud[cpi]
         var CQ = project(cpt.P)
-        if (CQ.z < -0.05) continue
+        if (CQ.f < 0.05) continue
         var cxq = CQ.x, cyq = CQ.y
         if (bad) {
           cxq += dragOffset((cpt.j - 0.5) * 0.9, fragTau, 3) + glitchX(cxq, cyq)
           cyq += dragOffset((cpt.k - 0.3) * 0.6, fragTau, 3)
         }
         var shimmer = 0.5 + 0.5 * Math.sin(t / 180 + cpt.j * 40)
-        var pa3 = (0.35 + 0.4 * shimmer + bandBoost(cyq)) * clamp01((CQ.z + 0.1) / 0.55) * cloudA * flick
+        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((CQ.f - 0.05) / 0.3) * cloudA * flick
         if (pa3 <= 0.02) continue
         var CP = toPx(cxq, cyq)
         ctx.fillStyle = rgba(tint, pa3)
@@ -2793,69 +2921,16 @@ function paintHolo(ctx, size, spec) {
     }
   }
 
-  // Neck and shoulders: the mask is a bust standing on the emitter, which is
-  // what makes it read as a person rather than an egg.
-  if (!compact) {
-    var bustA = (0.5 + 0.3 * solid) * flick * (bad ? 1 - 0.7 * frag : 1)
-    var bustLine = function (P3list, w) {
-      var bp = [], ba = []
-      for (var i = 0; i < P3list.length; i++) {
-        var BQ = project(P3list[i])
-        var bx = BQ.x + glitchX(BQ.x, BQ.y), by = BQ.y
-        if (bad && frag > 0) {
-          bx += dragOffset((hash(i * 7 + P3list.length) - 0.5) * 0.5, fragTau, 3)
-          by += dragOffset(0.12, fragTau, 2)
-        }
-        bp.push(toPx(bx, by))
-        // Shoulder ends fade out before they reach the corner readouts.
-        var endFade = clamp01((1 - Math.abs(P3list[i][0]) / 0.7) * 3)
-        ba.push((bustA * (0.25 + 0.75 * clamp01((BQ.z + 0.3) / 0.6)) + bandBoost(by) * 0.5) * endFade)
-      }
-      strip(crisp, tint, w, bp, ba)
-    }
-    for (var nk = 0; nk < 8; nk++) {
-      var na2 = nk * TAU / 8
-      var nl2 = []
-      for (var ny2 = 0; ny2 <= 4; ny2++) {
-        var yy = mix(0.6, 0.84, ny2 / 4)
-        var rr2 = 0.17 + 0.05 * ny2 / 4
-        nl2.push([Math.sin(na2) * rr2, yy, Math.cos(na2) * rr2 * 0.9])
-      }
-      bustLine(nl2, fine)
-    }
-    for (var nr = 0; nr < 3; nr++) {
-      var ry = mix(0.64, 0.82, nr / 2)
-      var rr3 = 0.17 + 0.05 * nr / 2
-      var ring2 = []
-      for (var nj = 0; nj <= 20; nj++) ring2.push([Math.sin(nj / 20 * TAU) * rr3, ry, Math.cos(nj / 20 * TAU) * rr3 * 0.9])
-      bustLine(ring2, fine)
-    }
-    for (var sh = 0; sh < 4; sh++) {
-      var shl = []
-      for (var sj2 = 0; sj2 <= 24; sj2++) {
-        var sxu = mix(-1, 1, sj2 / 24)
-        shl.push([sxu * (0.64 + sh * 0.02), 0.84 + 0.1 * sxu * sxu + sh * 0.03 - 0.03 * Math.exp(-sxu * sxu * 18), 0.26 * Math.cos(sxu * Math.PI / 2)])
-      }
-      bustLine(shl, sh === 0 ? hair : fine)
-    }
-  }
-
-  // Silhouette. It carries the face at the small slot.
+  // Silhouette, from the chin up one side, over the crown and down the
+  // other. It carries the head at the small slot.
   var outline = [], choutline = []
-  for (var oi = 0; oi <= 48; oi++) {
-    var oa = oi / 48 * TAU
-    var oy2 = Math.sin(oa) * HOLO_B * (1 + 0.02 * Math.cos(oa))
-    var ox2 = Math.cos(oa) * outlineW(oy2 + HOLO_CY)
-    var oyy = oy2 + HOLO_CY + roll
-    ox2 += glitchX(ox2, oyy)
-    var OP = toPx(ox2, oyy)
-    outline.push([OP.x, OP.y])
-    choutline.push([OP.x + chX * 1.5, OP.y + chY * 1.5])
-  }
-  var outA = (0.3 + 0.2 * solid + 0.15 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
+  for (var oi = silL.length - 1; oi >= 0; oi--) outline.push([silL[oi].x, silL[oi].y])
+  for (var oj2 = 0; oj2 < silR.length; oj2++) outline.push([silR[oj2].x, silR[oj2].y])
+  for (var oc = 0; oc < outline.length; oc++) choutline.push([outline[oc][0] + chX * 1.5, outline[oc][1] + chY * 1.5])
+  var outA = (0.4 + 0.2 * solid + 0.2 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
   if (!compact && chroma > 0.02) crisp.poly(ROLE_FG, outA * 0.3, fine, choutline)
   if (bad && frag > 0.05) {
-    for (var od = 0; od < 48; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
+    for (var od = 0; od + 1 < outline.length; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
   } else {
     halo.poly(tint, outA * 0.16, thin * 3.6, outline)
     crisp.poly(tint, outA, thin, outline)
@@ -2924,14 +2999,14 @@ function paintHolo(ctx, size, spec) {
     var prof = [], pal = []
     for (var sp = 0; sp <= 30; sp++) {
       var py = mix(-0.6, 0.6, sp / 30)
-      var pz = holoZAt(0, py) * (bad ? 1 + (hash(Math.floor(rt / 40) * 31 + sp) - 0.5) * 0.5 * (1 - frag) : 1)
-      prof.push({ x: cx + sx0 + pz * R * 0.34, y: cy + (py + HOLO_CY) * R })
-      pal.push((0.55 + bandBoost(py + HOLO_CY)) * sA * flick)
+      var pz = headPoint(0, py)[2] * (bad ? 1 + (hash(Math.floor(rt / 40) * 31 + sp) - 0.5) * 0.5 * (1 - frag) : 1)
+      prof.push({ x: cx + sx0 + pz * R * 0.34, y: cy + (py * HOLO_K + HOLO_CY) * R })
+      pal.push((0.55 + bandBoost(py * HOLO_K + HOLO_CY)) * sA * flick)
     }
     strip(crisp, tint, fine * 1.5, prof, pal)
     var mk = scanning ? bandY : (ok ? mix(bandY, HOLO_CY, seg(rt, 0, 300)) : bandY)
     if (mk > sy0 && mk < sy1) {
-      var mz = holoZAt(0, mk - HOLO_CY)
+      var mz = headPoint(0, (mk - HOLO_CY) / HOLO_K)[2]
       crisp.line(tint, 0.8 * sA, fine, cx + sx0, cy + mk * R, cx + sx0 + mz * R * 0.34 + R * 0.04, cy + mk * R)
       if (size >= 150) seg7(crisp, tint, 0.7 * sA, 0, fine, cx + sx0 + R * 0.02, cy + mk * R - R * 0.07, R * 0.02, R * 0.036, R * 0.028, pad3(mz * 1000), 0)
     }
@@ -2950,7 +3025,7 @@ function paintHolo(ctx, size, spec) {
   var lmPx = []
   for (var lm = 0; lm < NS.nodes.length; lm++) {
     var LP = project(NS.nodes[lm].P)
-    lmPx.push({ p: toPx(LP.x + glitchX(LP.x, LP.y), LP.y), y: LP.y, z: LP.z })
+    lmPx.push({ p: toPx(LP.x + glitchX(LP.x, LP.y), LP.y), y: LP.y, f: LP.f })
   }
   if (!compact) {
     // Projection beams from the emitter to the landmarks and the limb.
@@ -2959,7 +3034,11 @@ function paintHolo(ctx, size, spec) {
       for (var bm = 0; bm < 24; bm++) {
         var bea = bm / 24 * Math.PI
         var bx0 = cx + Math.cos(bea) * erx * R * (bm % 2 ? 1 : 0.7), by0 = cy + (EY + Math.sin(bea) * ery) * R
-        var target = bm < lmPx.length ? lmPx[(bm * 7) % lmPx.length].p : toPx((bm % 2 ? 1 : -1) * outlineW(HOLO_CY) * 0.95, HOLO_CY)
+        var target = lmPx[(bm * 7) % lmPx.length].p
+        if (lmPx[(bm * 7) % lmPx.length].f < 0.1) {
+          var bsp = headSpan(HOLO_CY)
+          target = toPx(bsp.c + (bm % 2 ? 1 : -1) * bsp.w * 0.95, HOLO_CY)
+        }
         var bfl = 0.6 + 0.4 * hash(Math.floor(t / 90) * 13 + bm)
         crisp.line(tint, 0.11 * bfl * beamA, fine, bx0, by0, target.x, target.y)
       }
@@ -2969,7 +3048,7 @@ function paintHolo(ctx, size, spec) {
       for (var sl2 = 0; sl2 < lmPx.length; sl2++) {
         var bd2 = Math.abs(lmPx[sl2].y - bandY)
         var sh = clamp01(1 - bd2 / 0.16) * boot
-        if (sh <= 0.02 || lmPx[sl2].z < 0) continue
+        if (sh <= 0.02 || lmPx[sl2].f < 0.1) continue
         var ds = R * 0.028
         var C0 = lmPx[sl2].p
         crisp.poly(tint, sh * 0.9, hair, [[C0.x, C0.y - ds], [C0.x + ds, C0.y], [C0.x, C0.y + ds], [C0.x - ds, C0.y], [C0.x, C0.y - ds]])
@@ -2978,7 +3057,7 @@ function paintHolo(ctx, size, spec) {
       var lockK = []
       for (var rl = 0; rl < lmPx.length; rl++) {
         var lockAt = 280 + NS.nodes[rl].order * 55
-        lockK.push(lmPx[rl].z < -0.05 ? 0 : seg(rt, lockAt, lockAt + REC_LOCK_LEN))
+        lockK.push(lmPx[rl].f < 0.1 ? 0 : seg(rt, lockAt, lockAt + REC_LOCK_LEN))
       }
       // The solver lattice draws out on the surface between locked nodes.
       for (var ge = 0; ge < NS.edges.length; ge++) {
@@ -3002,11 +3081,12 @@ function paintHolo(ctx, size, spec) {
       for (var sr2 = 0; sr2 < scanRings.length; sr2++) {
         var SRy = scanRings[sr2][0], SRk = scanRings[sr2][1]
         if (SRk <= 0.01) continue
-        var rw = outlineW(SRy) * scanRings[sr2][2]
+        var SRs = headSpan(SRy)
+        var rw = SRs.w * scanRings[sr2][2]
         var rp = []
         for (var ri = 0; ri <= 32; ri++) {
           var ra = ri / 32 * TAU
-          rp.push([cx + Math.cos(ra) * rw * R, cy + (SRy + Math.sin(ra) * 0.07) * R])
+          rp.push([cx + (SRs.c + Math.cos(ra) * rw) * R, cy + (SRy + Math.sin(ra) * 0.07) * R])
         }
         halo.poly(tint, SRk * 0.2, bold * 3, rp)
         crisp.poly(tint, SRk * 0.9, thin, rp)
