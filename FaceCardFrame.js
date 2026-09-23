@@ -1495,7 +1495,7 @@ function paintRadar(ctx, size, spec) {
     var feat = q.kind !== "skin"
     var lw = compact ? Math.max(1, size * 0.03) : (feat ? Math.max(1, size * 0.02) : Math.max(1, size * 0.014))
     var ox = bad ? tearShift(tears, q.y) * R : 0
-    if (q.kind === "mouth" || q.kind === "nose") {
+    if (q.kind === "mouth") {
       // Radial ticks. Range arcs along the mouth bow into a smile at the
       // bottom of the scope; ticks read as a measured row.
       var tl = R * 0.035
