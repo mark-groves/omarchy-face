@@ -151,21 +151,17 @@ var REC_CLAMP = [540, 720]
 var REC_PASS = 640
 var REC_WAVE = [620, 1040]
 
-// When each feature group stops drifting and locks onto its home.
-function recLock(kind) {
-  if (kind === "eyeL" || kind === "eyeR") return [170, 330]
-  if (kind === "mouth") return [250, 410]
-  if (kind === "rim") return [320, 480]
-  return [200, 430]
+// When each dot stops drifting and locks onto its home, and when it shrinks
+// out, handing the face to the wireframe. Both run as a wave from the
+// centre of the face outward.
+function recLock(p) {
+  if (p.kind === "field") return [200, 430]
+  return [150 + p.d * 300, 300 + p.d * 300]
 }
 
-// When each group's dots shrink out, handing that feature to the wireframe.
-function recDissolve(kind) {
-  if (kind === "skin") return [420, 610]
-  if (kind === "eyeL" || kind === "eyeR") return [470, 650]
-  if (kind === "mouth") return [510, 690]
-  if (kind === "rim") return [540, 730]
-  return [380, 570]
+function recDissolve(p) {
+  if (p.kind === "field") return [380, 570]
+  return [400 + p.d * 260, 580 + p.d * 260]
 }
 
 var CACHE = {}
@@ -221,90 +217,45 @@ var SEG7 = {
 }
 
 function buildParticles(seed) {
-  var key = "p" + seed
+  var key = "p2" + seed
   if (CACHE[key]) return CACHE[key]
 
   var rnd = mulberry32(seed)
   var ps = []
 
-  function push(kind, hx, hy, extra) {
-    var p = {
-      kind: kind,
-      hx: hx,
-      hy: hy,
-      z: depthAt(hx, hy),
-      sa: rnd(),
-      sb: rnd(),
-      sc: rnd(),
-      u: 0,
-      ex: 0,
-      ey: 0,
-      n1: -1,
-      n2: -1,
-      n3: -1
-    }
-    if (extra) for (var k in extra) p[k] = extra[k]
-    ps.push(p)
+  function push(kind, hx, hy, z, shade) {
+    ps.push({
+      kind: kind, hx: hx, hy: hy, z: z, shade: shade, d: Math.hypot(hx, hy / 1.1),
+      sa: rnd(), sb: rnd(), sc: rnd(), n1: -1, n2: -1, n3: -1
+    })
   }
 
-  var i, n, a
-
-  n = 110
-  for (i = 0; i < n; i++) {
-    a = (i / n) * Math.PI * 2
-    push("rim", Math.cos(a) * RIM_R, Math.sin(a) * RIM_R)
-  }
-
-  var eyes = [[EYE_L, "eyeL"], [EYE_R, "eyeR"]]
-  for (var e = 0; e < 2; e++) {
-    // Hollow iris rings, not filled discs. A dense eye cluster locks into a
-    // solid blob, and two blobs over a bar is a cartoon face.
-    var rings = [[0.55, 5], [1.3, 12]]
-    for (var ri = 0; ri < rings.length; ri++) {
-      var rr = rings[ri][0] * EYE_R_IN
-      var rc = rings[ri][1]
-      for (i = 0; i < rc; i++) {
-        a = (i / rc) * Math.PI * 2 + ri * 0.4
-        var ox = Math.cos(a) * rr
-        var oy = Math.sin(a) * rr
-        push(eyes[e][1], eyes[e][0] + ox, EYE_Y + oy, { ex: ox, ey: oy })
-        ps[ps.length - 1].z = depthAt(eyes[e][0], EYE_Y) - 0.22
-      }
+  // A jittered lattice over the relief-mapped face. Shading from the surface
+  // slope under a light from the upper left is what makes the sockets, the
+  // nose ridge and the cheekbones appear: nothing is drawn as a feature.
+  var step = 0.066
+  var lx = -0.45, ly = -0.55, lz = 0.7
+  var ll = Math.hypot(lx, ly, lz)
+  for (var gy = -0.8; gy <= 0.8; gy += step) {
+    for (var gx = -0.64; gx <= 0.64; gx += step) {
+      var x = gx + (rnd() - 0.5) * step * 0.7
+      var y = gy + (rnd() - 0.5) * step * 0.7
+      var ins = holoInside(x, y)
+      if (ins <= 0.01) continue
+      var z = holoZAt(x, y)
+      var e = 0.01
+      var zx = (holoZAt(x + e, y) - holoZAt(x - e, y)) / (2 * e)
+      var zy = (holoZAt(x, y + e) - holoZAt(x, y - e)) / (2 * e)
+      var nl = Math.hypot(zx, zy, 1)
+      var shade = clamp01(0.5 + 0.5 * ((-zx * lx - zy * ly + lz) / (nl * ll)) * 1.4 - 0.2)
+      push(ins < 0.14 ? "edge" : "skin", x, y, z, shade)
     }
   }
 
-  // Sparse enough to stay a dotted measurement line when it locks, rather
-  // than fusing into a solid bar.
-  n = 15
-  for (i = 0; i < n; i++) {
-    var u = (i / (n - 1)) * 2 - 1
-    push("mouth", u * MOUTH_HALF, MOUTH_Y + MOUTH_CURVE * (1 - u * u), { u: u })
-    ps[ps.length - 1].z = depthAt(u * MOUTH_HALF, MOUTH_Y) - 0.10
-  }
-
-  // Depth-map surface. Feature zones are carved out so the eyes and mouth stay
-  // legible when the whole card shrinks to the in-field indicator size.
-  var ringDefs = [[0.12, 5], [0.20, 8], [0.28, 11], [0.35, 13], [0.42, 16], [0.50, 18],
-    [0.57, 20], [0.63, 22], [0.69, 24], [0.745, 26]]
-  for (var rd = 0; rd < ringDefs.length; rd++) {
-    var radius = ringDefs[rd][0]
-    var count = ringDefs[rd][1]
-    var jitter = rnd() * Math.PI * 2
-    for (i = 0; i < count; i++) {
-      a = (i / count) * Math.PI * 2 + jitter
-      var sx = Math.cos(a) * radius
-      var sy = Math.sin(a) * radius
-      if (inEye(sx, sy, 0.055) || inMouth(sx, sy, 0.02)) continue
-      push("skin", sx, sy)
-    }
-  }
-
-  n = 44
-  for (i = 0; i < n; i++) {
-    a = rnd() * Math.PI * 2
+  for (var i = 0; i < 44; i++) {
+    var a = rnd() * Math.PI * 2
     var fr = 0.98 + rnd() * 0.62
-    push("field", Math.cos(a) * fr, Math.sin(a) * fr * 0.82)
-    ps[ps.length - 1].z = 0.10 + rnd() * 0.22
+    push("field", Math.cos(a) * fr, Math.sin(a) * fr * 0.82, 0.10 + rnd() * 0.22, 0.5)
   }
 
   // Static mesh topology, resolved once. Per-frame nearest-neighbour search
@@ -555,7 +506,7 @@ function paintHud(ctx, size, spec) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
-  var tint = bad ? ROLE_ERROR : ROLE_ACCENT
+  var tint = bad ? missTint(rt) : ROLE_ACCENT
 
   // Base stroke weights. Everything scales with the card; the floor keeps
   // hairlines on the pixel grid at the real 116 px slot.
@@ -750,14 +701,14 @@ function paintHud(ctx, size, spec) {
       a = acquisition(plane, pr.y * FSC)
       if (p.kind === "field") a *= 0.35
     } else if (ok) {
-      var lw = recLock(p.kind)
+      var lw = recLock(p)
       a = p.kind === "field" ? 0.3 : easeOutCubic(seg(rt, lw[0], lw[1]))
     } else {
       a = 1 - easeOutCubic(seg(rt, 120, 420)) * 0.55
     }
 
     var wander = 1 - a
-    var slack = p.kind === "field" ? 0.150 : (p.kind === "rim" ? 0.055 : 0.105)
+    var slack = p.kind === "field" ? 0.150 : (p.kind === "edge" ? 0.05 : 0.09)
     var x = pr.x + Math.sin(t / 1000 * 0.85 + p.sa * 6.283) * slack * wander
     var y = pr.y + Math.cos(t / 1000 * 0.71 + p.sb * 6.283) * slack * wander
 
@@ -847,14 +798,13 @@ function paintHud(ctx, size, spec) {
     if (compact && p2.kind === "field" && !ok) continue
 
     var l = lit[i2]
-    var zf = 0.55 + 0.75 * p2.z
-    var eye = p2.kind === "eyeL" || p2.kind === "eyeR"
-    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : (eye ? 0.72 : 1)) * (0.68 + 0.42 * l)
+    var zf = 0.55 + 1.0 * p2.z
+    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : 1) * (0.68 + 0.42 * l)
     // The rim and the features carry the face; the depth-map interior is
     // texture behind them. Without this weighting the silhouette dissolves
     // on a light theme, where accent-on-near-white has little contrast.
     var kw = p2.kind === "field" ? 0.46
-      : (p2.kind === "skin" ? 0.82 : (p2.kind === "rim" ? 1.12 : 0.98))
+      : (p2.kind === "edge" ? 1.05 : 0.5 + 0.7 * p2.shade)
     // Floor keeps the silhouette readable between sweeps; the cubed term is
     // the bright crest that rides the scan plane itself.
     var alpha = (0.40 + 0.48 * l + 0.34 * l * l * l) * kw * (0.70 + 0.30 * p2.z)
@@ -865,7 +815,7 @@ function paintHud(ctx, size, spec) {
       alpha *= mix(1, 0.62, reached)
     }
     if (ok) {
-      var dw = recDissolve(p2.kind)
+      var dw = recDissolve(p2)
       var gone = easeInOutCubic(seg(rt, dw[0], dw[1]))
       if (gone >= 0.998) continue
       alpha *= 1 - gone
@@ -895,7 +845,7 @@ function paintHud(ctx, size, spec) {
   var lmLock = []
   for (var lm = 0; lm < LANDMARKS.length; lm++) {
     var L = LANDMARKS[lm]
-    var lp = project(L.x * faceScale, L.y * faceScale, (depthAt(L.x, L.y) + L.dz) * DEPTH)
+    var lp = project(L.x * faceScale, L.y * faceScale, holoZAt(L.x, L.y) * DEPTH)
     lmPx.push(toPx(lp.x, lp.y))
     var lockAt = REC_LOCK0 + L.order * REC_LOCK_STEP
     lmLock.push(ok ? seg(rt, lockAt, lockAt + REC_LOCK_LEN) : 0)
@@ -937,14 +887,7 @@ function paintHud(ctx, size, spec) {
         drawLockReticle(halo, crisp, tint, lmPx[rl], lmLock[rl], R, hair, thin, passFlash)
       }
 
-      // Eye contours and the rim close out of the dissolving cloud.
-      var eyeK = easeOutCubic(seg(rt, 520, 720))
-      if (eyeK > 0.01) {
-        for (var ey = 0; ey < 2; ey++) {
-          var ec = lmPx[ey]
-          glowArc(halo, crisp, tint, eyeK * 0.8, thin, ec.x, ec.y, RF * EYE_R_IN * 1.35 * eyeK, -Math.PI / 2, -Math.PI / 2 + TAU * eyeK)
-        }
-      }
+      // The rim closes out of the dissolving cloud.
       var rimK = easeInOutCubic(seg(rt, 460, 700))
       if (rimK > 0.004) {
         glowArc(halo, crisp, tint, Math.min(1, rimK * 2.4), bold * 0.85, cx, cy, RF * RIM_R * faceScale,
@@ -972,8 +915,10 @@ function paintHud(ctx, size, spec) {
       }
       flush()
     } else {
-      // A miss: the reticles hunt, fail to converge, and lose track.
+      // A miss: the reticles hunt, fail to converge, and lose track. Not on
+      // the eye and mouth landmarks: boxes there arrange into a face.
       for (var bl = 0; bl < lmPx.length; bl++) {
+        if (bl === 0 || bl === 1 || bl === 4 || bl === 5) continue
         var bc = lmPx[bl]
         var bk = seg(rt, 60 + LANDMARKS[bl].order * 22, 300 + LANDMARKS[bl].order * 22)
         if (bk <= 0) continue
@@ -989,10 +934,6 @@ function paintHud(ctx, size, spec) {
     if (rimC > 0.004) {
       crisp.arc(tint, Math.min(1, rimC * 2.4), Math.max(1, size * 0.036), cx, cy, R * RIM_R * faceScale,
         -Math.PI / 2, -Math.PI / 2 + TAU * rimC)
-    }
-    for (var ce = 0; ce < 2; ce++) {
-      var cek = easeOutCubic(seg(rt, 555, 720))
-      if (cek > 0.01) crisp.arc(tint, cek, Math.max(1, size * 0.036), lmPx[ce].x, lmPx[ce].y, R * EYE_R_IN * cek, 0, TAU)
     }
     crisp.flush()
   }
@@ -1355,6 +1296,31 @@ function readoutDetail(p, g, size, state, t, rt, tint) {
   if (bad) caret = clamp01(frac((t - rt) / 1300) + (hash(Math.floor(rt / 50)) - 0.5) * 0.4)
   var cxr = rx + rw * caret
   p.poly(bad ? ROLE_ERROR : tint, 0.85 * g.boot, fine * 1.5, [[cxr - size * 0.008, ry + size * 0.02], [cxr, ry + size * 0.012], [cxr + size * 0.008, ry + size * 0.02]])
+  // A scrolling data log: greeked lines that read as text streaming past.
+  var logStep = Math.floor((ok && rt > REC_PASS ? t - rt + REC_PASS : t) / 120)
+  for (var lr = 0; lr < 3; lr++) {
+    var lyy = y + size * (0.018 + lr * 0.013)
+    var seed = (logStep + lr) * 17
+    var xx = g.m
+    for (var wd = 0; wd < 4; wd++) {
+      var wl = size * (0.008 + 0.018 * hash(seed + wd * 3))
+      if (xx + wl > g.m + size * 0.085) break
+      p.line(bad ? ROLE_ERROR : (wd === 0 ? tint : ROLE_FG), (wd === 0 ? 0.6 : 0.3) * g.boot, fine, xx, lyy, xx + wl, lyy)
+      xx += wl + size * 0.006
+    }
+  }
+  // An oscilloscope trace under the ruler: live while scanning, a clean
+  // carrier on a lock, noise on a miss.
+  var ty = ry + size * 0.036
+  var tr = []
+  for (var ti = 0; ti <= 30; ti++) {
+    var tu = ti / 30
+    var v = Math.sin(tu * 14 + t / 90) * 0.6 + Math.sin(tu * 31 - t / 57) * 0.4 * (ok ? 1 - seg(rt, 200, 600) : 1)
+    if (bad) v = (hash(Math.floor(rt / 40) * 31 + ti) - 0.5) * 2
+    tr.push([rx + rw * tu, ty + v * size * 0.008])
+  }
+  p.poly(bad ? ROLE_ERROR : tint, 0.7 * g.boot, fine, tr)
+
   var cm = size * 0.012
   var corners = [[cm, cm], [size - cm, cm], [cm, size - cm], [size - cm, size - cm]]
   for (var c = 0; c < 4; c++) {
@@ -1460,14 +1426,14 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
   }
 }
 
-// HUD face topology: depth contours and profile curves over the cloud, swayed
-// with it, lit by the scan plane. A lock lights the contours outward in a
-// cascade; a miss shears and breaks them.
+// HUD face topology: iso-depth contours of the relief and profile curves
+// over the cloud, swayed with it and lit by the scan plane. A lock lights
+// the contours from the deepest level up in a cascade; a miss shears and
+// breaks them.
 function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, project, toPx, FSC, tears, shearK, faceScale) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
-  var levels = [0.95, 0.86, 0.74, 0.6, 0.44, 0.26]
   var brk = bad ? easeOutCubic(seg(rt, 150, 600)) : 0
   function place(x, y, d) {
     var pr = project(x * faceScale, y * faceScale, d)
@@ -1484,20 +1450,15 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
     if (bad && hash(seed) < brk) a = 0
     return a * boot
   }
-  for (var li = 0; li < levels.length; li++) {
-    var z = levels[li]
-    var r = 0.88 * Math.sqrt(1 - z * z)
-    var n = 20 + Math.round(r * 50)
-    var cas = ok ? bump(rt, 240 + li * 55, 560 + li * 55) : 0
-    var base = 0.17 + 0.55 * cas + (ok ? 0.16 * seg(rt, 500, 900) : 0)
-    var pts = [], al = []
-    for (var k = 0; k <= n; k++) {
-      var a = k / n * TAU
-      var q = place(Math.cos(a) * r, Math.sin(a) * r, z * DEPTH)
-      pts.push(q.p)
-      al.push(lightAt(q.u, base, li * 101 + k))
-    }
-    strip(crisp, tint, fine, pts, al)
+  var topo = holoContours()
+  for (var ts = 0; ts < topo.segs.length; ts++) {
+    var S = topo.segs[ts]
+    var li = S[5]
+    var cas = ok ? bump(rt, 240 + li * 45, 560 + li * 45) : 0
+    var base = 0.14 + 0.55 * cas + (ok ? 0.16 * seg(rt, 500, 900) : 0)
+    var A = place(S[0], S[1], S[4] * DEPTH), B = place(S[2], S[3], S[4] * DEPTH)
+    var a = lightAt((A.u + B.u) / 2, base, ts * 7 + 1)
+    if (a > 0.004) crisp.line(tint, a, fine, A.p.x, A.p.y, B.p.x, B.p.y)
   }
   var profiles = [[1, 0, 0], [0, 1, 0], [1, 0, 0.36], [1, 0, -0.36], [0, 1, 0.4], [0, 1, -0.4]]
   var profA = 0.13 + (ok ? 0.3 * bump(rt, 300, 700) + 0.1 * seg(rt, 600, 900) : 0)
@@ -1508,14 +1469,14 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
       var u = mix(-0.86, 0.86, s / 28)
       var x = P[0] ? P[2] : u
       var y = P[0] ? u : P[2]
-      if (Math.hypot(x, y) > 0.86) {
-        // Outside the dome: end the run here.
+      if (holoInside(x, y) <= 0.01) {
+        // Off the mask: end the run here.
         if (pts2.length > 1) strip(crisp, tint, fine, pts2, al2)
         pts2 = []
         al2 = []
         continue
       }
-      var q2 = place(x, y, depthAt(x, y) * DEPTH)
+      var q2 = place(x, y, holoZAt(x, y) * DEPTH)
       pts2.push(q2.p)
       al2.push(lightAt(q2.u, profA, pi * 57 + s))
     }
@@ -1524,6 +1485,12 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
 }
 
 // --- shared result gestures ---------------------------------------------------
+
+// A miss opens with a fault strobe, flickering between the accent and the
+// error colour before it commits to the error colour.
+function missTint(rt) {
+  return rt < 120 && Math.floor(rt / 30) % 2 === 0 ? ROLE_ACCENT : ROLE_ERROR
+}
 
 // Glitch tears. A few horizontal strips, re-rolled every 45 ms for the first
 // 300 ms of a miss.
@@ -1625,54 +1592,36 @@ var RADAR_CLUTTER = 90
 var RADAR_FLOOR = 0.2
 
 function radarReturns() {
-  if (CACHE.radar2) return CACHE.radar2
+  if (CACHE.radar3) return CACHE.radar3
   var rnd = mulberry32(4242)
   var rs = []
   function add(kind, x, y, gain) {
-    var z = depthAt(x, y)
-    rs.push({ kind: kind, x: x, y: y, r: Math.hypot(x, y), a: Math.atan2(y, x), gain: gain * (0.62 + 0.38 * z), j: rnd() })
+    var z = holoInside(x, y) > 0 ? holoZAt(x, y) : 0
+    rs.push({ kind: kind, x: x, y: y, r: Math.hypot(x, y), a: Math.atan2(y, x), gain: gain * (0.7 + 0.5 * z), j: rnd() })
   }
   var i, a
-  for (i = 0; i < 72; i++) {
-    a = (i / 72) * TAU
-    add("rim", Math.cos(a) * RIM_R, Math.sin(a) * RIM_R, 1.25)
+  // The silhouette of the mask.
+  for (i = 0; i < 64; i++) {
+    a = (i / 64) * TAU
+    var sy = HOLO_B * Math.sin(a)
+    add("rim", HOLO_A * Math.cos(a) * holoTaper(sy) * 1.02, sy * 1.02, 0.85)
   }
-  // Depth contours: rings of equal depth, the face's topology.
-  var topo = [[0.2, 10], [0.33, 16], [0.46, 22], [0.58, 28], [0.69, 34]]
-  for (var ti = 0; ti < topo.length; ti++) {
-    var off = rnd() * TAU
-    for (i = 0; i < topo[ti][1]; i++) {
-      a = off + (i / topo[ti][1]) * TAU
-      var tx = Math.cos(a) * topo[ti][0], ty = Math.sin(a) * topo[ti][0]
-      if (inEye(tx, ty, 0.05) || inMouth(tx, ty, 0.02)) continue
-      add("topo", tx, ty, 0.6)
-    }
-  }
-  for (var e = 0; e < 2; e++) {
-    var ex = e === 0 ? EYE_L : EYE_R
-    // A sparse iris ring. Dense eye returns bloom into two discs, and two
-    // discs over a bar is a robot face.
-    for (i = 0; i < 10; i++) {
-      a = (i / 10) * TAU + 0.2
-      add("eye", ex + Math.cos(a) * 0.115, EYE_Y + Math.sin(a) * 0.088, 0.8)
-    }
-  }
-  for (i = 0; i < 5; i++) add("nose", 0, mix(-0.14, 0.1, i / 4), 0.85)
-  add("nose", -0.055, 0.13, 0.8)
-  add("nose", 0.055, 0.13, 0.8)
-  for (i = 0; i < 11; i++) {
-    var u = (i / 10) * 2 - 1
-    add("mouth", u * MOUTH_HALF * 0.92, MOUTH_Y, 0.8)
+  // The face itself is its relief: returns laid along the iso-depth
+  // contours, so the nose, sockets and cheekbones emerge as topography.
+  var topo = holoContours()
+  for (i = 0; i < topo.segs.length; i++) {
+    var S = topo.segs[i]
+    add("topo", (S[0] + S[2]) / 2, (S[1] + S[3]) / 2, 0.45 + 0.07 * S[5])
   }
   var n = 0
-  while (n < 50) {
-    var sx = (rnd() * 2 - 1) * 0.74
-    var sy = (rnd() * 2 - 1) * 0.74
-    if (Math.hypot(sx, sy) > 0.74 || inEye(sx, sy, 0.06) || inMouth(sx, sy, 0.03)) continue
-    add("skin", sx, sy, 0.32)
+  while (n < 40) {
+    var sx = (rnd() * 2 - 1) * 0.6
+    var sy2 = (rnd() * 2 - 1) * 0.78
+    if (holoInside(sx, sy2) <= 0.05) continue
+    add("skin", sx, sy2, 0.3)
     n++
   }
-  CACHE.radar2 = rs
+  CACHE.radar3 = rs
   return rs
 }
 
@@ -1726,7 +1675,7 @@ function paintRadar(ctx, size, spec) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
-  var tint = bad ? ROLE_ERROR : ROLE_ACCENT
+  var tint = bad ? missTint(rt) : ROLE_ACCENT
   var t0 = t - rt
 
   var hair = Math.max(1, size * 0.0065)
@@ -1961,7 +1910,7 @@ function paintRadar(ctx, size, spec) {
     if (bad) alpha *= 1 - 0.45 * seg(rt, 200, 800)
     alpha *= 1 + passFlash * 0.2
     var w = clamp(0.03 / Math.max(q.r, 0.05), 0.05, 0.22)
-    if (q.kind === "rim") w *= mix(0.9, 1.5, holdK)
+    if (q.kind === "rim") w *= mix(0.8, 1.2, holdK)
     if (q.kind === "topo" || q.kind === "skin") w *= 0.7
     var feat = q.kind !== "skin" && q.kind !== "topo"
     var lw = compact ? Math.max(1, size * 0.03)
@@ -1969,16 +1918,10 @@ function paintRadar(ctx, size, spec) {
     var ox = bad ? tearShift(tears, q.y) * R : 0
     var qr = q.r * R
     if (bad && jamK > 0) qr += (hash(jitStep * 7 + i) - 0.5) * 0.05 * R * jamK
-    if (q.kind === "mouth") {
-      // Radial ticks. Range arcs along the mouth bow into a smile at the
-      // bottom of the scope; ticks read as a measured row.
-      var tlen = R * 0.035
-      crisp.line(tint, alpha, lw, cx + ox + Math.cos(q.a) * (qr - tlen), cy + Math.sin(q.a) * (qr - tlen),
-        cx + ox + Math.cos(q.a) * (qr + tlen), cy + Math.sin(q.a) * (qr + tlen))
-    } else {
+    {
       crisp.arc(tint, alpha, lw, cx + ox, cy, qr, q.a - w, q.a + w)
       // Phosphor bloom on fresh returns.
-      if (!compact && (q.kind === "rim" || q.kind === "topo") && fresh > 0.45) halo.arc(tint, alpha * 0.22 * fresh, lw * 3.2, cx + ox, cy, qr, q.a - w, q.a + w)
+      if (!compact && q.kind === "topo" && fresh > 0.45) halo.arc(tint, alpha * 0.18 * fresh, lw * 3, cx + ox, cy, qr, q.a - w, q.a + w)
     }
     if (smearK > 0.01) {
       var r1 = qr * (1 + 0.32 * smearK * (0.5 + q.j))
@@ -2008,7 +1951,8 @@ function paintRadar(ctx, size, spec) {
 
   // --- target brackets and lock symbology -------------------------------------------
   if (!compact) {
-    var eyes = [[EYE_L, EYE_Y], [EYE_R, EYE_Y]]
+    // Trackers on three asymmetric landmarks: never a pair where eyes sit.
+    var trk = [LANDMARKS[2], LANDMARKS[9], LANDMARKS[11]]
     // Face box: hunting while scanning, seated with an overshoot on a lock,
     // blown apart on a miss.
     var snap = ok ? easeOutBack(seg(rt, 350, 560)) : 0
@@ -2034,20 +1978,25 @@ function paintRadar(ctx, size, spec) {
       bracketBox(crisp, tint, boxA, hair, cx + jx, cy + jy, boxH, R * mix(0.16, 0.22, snap))
       if (ok && snap > 0) bracketBox(halo, tint, 0.2 * snap, thin * 3, cx, cy, boxH, R * 0.22)
     }
-    // Eye trackers.
-    for (var ey = 0; ey < 2; ey++) {
-      var exPx = cx + eyes[ey][0] * R, eyPx = cy + eyes[ey][1] * R
+    // Feature trackers.
+    for (var ey = 0; ey < trk.length; ey++) {
+      var exPx = cx + trk[ey].x * R, eyPx = cy + trk[ey].y * R
       if (bad) {
-        var bk = seg(rt, 60, 300)
+        var bk = seg(rt, 60 + ey * 40, 300 + ey * 40)
         drawLostTrack(crisp, exPx + Math.sin(rt / 23 + ey) * R * 0.03, eyPx + Math.cos(rt / 29 + ey) * R * 0.03,
           R, easeOutCubic(seg(rt, 300, 800)), clamp01(bk * 2) * 0.8, hair, ey + 20)
         continue
       }
-      var hunt = scanning ? 1 : 1 - easeOutCubic(seg(rt, 420, 600))
-      var ex2 = exPx + Math.sin(t / 410 + ey * 2) * R * 0.05 * hunt
-      var ey2 = eyPx + Math.cos(t / 530 + ey * 3) * R * 0.04 * hunt
-      var eh = R * mix(0.075, 0.13, hunt)
+      var hunt = scanning ? 1 : 1 - easeOutCubic(seg(rt, 420 + ey * 60, 600 + ey * 60))
+      var ex2 = exPx + Math.sin(t / (410 + ey * 90) + ey * 2) * R * 0.05 * hunt
+      var ey2 = eyPx + Math.cos(t / (530 + ey * 70) + ey * 3) * R * 0.04 * hunt
+      var eh = R * mix(0.06, 0.11, hunt)
       bracketBox(crisp, tint, (0.35 + 0.5 * (1 - hunt)) * boot, fine * 1.4, ex2, ey2, eh, eh * 0.45)
+      if (labels) {
+        // Coordinates beside each tracker, scrambling while it hunts.
+        var cv = hunt > 0.05 ? hash(Math.floor(t / 70) + ey * 9) * 999 : (trk[ey].x + 1) * 400 + ey * 17
+        seg7(crisp, tint, 0.55 * boot, 0, fine, ex2 + eh + R * 0.02, ey2 - eh, R * 0.02, R * 0.036, R * 0.028, pad3(cv), 0)
+      }
     }
     // Centre reticle, turning.
     var cRot = t / 1500 + (ok ? 2 * easeInOutCubic(seg(rt, 0, 700)) : 0)
@@ -2154,14 +2103,22 @@ var HOLO_C = 0.55
 var HOLO_CY = -0.10
 var HOLO_F = 3.4
 var HOLO_BAND_MS = 2300
+var HOLO_SLICES = 24
 
+// The face's bone structure as relief on the mask. Every style draws the
+// face from this surface alone (its depth, slope and contours), never from
+// drawn eyes or a mouth, which is what keeps it from reading as an emoji.
 function holoRelief(x, y) {
   var ex = Math.abs(x) - 0.25
-  var nose = 0.15 * Math.exp(-((x / 0.075) * (x / 0.075) + ((y - 0.02) / 0.19) * ((y - 0.02) / 0.19)))
-  var sock = -0.07 * Math.exp(-((ex / 0.12) * (ex / 0.12) + ((y + 0.18) / 0.08) * ((y + 0.18) / 0.08)))
-  var brow = 0.03 * Math.exp(-((ex / 0.16) * (ex / 0.16) + ((y + 0.30) / 0.05) * ((y + 0.30) / 0.05)))
-  var lips = 0.025 * Math.exp(-((x / 0.2) * (x / 0.2) + ((y - 0.36) / 0.05) * ((y - 0.36) / 0.05)))
-  return nose + sock + brow + lips
+  var nose = 0.2 * Math.exp(-((x / 0.07) * (x / 0.07) + ((y - 0.02) / 0.2) * ((y - 0.02) / 0.2)))
+  var tip = 0.04 * Math.exp(-((x / 0.06) * (x / 0.06) + ((y - 0.13) / 0.05) * ((y - 0.13) / 0.05)))
+  var sock = -0.09 * Math.exp(-((ex / 0.12) * (ex / 0.12) + ((y + 0.18) / 0.08) * ((y + 0.18) / 0.08)))
+  var brow = 0.04 * Math.exp(-((ex / 0.17) * (ex / 0.17) + ((y + 0.31) / 0.05) * ((y + 0.31) / 0.05)))
+  var cx0 = Math.abs(x) - 0.3
+  var cheek = 0.04 * Math.exp(-((cx0 / 0.12) * (cx0 / 0.12) + ((y - 0.06) / 0.1) * ((y - 0.06) / 0.1)))
+  var lips = 0.03 * Math.exp(-((x / 0.18) * (x / 0.18) + ((y - 0.36) / 0.045) * ((y - 0.36) / 0.045)))
+  var chin = 0.03 * Math.exp(-((x / 0.15) * (x / 0.15) + ((y - 0.6) / 0.08) * ((y - 0.6) / 0.08)))
+  return nose + tip + sock + brow + cheek + lips + chin
 }
 
 function holoTaper(y) { return y > 0 ? 1 - 0.30 * (y / HOLO_B) * (y / HOLO_B) : 1 }
@@ -2190,13 +2147,15 @@ function holoMesh(compact) {
   var key = compact ? "holoC" : "holo2"
   if (CACHE[key]) return CACHE[key]
   var lines = []
-  var nLat = compact ? 5 : 13
-  var nLon = compact ? 5 : 13
+  // Structured light: dense horizontal slices that bend over the relief, a
+  // few verticals to hold them together.
+  var nLat = compact ? 5 : HOLO_SLICES
+  var nLon = compact ? 5 : 7
   var i, j, pts
   for (i = 0; i < nLat; i++) {
     var v = mix(-1.25, 1.25, i / (nLat - 1))
     pts = []
-    for (j = 0; j <= (compact ? 18 : 26); j++) pts.push(holoSurface(mix(-1.75, 1.75, j / (compact ? 18 : 26)), v))
+    for (j = 0; j <= (compact ? 18 : 28); j++) pts.push(holoSurface(mix(-1.75, 1.75, j / (compact ? 18 : 28)), v))
     lines.push(pts)
   }
   for (i = 0; i < nLon; i++) {
@@ -2265,30 +2224,29 @@ function holoContours() {
   return CACHE.holoT
 }
 
-function holoFeatures() {
-  if (CACHE.holoF) return CACHE.holoF
-  var f = []
-  var i, pts
-  function onSurface(x, y) { return [x, y, holoZAt(x, y) + 0.004] }
-  for (var e = -1; e <= 1; e += 2) {
-    pts = []
-    for (i = 0; i <= 16; i++) {
-      var a = (i / 16) * TAU
-      pts.push(onSurface(e * 0.25 + Math.cos(a) * 0.10, -0.18 + Math.sin(a) * 0.045))
+// Solver nodes: a jittered lattice of surface points the lock resolves in a
+// wave from the nose outward. Deliberately not the landmark set: a lock
+// diamond in each eye socket reads as pupils.
+function holoNodes() {
+  if (CACHE.holoN) return CACHE.holoN
+  var nodes = []
+  var us = [-0.95, -0.48, 0, 0.48, 0.95], vs = [-0.95, -0.5, -0.05, 0.4, 0.85]
+  for (var i = 0; i < vs.length; i++) {
+    for (var j = 0; j < us.length; j++) {
+      var u = us[j] + (hash(i * 7 + j * 3 + 1) - 0.5) * 0.22
+      var v = vs[i] + (hash(i * 5 + j * 11 + 2) - 0.5) * 0.18
+      var P = holoSurface(u, v)
+      nodes.push({ P: P, i: i, j: j, order: Math.hypot(P[0], P[1] - 0.05) * 6 + hash(i * 13 + j) })
     }
-    f.push(pts)
   }
-  // No brow strokes: drawn brows give the mask an expression. The brow
-  // ridge is still in the relief, so the mesh carries it.
-  pts = []
-  for (i = 0; i <= 6; i++) pts.push(onSurface(0, mix(-0.14, 0.11, i / 6)))
-  f.push(pts)
-  f.push([onSurface(-0.06, 0.14), onSurface(0, 0.17), onSurface(0.06, 0.14)])
-  pts = []
-  for (i = 0; i <= 8; i++) pts.push(onSurface(mix(-0.19, 0.19, i / 8), 0.36))
-  f.push(pts)
-  CACHE.holoF = f
-  return f
+  var edges = []
+  for (var n = 0; n < nodes.length; n++) {
+    if (nodes[n].j < us.length - 1) edges.push([n, n + 1])
+    if (nodes[n].i < vs.length - 1) edges.push([n, n + us.length])
+    if (nodes[n].j < us.length - 1 && nodes[n].i < vs.length - 1 && (nodes[n].i + nodes[n].j) % 2 === 0) edges.push([n, n + us.length + 1])
+  }
+  CACHE.holoN = { nodes: nodes, edges: edges }
+  return CACHE.holoN
 }
 
 function paintHolo(ctx, size, spec) {
@@ -2310,7 +2268,7 @@ function paintHolo(ctx, size, spec) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
-  var tint = bad ? ROLE_ERROR : ROLE_ACCENT
+  var tint = bad ? missTint(rt) : ROLE_ACCENT
   var t0 = t - rt
 
   var hair = Math.max(1, size * 0.0065)
@@ -2654,9 +2612,9 @@ function paintHolo(ctx, size, spec) {
       al.push(a)
       cal.push(a * 0.35)
     }
-    // The offset copy rides the latitude lines only; that is enough to read
-    // as colour fringing and halves its cost.
-    if (!compact && chroma > 0.02 && ln < 13) strip(crisp, ROLE_FG, fine, cpts, cal)
+    // The offset copy rides every other slice; that is enough to read as
+    // colour fringing at a fraction of the cost.
+    if (!compact && chroma > 0.02 && ln < HOLO_SLICES && ln % 2 === 0) strip(crisp, ROLE_FG, fine, cpts, cal)
     strip(crisp, tint, mw2, pts, al)
   }
   crisp.flush()
@@ -2723,20 +2681,6 @@ function paintHolo(ctx, size, spec) {
     crisp.poly(tint, outA, thin, outline)
   }
 
-  // Feature contours on the surface.
-  var feats = holoFeatures()
-  var fA = (0.72 + 0.28 * solid) * flick * (bad ? 1 - 0.5 * frag : 1)
-  for (var fi = 0; fi < feats.length; fi++) {
-    var fp = []
-    for (var fj = 0; fj < feats[fi].length; fj++) {
-      var P = project(feats[fi][fj])
-      var fdx = glitchX(P.x, P.y)
-      if (bad && frag > 0) fdx += dragOffset(0.25 * (hash(fi + 40) - 0.5), fragTau, 3.5)
-      var FP = toPx(P.x + fdx, P.y + (bad ? dragOffset(0.08, fragTau, 2) : 0))
-      fp.push([FP.x, FP.y])
-    }
-    crisp.poly(tint, fA, compact ? Math.max(1, size * 0.022) : thin, fp)
-  }
   flush()
 
   // --- orbit rings ------------------------------------------------------------------
@@ -2809,6 +2753,7 @@ function paintHolo(ctx, size, spec) {
     if (mk > sy0 && mk < sy1) {
       var mz = holoZAt(0, mk - HOLO_CY)
       crisp.line(tint, 0.8 * sA, fine, cx + sx0, cy + mk * R, cx + sx0 + mz * R * 0.34 + R * 0.04, cy + mk * R)
+      if (size >= 150) seg7(crisp, tint, 0.7 * sA, 0, fine, cx + sx0 + R * 0.02, cy + mk * R - R * 0.07, R * 0.02, R * 0.036, R * 0.028, pad3(mz * 1000), 0)
     }
     var lx = -R * 0.7
     crisp.line(ROLE_FG, 0.3 * sA, fine, cx + lx, cy + sy0 * R, cx + lx, cy + sy1 * R)
@@ -2821,12 +2766,10 @@ function paintHolo(ctx, size, spec) {
   }
 
   // --- landmarks, beams, scanner rings and result gestures ------------------------------
+  var NS = holoNodes()
   var lmPx = []
-  var lm3 = []
-  for (var lm = 0; lm < LANDMARKS.length; lm++) {
-    var LMk = LANDMARKS[lm]
-    var LP = project([LMk.x * 0.9, LMk.y * 0.92, holoZAt(LMk.x * 0.9, LMk.y * 0.92)])
-    lm3.push(LP)
+  for (var lm = 0; lm < NS.nodes.length; lm++) {
+    var LP = project(NS.nodes[lm].P)
     lmPx.push({ p: toPx(LP.x + glitchX(LP.x, LP.y), LP.y), y: LP.y, z: LP.z })
   }
   if (!compact) {
@@ -2836,7 +2779,7 @@ function paintHolo(ctx, size, spec) {
       for (var bm = 0; bm < 24; bm++) {
         var bea = bm / 24 * Math.PI
         var bx0 = cx + Math.cos(bea) * erx * R * (bm % 2 ? 1 : 0.7), by0 = cy + (EY + Math.sin(bea) * ery) * R
-        var target = bm < LANDMARKS.length ? lmPx[bm].p : toPx((bm % 2 ? 1 : -1) * outlineW(HOLO_CY) * 0.95, HOLO_CY + (bm - 13) * 0.07)
+        var target = bm < lmPx.length ? lmPx[(bm * 7) % lmPx.length].p : toPx((bm % 2 ? 1 : -1) * outlineW(HOLO_CY) * 0.95, HOLO_CY)
         var bfl = 0.6 + 0.4 * hash(Math.floor(t / 90) * 13 + bm)
         crisp.line(tint, 0.06 * bfl * beamA, fine, bx0, by0, target.x, target.y)
       }
@@ -2854,12 +2797,12 @@ function paintHolo(ctx, size, spec) {
     } else if (ok) {
       var lockK = []
       for (var rl = 0; rl < lmPx.length; rl++) {
-        var lockAt = 300 + LANDMARKS[rl].order * 30
-        lockK.push(seg(rt, lockAt, lockAt + REC_LOCK_LEN))
+        var lockAt = 280 + NS.nodes[rl].order * 55
+        lockK.push(lmPx[rl].z < -0.05 ? 0 : seg(rt, lockAt, lockAt + REC_LOCK_LEN))
       }
-      // The landmark graph draws out on the surface between locked points.
-      for (var ge = 0; ge < LANDMARK_EDGES.length; ge++) {
-        var E = LANDMARK_EDGES[ge]
+      // The solver lattice draws out on the surface between locked nodes.
+      for (var ge = 0; ge < NS.edges.length; ge++) {
+        var E = NS.edges[ge]
         var ek = easeInOutCubic(Math.min(lockK[E[0]], lockK[E[1]]))
         if (ek <= 0.01) continue
         var GA = lmPx[E[0]].p, GB = lmPx[E[1]].p
@@ -2893,10 +2836,11 @@ function paintHolo(ctx, size, spec) {
         crisp.poly(tint, wave * 0.6, thin, wp)
       }
     } else {
-      for (var bl = 0; bl < lmPx.length; bl++) {
-        var bk = seg(rt, 60 + LANDMARKS[bl].order * 22, 300 + LANDMARKS[bl].order * 22)
+      for (var bl = 0; bl < lmPx.length; bl += 2) {
+        var bo = NS.nodes[bl].order
+        var bk = seg(rt, 60 + bo * 30, 300 + bo * 30)
         if (bk <= 0) continue
-        var lost = easeOutCubic(seg(rt, 300 + LANDMARKS[bl].order * 22, 800))
+        var lost = easeOutCubic(seg(rt, 300 + bo * 30, 800))
         var shake = (1 - bk) * R * 0.04
         drawLostTrack(crisp, lmPx[bl].p.x + Math.sin(rt / 23 + bl) * shake, lmPx[bl].p.y + Math.cos(rt / 29 + bl * 2) * shake,
           R, lost, clamp01(bk * 2) * (0.85 - 0.45 * lost), hair, bl)
@@ -2969,19 +2913,31 @@ function paintHoloReadouts(p, size, state, t, rt, boot, tint, yaw, pitch, flick)
   readoutDetail(p, g, size, state, t, rt, tint)
 }
 
+// The styles are authored on a 1150 ms lock and a 900 ms miss. Results are
+// played slower than authored so each beat of the sequence reads; the entry
+// clock is kept, so every result still eases out of the pose it began from.
+var AUTHORED_HOLD = { recognized: 1150, notRecognized: 900 }
+
 function paintInto(ctx, size, spec) {
   var style = resolveStyle(spec)
-  if (style === "radar") paintRadar(ctx, size, spec)
-  else if (style === "holo") paintHolo(ctx, size, spec)
-  else paintHud(ctx, size, spec)
+  var authored = AUTHORED_HOLD[spec.state]
+  var s = spec
+  if (authored) {
+    var k = authored / holdMs(spec.state)
+    var rt = spec.elapsed || 0
+    s = { state: spec.state, clock: (spec.clock || 0) - rt + rt * k, elapsed: rt * k }
+  }
+  if (style === "radar") paintRadar(ctx, size, s)
+  else if (style === "holo") paintHolo(ctx, size, s)
+  else paintHud(ctx, size, s)
 }
 
 // How long the host should hold each state before it tears the card down.
-// The recognised value is the cost of the identification beat. Clipping it
-// cuts the shockwave off before the reticle has settled.
+// This is the cost of the result sequence, well under the host's 2 s clamp.
+// Clipping it cuts the confirmation off before the instrument has settled.
 function holdMs(state) {
-  if (state === "recognized") return 1150
-  if (state === "notRecognized") return 900
+  if (state === "recognized") return 1500
+  if (state === "notRecognized") return 1200
   return 0
 }
 

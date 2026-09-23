@@ -150,7 +150,7 @@ check('scanning is a dot cloud', () => {
 })
 
 check('a settled recognised face has no dots left on it', () => {
-  for (const elapsed of [780, 900, 1150, 1400]) {
+  for (const elapsed of [1200, 1500, 1800]) {
     assert.strictEqual(dots(ops('recognized', elapsed)), 0, 'dots still painted at ' + elapsed + ' ms')
   }
 })
@@ -160,7 +160,7 @@ check('the dots are still there while recognition is being worked out', () => {
 })
 
 check('a settled recognised face is drawn with strokes', () => {
-  assert.ok(strokes(ops('recognized', 1150)) > 3, 'expected a drawn face')
+  assert.ok(strokes(ops('recognized', holdMs('recognized'))) > 3, 'expected a drawn face')
 })
 
 check('a scan boots in rather than popping on', () => {
@@ -211,8 +211,8 @@ check('a frame stays inside the host op budget', () => {
 // --- the timing contract the host reads ------------------------------------
 
 check('the host is told how long to hold each state', () => {
-  assert.strictEqual(holdMs('recognized'), 1150)
-  assert.strictEqual(holdMs('notRecognized'), 900)
+  assert.strictEqual(holdMs('recognized'), 1500)
+  assert.strictEqual(holdMs('notRecognized'), 1200)
   assert.strictEqual(holdMs('scanning'), 0)
   assert.strictEqual(holdMs('anything else'), 0)
 })
@@ -349,15 +349,16 @@ for (const style of exported.STYLES) {
   })
 
   check(style + ': a settled recognised face is strokes only, no dots', () => {
-    for (const elapsed of [900, 1150, 1400]) {
+    for (const elapsed of [1200, 1500, 1800]) {
       const list = styled(style, 'recognized', elapsed)
       assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
       assert.ok(strokes(list) > 3, 'expected a drawn face at ' + elapsed)
     }
   })
 
-  check(style + ': a miss paints in the error role only', () => {
-    for (const elapsed of [150, 500, 900]) {
+  check(style + ': a miss opens with a fault strobe, then paints in the error role only', () => {
+    assert.ok(styled(style, 'notRecognized', 0).some(o => o[1] === 0), 'expected the strobe to open in the accent')
+    for (const elapsed of [300, 700, 1200]) {
       const accent = styled(style, 'notRecognized', elapsed).filter(o => o[1] === 0)
       assert.strictEqual(accent.length, 0, 'accent ops in a miss at ' + elapsed)
     }
@@ -395,8 +396,8 @@ for (const style of exported.STYLES) {
   })
 }
 
-check('the HUD also paints a miss in the error role only', () => {
-  for (const elapsed of [150, 500, 900]) {
+check('the HUD also paints a miss in the error role only after its strobe', () => {
+  for (const elapsed of [300, 700, 1200]) {
     assert.strictEqual(styled('hud', 'notRecognized', elapsed).filter(o => o[1] === 0).length, 0)
   }
 })
