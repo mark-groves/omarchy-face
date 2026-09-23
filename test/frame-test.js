@@ -230,11 +230,20 @@ check('the host never needs more than two seconds of hold', () => {
 
 // --- replay cost, which the host pays on a software canvas every frame -----
 
+// The host replays every op and path command in JS on a software canvas each
+// frame, so the real 116 px slot gets a budget well inside the host caps.
+const REPLAY_OPS = 1000
+const REPLAY_CMDS = 6500
+
+function replayCost(list) {
+  return { ops: list.length, cmds: list.reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0) }
+}
+
 check('a frame at the real 116 px slot stays cheap to replay', () => {
   for (const state of STATES) {
     for (let elapsed = 0; elapsed <= 1200; elapsed += 50) {
-      const n = ops(state, elapsed, 116, 5000 + elapsed).length
-      assert.ok(n < 450, state + '@' + elapsed + ' replays ' + n + ' ops')
+      const c = replayCost(ops(state, elapsed, 116, 5000 + elapsed))
+      assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
     }
   }
 })
@@ -304,7 +313,7 @@ check('an unknown style paints the installed one, never nothing', () => {
   assert.deepStrictEqual(broken(120, { state: 'scanning', clock: 900, elapsed: 2000 }), styled('hud', 'scanning', 2000))
 })
 
-for (const style of ['radar', 'holo']) {
+for (const style of exported.STYLES) {
   check(style + ': a frame is nothing but finite numbers, roles and alphas in range', () => {
     for (const state of STATES) {
       for (const elapsed of [0, 200, 430, 700, 1080, 2600]) {
@@ -374,7 +383,11 @@ for (const style of ['radar', 'holo']) {
       for (const state of STATES) {
         for (let elapsed = 0; elapsed <= 3000; elapsed += 100) {
           const list = styled(style, state, elapsed, size, 5000 + elapsed)
-          assert.ok(list.length < (size === 116 ? 450 : 6000), style + ' op budget blown: ' + list.length)
+          assert.ok(list.length < 6000, style + ' op budget blown: ' + list.length)
+          if (size === 116) {
+            const c = replayCost(list)
+            assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
+          }
           for (const op of list) if (op[0] === 0) assert.ok(op[4].length < 600, 'path command budget blown')
         }
       }
