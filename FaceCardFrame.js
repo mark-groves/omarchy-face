@@ -2268,7 +2268,7 @@ function holoMesh(compact) {
   for (i = 0; i < nLat; i++) {
     var v = mix(-1.25, 1.25, i / (nLat - 1))
     pts = []
-    for (j = 0; j <= (compact ? 18 : 28); j++) pts.push(holoSurface(mix(-1.75, 1.75, j / (compact ? 18 : 28)), v))
+    for (j = 0; j <= (compact ? 18 : 24); j++) pts.push(holoSurface(mix(-1.75, 1.75, j / (compact ? 18 : 24)), v))
     lines.push(pts)
   }
   for (i = 0; i < nLon; i++) {
@@ -2305,8 +2305,8 @@ function holoPoints() {
 // face space; the pose is applied per frame.
 function holoDenseContours() {
   var lv = []
-  for (var i = 0; i < 14; i++) lv.push(0.05 + i * 0.047)
-  return reliefContours("holoTD", 22, 30, lv, true)
+  for (var i = 0; i < 12; i++) lv.push(0.05 + i * 0.055)
+  return reliefContours("holoTD", 20, 28, lv, true)
 }
 
 function holoContours() {
@@ -2785,7 +2785,7 @@ function paintHolo(ctx, size, spec) {
       var ax = A0.x + glitchX(A0.x, A0.y), bx = B0.x + glitchX(B0.x, B0.y)
       var AP = toPx(ax, A0.y), BP = toPx(bx, B0.y)
       crisp.line(tint, ca, fine * 1.3, AP.x, AP.y, BP.x, BP.y)
-      if (ts % 3 === 0) halo.line(tint, ca * 0.16, hair * 3, AP.x, AP.y, BP.x, BP.y)
+      if (ts % 4 === 0) halo.line(tint, ca * 0.2, hair * 3, AP.x, AP.y, BP.x, BP.y)
     }
     flush()
   }
