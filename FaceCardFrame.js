@@ -1503,7 +1503,7 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
 function hudContours() {
   var lv = []
   for (var i = 0; i < 12; i++) lv.push(0.06 + i * 0.056)
-  return reliefContours("hudT2", 22, 30, lv, true, holoZAt, true)
+  return reliefContours("hudT5", 22, 30, lv, false, holoZAt, true)
 }
 
 // HUD face topology: iso-depth contours of the relief and profile curves
@@ -1541,12 +1541,13 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
     // A lock resolves the map top to bottom behind a sweeping front.
     var sweepAt = 220 + (S[1] + 0.82) * 380
     var cas = ok ? bump(rt, sweepAt, sweepAt + 260) : 0
-    var base = 0.26 + 0.55 * cas + 0.3 * (ok ? seg(rt, sweepAt, sweepAt + 200) : 0) * (0.6 + 0.4 * resolved)
+    // Once swept, the map steps back behind the wireframe the lock resolves.
+    var base = 0.26 + 0.55 * cas + 0.3 * resolved
     var A = place(S[0], S[1], S[4] * DEPTH), B = place(S[2], S[3], S[4] * DEPTH)
     var a = lightAt((A.u + B.u) / 2, base, ts * 7 + 1)
     if (a <= 0.004) continue
     crisp.line(tint, a, fine * 1.2, A.p.x, A.p.y, B.p.x, B.p.y)
-    if (resolved > 0.05 && ts % 2 === 0) halo.line(tint, a * 0.2 * resolved, hair * 3, A.p.x, A.p.y, B.p.x, B.p.y)
+    if ((cas > 0.05 || resolved > 0.05) && ts % 2 === 0) halo.line(tint, a * 0.2 * Math.max(cas, resolved), hair * 3, A.p.x, A.p.y, B.p.x, B.p.y)
   }
   var profiles = [[1, 0, 0], [0, 1, 0], [1, 0, 0.36], [1, 0, -0.36], [0, 1, 0.4], [0, 1, -0.4]]
   var profA = 0.13 + (ok ? 0.3 * bump(rt, 300, 700) + 0.1 * seg(rt, 600, 900) : 0)
@@ -2225,16 +2226,18 @@ function holoRelief(x, y) {
   var ax = Math.abs(x)
   function g(dx, sx, dy, sy) { return Math.exp(-((dx / sx) * (dx / sx) + (dy / sy) * (dy / sy))) }
   var dome = 0.04 * g(x, 0.32, y + 0.52, 0.16)
-  var brow = 0.07 * g(ax - 0.2, 0.2, y + 0.3, 0.05)
-  var sock = -0.11 * g(ax - 0.25, 0.13, y + 0.17, 0.09)
+  // Sockets and the ridges around them are kept shallow enough that the
+  // contours dent around the eyes rather than closing into rings.
+  var brow = 0.045 * g(ax - 0.2, 0.2, y + 0.3, 0.05)
+  var sock = -0.045 * g(ax - 0.25, 0.15, y + 0.17, 0.1)
   var bridge = 0.06 * g(x, 0.045, y + 0.08, 0.1)
   var nose = 0.15 * g(x, 0.065, y - 0.07, 0.11)
   var tip = 0.05 * g(x, 0.055, y - 0.15, 0.045)
   var wings = 0.03 * g(ax - 0.08, 0.04, y - 0.15, 0.04)
-  var cheek = 0.06 * g(ax - 0.31, 0.12, y - 0.07, 0.11)
-  var lips = 0.022 * g(x, 0.16, y - 0.36, 0.05)
-  var chin = 0.05 * g(x, 0.14, y - 0.62, 0.07)
-  return dome + brow + sock + bridge + nose + tip + wings + cheek + lips + chin
+  var cheek = 0.04 * g(ax - 0.31, 0.13, y - 0.07, 0.12)
+  // No lip relief: its closed contour loop reads as an open mouth.
+  var chin = 0.035 * g(x, 0.22, y - 0.62, 0.09)
+  return dome + brow + sock + bridge + nose + tip + wings + cheek + chin
 }
 
 // Width of the mask at height y: a narrower brow, cheekbones, and a jaw
@@ -2331,7 +2334,7 @@ function holoPoints() {
 function holoDenseContours() {
   var lv = []
   for (var i = 0; i < 12; i++) lv.push(0.05 + i * 0.055)
-  return reliefContours("holoTD2", 20, 28, lv, true, holoZAt, true)
+  return reliefContours("holoTD5", 20, 28, lv, false, holoZAt, true)
 }
 
 function holoContours() {
@@ -2367,7 +2370,7 @@ function reliefContours(key, nx, ny, levels, skipSockets, zfn, skipNose) {
         var xa = mix(x0, x1, ci / nx), xb = mix(x0, x1, (ci + 1) / nx)
         var ya = mix(y0, y1, cj / ny), yb = mix(y0, y1, (cj + 1) / ny)
         var mxc = (xa + xb) / 2, myc = (ya + yb) / 2
-        if (skipSockets && socket(mxc, myc) > 0.3) continue
+        if (skipSockets && socket(mxc, myc) > (skipSockets === true ? 0.3 : skipSockets)) continue
         if (skipNose && Math.abs(mxc) < 0.13 && myc > -0.2 && myc < 0.26) continue
         var v00 = grid[cj][ci], v10 = grid[cj][ci + 1], v01 = grid[cj + 1][ci], v11 = grid[cj + 1][ci + 1]
         var pts = []
@@ -2786,7 +2789,7 @@ function paintHolo(ctx, size, spec) {
       rpts.push({ x: PX.x - chX, y: PX.y - chY })
       var da = clamp01((Q.z + 0.12) / 0.62)
       var shadeK = L[sj].length > 3 ? 0.2 + 1.1 * L[sj][3] : 1
-      var a = baseA * 0.62 * (0.1 + 0.9 * Math.pow(da, 1.2)) * shadeK * flick + bandBoost(y0) * boot
+      var a = baseA * 0.45 * (0.1 + 0.9 * Math.pow(da, 1.2)) * shadeK * flick + bandBoost(y0) * boot
       if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
       al.push(a)
       cal.push(a * 0.32)
@@ -2817,11 +2820,11 @@ function paintHolo(ctx, size, spec) {
       var S = topo.segs[ts]
       var A0 = project([S[0], S[1], S[4]]), B0 = project([S[2], S[3], S[4]])
       var casc = ok ? bump(rt, 250 + (topo.levels - S[5]) * 45, 600 + (topo.levels - S[5]) * 45) : 0
-      var ca = (0.42 + 0.5 * casc + 0.3 * solid) * flick * clamp01((A0.z + 0.1) / 0.5) + bandBoost(A0.y) * 0.5
+      var ca = (0.55 + 0.45 * casc + 0.25 * solid) * flick * clamp01((A0.z + 0.1) / 0.5) + bandBoost(A0.y) * 0.5
       if (bad && hash(ts * 3 + 1) < frag) continue
       var ax = A0.x + glitchX(A0.x, A0.y), bx = B0.x + glitchX(B0.x, B0.y)
       var AP = toPx(ax, A0.y), BP = toPx(bx, B0.y)
-      crisp.line(tint, ca, fine * 1.3, AP.x, AP.y, BP.x, BP.y)
+      crisp.line(tint, ca, hair, AP.x, AP.y, BP.x, BP.y)
       if (ts % 4 === 0) halo.line(tint, ca * 0.2, hair * 3, AP.x, AP.y, BP.x, BP.y)
     }
     flush()
