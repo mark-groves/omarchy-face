@@ -236,7 +236,9 @@ function buildParticles(seed) {
 
   var eyes = [[EYE_L, "eyeL"], [EYE_R, "eyeR"]]
   for (var e = 0; e < 2; e++) {
-    var rings = [[0, 1], [0.5, 6], [0.92, 10]]
+    // Hollow iris rings, not filled discs. A dense eye cluster locks into a
+    // solid blob, and two blobs over a bar is a cartoon face.
+    var rings = [[0.55, 5], [1.3, 12]]
     for (var ri = 0; ri < rings.length; ri++) {
       var rr = rings[ri][0] * EYE_R_IN
       var rc = rings[ri][1]
@@ -250,7 +252,9 @@ function buildParticles(seed) {
     }
   }
 
-  n = 32
+  // Sparse enough to stay a dotted measurement line when it locks, rather
+  // than fusing into a solid bar.
+  n = 15
   for (i = 0; i < n; i++) {
     var u = (i / (n - 1)) * 2 - 1
     push("mouth", u * MOUTH_HALF, MOUTH_Y + MOUTH_CURVE * (1 - u * u), { u: u })
@@ -821,12 +825,13 @@ function paintInto(ctx, size, spec) {
 
     var l = lit[i2]
     var zf = 0.55 + 0.75 * p2.z
-    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : 1) * (0.68 + 0.42 * l)
+    var eye = p2.kind === "eyeL" || p2.kind === "eyeR"
+    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : (eye ? 0.72 : 1)) * (0.68 + 0.42 * l)
     // The rim and the features carry the face; the depth-map interior is
     // texture behind them. Without this weighting the silhouette dissolves
     // on a light theme, where accent-on-near-white has little contrast.
     var kw = p2.kind === "field" ? 0.46
-      : (p2.kind === "skin" ? 0.82 : (p2.kind === "rim" ? 1.12 : 1.25))
+      : (p2.kind === "skin" ? 0.82 : (p2.kind === "rim" ? 1.12 : 0.98))
     // Floor keeps the silhouette readable between sweeps; the cubed term is
     // the bright crest that rides the scan plane itself.
     var alpha = (0.40 + 0.48 * l + 0.34 * l * l * l) * kw * (0.70 + 0.30 * p2.z)
@@ -837,9 +842,6 @@ function paintInto(ctx, size, spec) {
       alpha *= mix(1, 0.62, reached)
     }
     if (ok) {
-      if (p2.kind === "eyeL" || p2.kind === "eyeR" || p2.kind === "mouth") {
-        alpha = Math.min(1, alpha * 1.3)
-      }
       var dw = recDissolve(p2.kind)
       var gone = easeInOutCubic(seg(rt, dw[0], dw[1]))
       if (gone >= 0.998) continue
