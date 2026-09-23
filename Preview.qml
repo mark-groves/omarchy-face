@@ -1,5 +1,7 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
+import Quickshell.Io
 import "FaceCardFrame.js" as FaceCard
 
 // Developer harness for the face card. Not shipped and not loaded by the host.
@@ -10,7 +12,10 @@ import "FaceCardFrame.js" as FaceCard
 // a context exposes its canvas, the canvas is an Item, and an Item's parent
 // chain reaches the password field on a credential surface.
 //
-// `paintOps` below mirrors the host painter in shell/Commons/FaceCardPainter.js.
+// `paintOps` below mirrors the host painter (shell/Commons/FaceCardPainter.js
+// in the Omarchy fork) at op level 2: glow on a blurred bloom layer, additive
+// blending, and roles 3..5 derived from the theme. Colours come from the
+// active Omarchy theme's colors.toml when there is one.
 //
 //   quickshell -p Preview.qml
 ShellRoot {
@@ -20,7 +25,8 @@ ShellRoot {
   property string cardState: "scanning"
   property real enteredAt: 0
   property bool sequence: true
-  property bool dark: true
+  // Op level the harness paints, as the host would report it in spec.host.
+  property int host: 2
   // The harness passes the style per frame as spec.style. An installed card
   // takes it from the STYLE line instead (bin/omarchy-face-style).
   property string style: Quickshell.env("FACE_STYLE") || "hud"
@@ -29,6 +35,7 @@ ShellRoot {
     { s: "radar", l: "Phosphor Radar" },
     { s: "holo", l: "Holographic Wireframe" }
   ]
+  readonly property int side: 220
 
   // Scripted walk through every state and transition, the way a lock screen
   // sees them: scan, lock, rescan, miss.
@@ -41,16 +48,42 @@ ShellRoot {
   property int scriptAt: 0
   property real scriptEnteredAt: 0
 
-  readonly property color surface: dark ? "#16161e" : "#eff1f5"
-  readonly property color panel: dark ? "#1a1b26" : "#e6e9ef"
-  readonly property color accent: dark ? "#7aa2f7" : "#1e66f5"
-  readonly property color foreground: dark ? "#c0caf5" : "#4c4f69"
-  readonly property color errorColor: dark ? "#f7768e" : "#d20f39"
+  // Tokyo Night until the active theme loads.
+  property var theme: ({
+    background: "#1a1b26", foreground: "#a9b1d6", accent: "#7aa2f7", red: "#f7768e",
+    yellow: "#e0af68", green: "#9ece6a", cyan: "#449dab", magenta: "#ad8ee6", orange: "#eb927b"
+  })
+  readonly property color surface: Qt.darker(theme.background, 1.3)
+  readonly property color panel: theme.background
+  readonly property color accent: theme.accent || theme.color4 || "#7aa2f7"
+  readonly property color foreground: theme.foreground || theme.color7 || "#c0caf5"
+  readonly property color errorColor: theme.red || theme.color1 || "#f7768e"
+  readonly property bool dark: luminance(theme.background) < 0.5
+  readonly property var roles: deriveRoles()
 
   property real paintMs: 0
   property int opCount: 0
 
   onCardStateChanged: enteredAt = clock
+
+  FileView {
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
+    printErrors: false
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: {
+      var named = {}
+      var lines = text().split("\n")
+      for (var i = 0; i < lines.length; i++) {
+        var m = lines[i].match(/^\s*([A-Za-z0-9_-]+)\s*=\s*["']?(#[0-9A-Fa-f]{6})/)
+        if (m) named[m[1]] = m[2]
+      }
+      if (named.background || named.color0) {
+        if (!named.background) named.background = named.color0
+        root.theme = named
+      }
+    }
+  }
 
   FrameAnimation {
     running: true
@@ -73,20 +106,76 @@ ShellRoot {
     root.enteredAt = root.clock
   }
 
+  function luminance(c) {
+    var q = Qt.color(c)
+    return 0.2126 * q.r + 0.7152 * q.g + 0.0722 * q.b
+  }
+
+  function hueGap(a, b) {
+    var d = Math.abs(a - b) % 1
+    return d > 0.5 ? 1 - d : d
+  }
+
+  // A short copy of the host's FaceTheme.roles: hot is the accent pushed
+  // toward the text colour; secondary and tertiary are the theme's most
+  // distinct palette hues, never the error colour.
+  function deriveRoles() {
+    var a = Qt.color(root.accent), f = Qt.color(root.foreground), e = Qt.color(root.errorColor)
+    var hot = Qt.tint(a, Qt.rgba(f.r, f.g, f.b, 0.55))
+    hot = Qt.hsla(hot.hslHue, hot.hslSaturation, Math.min(0.94, hot.hslLightness + (1 - hot.hslLightness) * 0.35), 1)
+    var keys = ["cyan", "magenta", "blue", "green", "yellow", "orange", "bright_cyan", "bright_magenta", "color6", "color5", "color2", "color3"]
+    var picks = []
+    for (var i = 0; i < keys.length; i++) {
+      var v = root.theme[keys[i]]
+      if (!v) continue
+      var c = Qt.color(v)
+      if (c.hslSaturation < 0.22 || c.hslLightness < 0.25 || c.hslLightness > 0.9) continue
+      if (e.hslSaturation > 0.22 && root.hueGap(c.hslHue, e.hslHue) < 0.05) continue
+      picks.push(c)
+    }
+    function best(away) {
+      var top = null, score = 0.06
+      for (var j = 0; j < picks.length; j++) {
+        var d = root.hueGap(picks[j].hslHue, a.hslHue)
+        if (away) d = Math.min(d, root.hueGap(picks[j].hslHue, away.hslHue))
+        if (d > score) { score = d; top = picks[j] }
+      }
+      return top
+    }
+    var second = best(null)
+    var third = second ? best(second) : null
+    if (!second) second = Qt.hsla((a.hslHue + 0.42) % 1, Math.max(0.45, a.hslSaturation), 0.6, 1)
+    if (!third) third = Qt.hsla((a.hslHue + 0.82) % 1, Math.max(0.45, a.hslSaturation), 0.6, 1)
+    return [a, f, e, hot, second, third]
+  }
+
   function roleColor(role, alpha) {
-    var c = role === 2 ? root.errorColor : (role === 1 ? root.foreground : root.accent)
+    var c = role >= 1 && role <= 5 && Math.floor(role) === role ? root.roles[role] : root.roles[0]
     return Qt.rgba(c.r, c.g, c.b, Math.max(0, Math.min(1, alpha)))
   }
 
   // Mirrors the host painter. Ops are numbers; anything else is not drawn.
-  function paintOps(ctx, size, list) {
+  // The sharp layer draws each op at its alpha; the glow layer draws only ops
+  // with a trailing glow value, at that value, for the bloom to blur.
+  function paintOps(ctx, list, glowLayer, scale) {
     ctx.reset()
     ctx.lineCap = "round"
     ctx.lineJoin = "round"
+    if (scale !== 1) ctx.scale(scale, scale)
+    if (glowLayer) ctx.globalCompositeOperation = root.dark ? "lighter" : "source-over"
+    var glowAt = [5, 7, 10]
     for (var i = 0; i < list.length; i++) {
       var op = list[i]
+      if (op[0] === 3) {
+        if (!glowLayer) ctx.globalCompositeOperation = root.dark && op[1] === 1 ? "lighter" : "source-over"
+        continue
+      }
+      var g = op.length > glowAt[op[0]] ? op[glowAt[op[0]]] : 0
+      if (glowLayer && !(g > 0)) continue
       if (op[0] === 0) {
-        ctx.strokeStyle = root.roleColor(op[1], op[2])
+        var a = glowLayer ? g : op[2]
+        if (a <= 0) continue
+        ctx.strokeStyle = root.roleColor(op[1], a)
         ctx.lineWidth = op[3]
         ctx.beginPath()
         var cmds = op[4]
@@ -99,16 +188,18 @@ ShellRoot {
         }
         ctx.stroke()
       } else if (op[0] === 1) {
-        ctx.fillStyle = root.roleColor(op[1], op[2])
+        ctx.fillStyle = root.roleColor(op[1], glowLayer ? g : op[2])
         ctx.fillRect(op[3], op[4], op[5], op[6])
       } else if (op[0] === 2) {
-        var g = ctx.createLinearGradient(0, op[8], 0, op[9])
-        g.addColorStop(0, root.roleColor(op[1], op[2]))
-        g.addColorStop(1, root.roleColor(op[1], op[3]))
-        ctx.fillStyle = g
+        var k2 = glowLayer ? g : 1
+        var gr = ctx.createLinearGradient(0, op[8], 0, op[9])
+        gr.addColorStop(0, root.roleColor(op[1], op[2] * k2))
+        gr.addColorStop(1, root.roleColor(op[1], op[3] * k2))
+        ctx.fillStyle = gr
         ctx.fillRect(op[4], op[5], op[6], op[7])
       }
     }
+    ctx.globalCompositeOperation = "source-over"
   }
 
   function hintFor(s) {
@@ -116,34 +207,77 @@ ShellRoot {
       : (s === "recognized" ? "Face recognized" : "Look at the camera")
   }
 
-  component Card: Canvas {
+  // One card: a sharp canvas over a half-resolution glow canvas blurred twice
+  // on the GPU, as the host's FaceChromeCanvas does.
+  component Card: Item {
     id: card
     property string state_: "scanning"
     property real elapsed: 0
-    property int side: 116
     property bool measure: false
+    property var ops: []
 
-    width: side
-    height: side
-    renderTarget: Canvas.Image
-    renderStrategy: Canvas.Cooperative
+    width: root.side
+    height: root.side
 
-    onPaint: {
+    function refresh() {
       var began = measure ? Date.now() : 0
-      var ops = FaceCard.frame(side, { state: state_, clock: root.clock, elapsed: elapsed, style: root.style })
-      root.paintOps(getContext("2d"), side, ops)
+      card.ops = FaceCard.frame(root.side, { state: state_, clock: root.clock, elapsed: elapsed, style: root.style, host: root.host >= 2 ? 2 : undefined })
+      sharp.requestPaint()
+      if (root.host >= 2) glow.requestPaint()
       if (measure) {
         root.paintMs = root.paintMs * 0.9 + (Date.now() - began) * 0.1
-        root.opCount = ops.length
+        root.opCount = card.ops.length
       }
     }
+
+    Canvas {
+      id: glow
+      width: root.side / 2
+      height: root.side / 2
+      visible: false
+      renderTarget: Canvas.Image
+      renderStrategy: Canvas.Cooperative
+      onPaint: root.paintOps(getContext("2d"), card.ops, true, 0.5)
+    }
+    MultiEffect {
+      anchors.fill: parent
+      source: glow
+      visible: root.host >= 2
+      autoPaddingEnabled: true
+      blurEnabled: true
+      blur: 1.0
+      blurMax: 48
+      blurMultiplier: 0.6
+      brightness: root.dark ? 0.08 : 0
+      opacity: root.dark ? 0.95 : 0.45
+    }
+    MultiEffect {
+      anchors.fill: parent
+      source: glow
+      visible: root.host >= 2
+      autoPaddingEnabled: true
+      blurEnabled: true
+      blur: 0.55
+      blurMax: 12
+      brightness: root.dark ? 0.05 : 0
+      opacity: root.dark ? 1 : 0.5
+    }
+    Canvas {
+      id: sharp
+      anchors.fill: parent
+      renderTarget: Canvas.Image
+      renderStrategy: Canvas.Cooperative
+      onPaint: root.paintOps(getContext("2d"), card.ops, false, 1)
+    }
+
     Connections {
       target: root
-      function onClockChanged() { card.requestPaint() }
-      function onStyleChanged() { card.requestPaint() }
+      function onClockChanged() { card.refresh() }
+      function onStyleChanged() { card.refresh() }
+      function onRolesChanged() { card.refresh() }
     }
-    onState_Changed: requestPaint()
-    Component.onCompleted: requestPaint()
+    onState_Changed: refresh()
+    Component.onCompleted: refresh()
   }
 
   component Chip: Rectangle {
@@ -174,8 +308,8 @@ ShellRoot {
 
   FloatingWindow {
     title: "omarchy-face card preview"
-    implicitWidth: 900
-    implicitHeight: 570
+    implicitWidth: 1080
+    implicitHeight: 440
 
     Rectangle {
       anchors.fill: parent
@@ -209,9 +343,9 @@ ShellRoot {
           }
         }
         Chip {
-          label: root.dark ? "dark" : "light"
-          on: false
-          onPicked: root.dark = !root.dark
+          label: root.host >= 2 ? "host level 2: glow" : "host level 1: no glow"
+          on: root.host >= 2
+          onPicked: root.host = root.host >= 2 ? 1 : 2
         }
       }
 
@@ -241,29 +375,28 @@ ShellRoot {
 
       Row {
         anchors.top: styleChips.bottom
-        anchors.topMargin: 16
+        anchors.topMargin: 18
         anchors.horizontalCenter: parent.horizontalCenter
-        spacing: 40
+        spacing: 36
 
-        // The hero: the card at a large size, walking the script.
+        // The hero: the card at the host's size, walking the script.
         Rectangle {
-          width: 330
-          height: 400
+          width: root.side + 60
+          height: root.side + 110
           radius: 10
           color: root.panel
 
           Card {
             id: hero
             anchors.horizontalCenter: parent.horizontalCenter
-            y: 24
-            side: 282
+            y: 26
             measure: true
             state_: root.cardState
             elapsed: root.clock - root.enteredAt
           }
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            y: hero.y + hero.height + 18
+            y: hero.y + hero.height + 16
             text: root.hintFor(root.cardState)
             color: root.cardState === "notRecognized" ? root.errorColor : root.foreground
             font.family: "monospace"
@@ -281,31 +414,29 @@ ShellRoot {
         }
 
         Column {
-          spacing: 26
+          spacing: 10
 
           Text {
-            text: "116 px, the real lock / polkit / sudo slot"
+            text: "each state at the host's 220 px card, replaying its hold"
             color: root.foreground
             opacity: 0.5
             font.family: "monospace"
             font.pixelSize: 10
           }
 
-          // The three states at the real slot size, each replaying on its hold.
           Row {
-            spacing: 22
+            spacing: 18
             Repeater {
               model: ["scanning", "recognized", "notRecognized"]
               Column {
                 spacing: 8
                 Rectangle {
-                  width: 132
-                  height: 132
+                  width: root.side + 16
+                  height: root.side + 16
                   radius: 8
                   color: root.panel
                   Card {
                     anchors.centerIn: parent
-                    side: 116
                     state_: modelData
                     elapsed: modelData === "scanning" ? 4000 + root.clock : (root.clock % (FaceCard.holdMs(modelData) + 900))
                   }
@@ -314,42 +445,6 @@ ShellRoot {
                   anchors.horizontalCenter: parent.horizontalCenter
                   text: root.hintFor(modelData)
                   color: modelData === "notRecognized" ? root.errorColor : root.foreground
-                  font.family: "monospace"
-                  font.pixelSize: 10
-                }
-              }
-            }
-          }
-
-          Text {
-            text: "size ladder: chrome drops below 100 / 76 px, vector glyph below 48 px"
-            color: root.foreground
-            opacity: 0.5
-            font.family: "monospace"
-            font.pixelSize: 10
-          }
-
-          Row {
-            spacing: 16
-            Repeater {
-              model: [96, 64, 44, 30, 24]
-              Column {
-                spacing: 4
-                Item {
-                  width: modelData
-                  height: 100
-                  Card {
-                    anchors.centerIn: parent
-                    side: modelData
-                    state_: root.cardState
-                    elapsed: root.clock - root.enteredAt
-                  }
-                }
-                Text {
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  text: modelData
-                  color: root.foreground
-                  opacity: 0.5
                   font.family: "monospace"
                   font.pixelSize: 10
                 }
