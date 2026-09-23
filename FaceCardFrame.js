@@ -119,14 +119,7 @@ function spring(ms, start, period, decay) {
 var EYE_L = -0.315
 var EYE_R = 0.315
 var EYE_Y = -0.205
-var EYE_R_IN = 0.088
-var MOUTH_Y = 0.305
-var MOUTH_HALF = 0.345
 var RIM_R = 0.80
-
-// The mouth stays a measured line in every state. Bending it into a smile or
-// a frown is what made the old card read as an emoji.
-var MOUTH_CURVE = 0.03
 
 // Depth the surface is modelled at, in face units. Sway rotates about the
 // card plane, so the nose-forward centre travels further than the rim and the
@@ -166,43 +159,38 @@ function recDissolve(p) {
 
 var CACHE = {}
 
-function depthAt(x, y) {
-  var r = Math.sqrt(x * x + y * y) / 0.88
-  return Math.sqrt(Math.max(0, 1 - r * r))
-}
-
-function inEye(x, y, pad) {
-  var dl = Math.hypot(x - EYE_L, y - EYE_Y)
-  var dr = Math.hypot(x - EYE_R, y - EYE_Y)
-  return Math.min(dl, dr) < EYE_R_IN + pad
-}
-
-function inMouth(x, y, pad) {
-  return Math.abs(y - MOUTH_Y) < 0.10 + pad && Math.abs(x) < MOUTH_HALF + pad
-}
-
-// Facial landmarks, face units. `order` is the lock cascade: eyes first,
-// then the centre line, then the mouth, then the outline.
+// Facial landmarks, face units, used by the radar's trackers. `order` is the
+// lock cascade.
 var LANDMARKS = [
-  { x: EYE_L, y: EYE_Y, dz: -0.22, order: 0 },
-  { x: EYE_R, y: EYE_Y, dz: -0.22, order: 1 },
-  { x: 0, y: 0.07, dz: 0.08, order: 3 },
-  { x: 0, y: -0.23, dz: -0.04, order: 2 },
-  { x: -0.30, y: 0.33, dz: -0.10, order: 5 },
-  { x: 0.30, y: 0.33, dz: -0.10, order: 6 },
-  { x: 0, y: 0.36, dz: -0.06, order: 7 },
-  { x: -0.60, y: -0.30, dz: 0, order: 8 },
-  { x: 0.60, y: -0.30, dz: 0, order: 9 },
-  { x: 0, y: -0.53, dz: 0, order: 4 },
-  { x: -0.50, y: 0.47, dz: 0, order: 10 },
-  { x: 0.50, y: 0.47, dz: 0, order: 11 },
-  { x: 0, y: 0.65, dz: 0, order: 12 }
+  { x: EYE_L, y: EYE_Y, order: 0 },
+  { x: EYE_R, y: EYE_Y, order: 1 },
+  { x: 0, y: 0.07, order: 3 },
+  { x: 0, y: -0.23, order: 2 },
+  { x: -0.30, y: 0.33, order: 5 },
+  { x: 0.30, y: 0.33, order: 6 },
+  { x: 0, y: 0.36, order: 7 },
+  { x: -0.60, y: -0.30, order: 8 },
+  { x: 0.60, y: -0.30, order: 9 },
+  { x: 0, y: -0.53, order: 4 },
+  { x: -0.50, y: 0.47, order: 10 },
+  { x: 0.50, y: 0.47, order: 11 },
+  { x: 0, y: 0.65, order: 12 }
 ]
 
-var LANDMARK_EDGES = [
-  [0, 3], [1, 3], [3, 9], [9, 7], [9, 8], [0, 9], [1, 9], [0, 7], [1, 8],
-  [0, 2], [1, 2], [3, 2], [2, 4], [2, 5], [4, 6], [5, 6], [2, 6],
-  [4, 10], [5, 11], [7, 10], [8, 11], [10, 12], [11, 12], [6, 12], [0, 4], [1, 5]
+// The HUD's lock graph. Deliberately no eye or mouth points: a node on each
+// eye over a row of mouth nodes draws a smiley, however technical the lines.
+// The points follow bone structure instead, and are not quite mirrored.
+var HUD_MARKS = [
+  { x: 0, y: 0.12, order: 0 }, { x: 0, y: -0.1, order: 1 }, { x: 0, y: -0.33, order: 2 },
+  { x: 0, y: -0.6, order: 4 }, { x: -0.5, y: -0.36, order: 6 }, { x: 0.52, y: -0.33, order: 7 },
+  { x: -0.36, y: 0.08, order: 3 }, { x: 0.37, y: 0.1, order: 5 }, { x: -0.45, y: 0.44, order: 10 },
+  { x: 0.47, y: 0.42, order: 11 }, { x: 0, y: 0.66, order: 12 }, { x: -0.27, y: -0.58, order: 8 },
+  { x: 0.3, y: -0.6, order: 9 }
+]
+
+var HUD_EDGES = [
+  [3, 2], [2, 1], [1, 0], [0, 10], [4, 2], [2, 5], [11, 3], [3, 12], [11, 4], [12, 5],
+  [1, 6], [1, 7], [6, 0], [7, 0], [4, 6], [5, 7], [6, 8], [7, 9], [8, 10], [9, 10]
 ]
 
 // Seven-segment glyphs, segments a..g. Ghosted unlit segments are drawn under
@@ -846,8 +834,8 @@ function paintHud(ctx, size, spec) {
   // --- landmarks ----------------------------------------------------------------
   var lmPx = []
   var lmLock = []
-  for (var lm = 0; lm < LANDMARKS.length; lm++) {
-    var L = LANDMARKS[lm]
+  for (var lm = 0; lm < HUD_MARKS.length; lm++) {
+    var L = HUD_MARKS[lm]
     var lp = project(L.x * faceScale, L.y * faceScale, holoZAt(L.x, L.y) * DEPTH)
     lmPx.push(toPx(lp.x, lp.y))
     var lockAt = REC_LOCK0 + L.order * REC_LOCK_STEP
@@ -875,8 +863,8 @@ function paintHud(ctx, size, spec) {
       flush()
     } else if (ok) {
       // Graph edges draw out from each endpoint once both ends are locked.
-      for (var ge = 0; ge < LANDMARK_EDGES.length; ge++) {
-        var E = LANDMARK_EDGES[ge]
+      for (var ge = 0; ge < HUD_EDGES.length; ge++) {
+        var E = HUD_EDGES[ge]
         var ek = easeInOutCubic(Math.min(lmLock[E[0]], lmLock[E[1]]))
         if (ek <= 0.01) continue
         var A = lmPx[E[0]], B = lmPx[E[1]]
@@ -909,7 +897,7 @@ function paintHud(ctx, size, spec) {
       // Landmark IDs flash up beside each reticle as it locks.
       if (size >= 150) {
         for (var lid = 0; lid < lmPx.length; lid++) {
-          var la3 = Math.max(bump(rt, REC_LOCK0 + LANDMARKS[lid].order * REC_LOCK_STEP, REC_LOCK0 + LANDMARKS[lid].order * REC_LOCK_STEP + 420), lmLock[lid] * 0.3)
+          var la3 = Math.max(bump(rt, REC_LOCK0 + HUD_MARKS[lid].order * REC_LOCK_STEP, REC_LOCK0 + HUD_MARKS[lid].order * REC_LOCK_STEP + 420), lmLock[lid] * 0.3)
           if (la3 <= 0.02) continue
           var idn = String(lid + 1)
           if (idn.length < 2) idn = "0" + idn
@@ -918,15 +906,13 @@ function paintHud(ctx, size, spec) {
       }
       flush()
     } else {
-      // A miss: the reticles hunt, fail to converge, and lose track. Not on
-      // the eye and mouth landmarks: boxes there arrange into a face.
+      // A miss: the reticles hunt, fail to converge, and lose track.
       for (var bl = 0; bl < lmPx.length; bl++) {
-        if (bl === 0 || bl === 1 || bl === 4 || bl === 5) continue
         var bc = lmPx[bl]
-        var bk = seg(rt, 60 + LANDMARKS[bl].order * 22, 300 + LANDMARKS[bl].order * 22)
+        var bk = seg(rt, 60 + HUD_MARKS[bl].order * 22, 300 + HUD_MARKS[bl].order * 22)
         if (bk <= 0) continue
         var shake = (1 - bk) * R * 0.04
-        var lost = easeOutCubic(seg(rt, 300 + LANDMARKS[bl].order * 22, 800))
+        var lost = easeOutCubic(seg(rt, 300 + HUD_MARKS[bl].order * 22, 800))
         drawLostTrack(crisp, bc.x + Math.sin(rt / 23 + bl) * shake, bc.y + Math.cos(rt / 29 + bl * 2) * shake,
           R, lost, clamp01(bk * 2) * (0.85 - 0.45 * lost), hair, bl)
       }
@@ -1256,12 +1242,7 @@ function paintHudMicro(p, size, state, t, rt, cx, cy, R, tint) {
     }
   }
 
-  for (var e = 0; e < 2; e++) {
-    var ex = cx + (e === 0 ? EYE_L : EYE_R) * R
-    var ey = cy + EYE_Y * R
-    p.line(tint, baseA, w * 1.2, ex - R * 0.07, ey, ex + R * 0.07, ey)
-  }
-  p.line(tint, baseA, w, cx - MOUTH_HALF * 0.85 * R, cy + MOUTH_Y * R, cx + MOUTH_HALF * 0.85 * R, cy + MOUTH_Y * R)
+  microStripes(p, tint, baseA, w, cx, cy, R, 0)
 
   if (!ok && !bad) {
     var py = cy + scanPlane(t).y * R * 0.9
@@ -1278,6 +1259,19 @@ function paintHudMicro(p, size, state, t, rt, cx, cy, R, tint) {
 }
 
 // --- dense detail kit ---------------------------------------------------------
+
+// The small-size glyph's face: three structured-light stripes that bend up
+// over the middle, the way the full card's stripes bend over a face. Two
+// marks over a line is a face icon; three stripes are a scan.
+function microStripes(p, tint, a, w, cx, cy, R, shift) {
+  var rows = [[-0.32, 0.42], [0, 0.56], [0.32, 0.42]]
+  for (var i = 0; i < rows.length; i++) {
+    var y = cy + rows[i][0] * R
+    var hw = rows[i][1] * R
+    var x0 = cx + shift
+    p.poly(tint, a, w, [[x0 - hw, y], [x0 - hw * 0.3, y], [x0, y - R * 0.1], [x0 + hw * 0.3, y], [x0 + hw, y]])
+  }
+}
 
 // A polyline whose segments carry their own alpha. Consecutive segments in
 // the same alpha step share one subpath, which keeps dense meshes cheap to
@@ -1795,13 +1789,10 @@ function paintRadar(ctx, size, spec) {
     }
     var mArm = ok ? t0 / RADAR_REV_MS * TAU - Math.PI / 2 : arm
     crisp.line(tint, (ok ? 1 - seg(rt, 0, 300) : 0.95), mw, cx, cy, cx + Math.cos(mArm) * R * 0.85, cy + Math.sin(mArm) * R * 0.85)
-    for (var me = 0; me < 2; me++) {
-      var mex = cx + (me === 0 ? EYE_L : EYE_R) * R
-      crisp.arc(tint, 0.95, mw * 1.1, cx, cy, Math.hypot(mex - cx, EYE_Y * R), Math.atan2(EYE_Y * R, mex - cx) - 0.2, Math.atan2(EYE_Y * R, mex - cx) + 0.2)
-    }
-    for (var mm = -1; mm <= 1; mm++) {
-      var mmx = cx + mm * MOUTH_HALF * 0.7 * R
-      crisp.line(tint, 0.95, mw, mmx, cy + (MOUTH_Y - 0.08) * R, mmx, cy + (MOUTH_Y + 0.08) * R)
+    // Three returns at different ranges and bearings: sensor data, not a face.
+    var mret = [[0.32, -2.3], [0.55, 0.4], [0.72, 2.2]]
+    for (var me = 0; me < mret.length; me++) {
+      crisp.arc(tint, 0.95, mw * 1.1, cx, cy, mret[me][0] * R, mret[me][1] - 0.35, mret[me][1] + 0.35)
     }
     if (ok) {
       var mh = bump(rt, 40, 620)
@@ -2362,26 +2353,24 @@ function reliefContours(key, nx, ny, levels, skipSockets, zfn, skipNose) {
 // wave from the nose outward. Deliberately not the landmark set: a lock
 // diamond in each eye socket reads as pupils.
 function holoNodes() {
-  if (CACHE.holoN2) return CACHE.holoN2
-  // A fine field of tracking points, staggered and jittered, far too many
-  // and too small to arrange into features.
+  if (CACHE.holoN3) return CACHE.holoN3
+  // A scatter of tracking points on a low-discrepancy sequence: even
+  // coverage with no rows or pairs, because rows of points on a curved mask
+  // bow into mouths and pairs of them become eyes.
+  function halton(i, b) {
+    var f = 1, r = 0
+    while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b) }
+    return r
+  }
   var nodes = []
-  var rows = 7, cols = 7
-  for (var i = 0; i < rows; i++) {
-    for (var j = 0; j < cols; j++) {
-      var u = mix(-1.2, 1.2, (j + (i % 2 ? 0.5 : 0)) / cols) + (hash(i * 7 + j * 3 + 1) - 0.5) * 0.2
-      var v = mix(-1.1, 1.05, i / (rows - 1)) + (hash(i * 5 + j * 11 + 2) - 0.5) * 0.14
-      var P = holoSurface(u, v)
-      nodes.push({ P: P, i: i, j: j, order: Math.hypot(P[0], P[1] - 0.05) * 6 + hash(i * 13 + j) })
-    }
+  for (var i = 1; i <= 44; i++) {
+    var u = mix(-1.25, 1.25, halton(i, 2))
+    var v = mix(-1.1, 1.05, halton(i, 3))
+    var P = holoSurface(u, v)
+    nodes.push({ P: P, order: Math.hypot(P[0], P[1] - 0.05) * 6 + hash(i * 13) })
   }
-  var edges = []
-  for (var n = 0; n < nodes.length; n++) {
-    if (nodes[n].j < cols - 1) edges.push([n, n + 1])
-    if (nodes[n].i < rows - 1) edges.push([n, n + cols])
-  }
-  CACHE.holoN2 = { nodes: nodes, edges: edges }
-  return CACHE.holoN2
+  CACHE.holoN3 = { nodes: nodes, edges: [] }
+  return CACHE.holoN3
 }
 
 function paintHolo(ctx, size, spec) {
@@ -2533,13 +2522,9 @@ function paintHolo(ctx, size, spec) {
         crisp.poly(tint, 0.55, Math.max(1, mw * 0.6), mpts)
       }
     }
-    // Features slide with the turn, which is what reads as a head at 24 px.
+    // The slices slide with the turn, which is what reads as a head at 24 px.
     var turn = bad ? 0 : Math.sin(mrot) * R * 0.16
-    var fy = cy - R * 0.08
-    for (var me = -1; me <= 1; me += 2) {
-      crisp.line(tint, 0.95, mw, cx + turn + me * R * 0.3 - R * 0.08, fy - R * 0.14, cx + turn + me * R * 0.3 + R * 0.08, fy - R * 0.14)
-    }
-    crisp.line(tint, 0.95, mw, cx + turn - R * 0.2, fy + R * 0.3, cx + turn + R * 0.2, fy + R * 0.3)
+    microStripes(crisp, tint, 0.95, mw * 0.8, cx, cy - R * 0.08, R * 0.9, turn)
     crisp.line(tint, 0.9, mw, cx - R * 0.5, cy + R * 0.86, cx + R * 0.5, cy + R * 0.86)
     if (ok) {
       var mh = bump(rt, 40, 520)
