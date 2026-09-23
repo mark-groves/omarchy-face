@@ -768,7 +768,7 @@ function paintHud(ctx, size, spec) {
   }
 
   // --- the cloud --------------------------------------------------------------
-  var dotBase = Math.max(1, size * (compact ? 0.030 : 0.0165))
+  var dotBase = Math.max(1, size * (compact ? 0.030 : 0.0135))
 
   if (!compact) {
     var meshFade = ok ? 1 - easeInOutCubic(seg(rt, 390, 620)) : 1
@@ -802,7 +802,7 @@ function paintHud(ctx, size, spec) {
 
     var l = lit[i2]
     var zf = 0.55 + 1.0 * p2.z
-    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : 1) * (0.68 + 0.42 * l)
+    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : 1) * (ok ? 0.62 + 0.18 * l : 0.68 + 0.42 * l)
     // The rim and the features carry the face; the depth-map interior is
     // texture behind them. Without this weighting the silhouette dissolves
     // on a light theme, where accent-on-near-white has little contrast.
@@ -810,7 +810,7 @@ function paintHud(ctx, size, spec) {
       : (p2.kind === "edge" ? 1.0 : 0.25 + 1.0 * p2.shade)
     // Floor keeps the silhouette readable between sweeps; the cubed term is
     // the bright crest that rides the scan plane itself.
-    var alpha = (0.40 + 0.48 * l + 0.34 * l * l * l) * kw * (0.70 + 0.30 * p2.z)
+    var alpha = (0.40 + 0.48 * l + (ok ? 0.1 : 0.34) * l * l * l) * kw * (0.70 + 0.30 * p2.z)
     if (scanning) alpha *= mix(0.2, 1, boot)
 
     if (bad && p2.kind !== "field") {
@@ -1503,7 +1503,7 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
 function hudContours() {
   var lv = []
   for (var i = 0; i < 12; i++) lv.push(0.06 + i * 0.056)
-  return reliefContours("hudT", 22, 30, lv, true)
+  return reliefContours("hudT2", 22, 30, lv, true, holoZAt, true)
 }
 
 // HUD face topology: iso-depth contours of the relief and profile curves
@@ -1538,8 +1538,10 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
   for (var ts = 0; ts < topo.segs.length; ts++) {
     var S = topo.segs[ts]
     var li = S[5]
-    var cas = ok ? bump(rt, 220 + li * 40, 560 + li * 40) : 0
-    var base = 0.26 + 0.5 * cas + 0.3 * resolved
+    // A lock resolves the map top to bottom behind a sweeping front.
+    var sweepAt = 220 + (S[1] + 0.82) * 380
+    var cas = ok ? bump(rt, sweepAt, sweepAt + 260) : 0
+    var base = 0.26 + 0.55 * cas + 0.3 * (ok ? seg(rt, sweepAt, sweepAt + 200) : 0) * (0.6 + 0.4 * resolved)
     var A = place(S[0], S[1], S[4] * DEPTH), B = place(S[2], S[3], S[4] * DEPTH)
     var a = lightAt((A.u + B.u) / 2, base, ts * 7 + 1)
     if (a <= 0.004) continue
@@ -2309,18 +2311,18 @@ function holoMesh(compact) {
 
 // The vertex cloud: a jittered lattice on the surface, front half only.
 function holoPoints() {
-  if (CACHE.holoP) return CACHE.holoP
+  if (CACHE.holoP2) return CACHE.holoP2
   var rnd = mulberry32(777)
   var pts = []
-  for (var i = 0; i < 16; i++) {
-    for (var j = 0; j < 22; j++) {
-      var u = mix(-1.5, 1.5, (j + rnd() * 0.6) / 21.6)
-      var v = mix(-1.3, 1.3, (i + rnd() * 0.6) / 15.6)
+  for (var i = 0; i < 20; i++) {
+    for (var j = 0; j < 26; j++) {
+      var u = mix(-1.5, 1.5, (j + rnd() * 0.7) / 25.7)
+      var v = mix(-1.3, 1.3, (i + rnd() * 0.7) / 19.7)
       var P = holoSurface(u, v)
       pts.push({ P: P, j: rnd(), k: rnd() })
     }
   }
-  CACHE.holoP = pts
+  CACHE.holoP2 = pts
   return pts
 }
 
@@ -2329,7 +2331,7 @@ function holoPoints() {
 function holoDenseContours() {
   var lv = []
   for (var i = 0; i < 12; i++) lv.push(0.05 + i * 0.055)
-  return reliefContours("holoTD", 20, 28, lv, true)
+  return reliefContours("holoTD2", 20, 28, lv, true, holoZAt, true)
 }
 
 function holoContours() {
@@ -2337,8 +2339,9 @@ function holoContours() {
 }
 
 // Marching squares over the relief. `skipSockets` drops the closed loops
-// the eye sockets make: concentric loops in two sockets read as eyes.
-function reliefContours(key, nx, ny, levels, skipSockets, zfn) {
+// the eye sockets make (concentric loops there read as eyes); `skipNose`
+// drops the nose, whose nested teardrop reads as something else entirely.
+function reliefContours(key, nx, ny, levels, skipSockets, zfn, skipNose) {
   var zf = zfn || holoZAt
   if (CACHE[key]) return CACHE[key]
   var x0 = -0.64, x1 = 0.64, y0 = -0.82, y1 = 0.82
@@ -2363,7 +2366,9 @@ function reliefContours(key, nx, ny, levels, skipSockets, zfn) {
       for (var ci = 0; ci < nx; ci++) {
         var xa = mix(x0, x1, ci / nx), xb = mix(x0, x1, (ci + 1) / nx)
         var ya = mix(y0, y1, cj / ny), yb = mix(y0, y1, (cj + 1) / ny)
-        if (skipSockets && socket((xa + xb) / 2, (ya + yb) / 2) > 0.3) continue
+        var mxc = (xa + xb) / 2, myc = (ya + yb) / 2
+        if (skipSockets && socket(mxc, myc) > 0.3) continue
+        if (skipNose && Math.abs(mxc) < 0.13 && myc > -0.2 && myc < 0.26) continue
         var v00 = grid[cj][ci], v10 = grid[cj][ci + 1], v01 = grid[cj + 1][ci], v11 = grid[cj + 1][ci + 1]
         var pts = []
         if ((v00 < L) !== (v10 < L)) pts.push([lerp(xa, xb, v00, v10, L), ya])
@@ -2795,7 +2800,13 @@ function paintHolo(ctx, size, spec) {
       // split read as chromatic. A miss keeps only the foreground fringe.
       if (!bad) strip(crisp, ROLE_ERROR, fine, rpts, ral)
     }
-    strip(crisp, tint, mw2, pts, al)
+    if (ok && ln < HOLO_SLICES) {
+      // The lock solidifies the mask from the top down behind the scanner ring.
+      var ly0 = L[0][1] + HOLO_CY
+      var sol = seg(rt, 150, 700) > 0 && ly0 < ringY ? 1.35 : (rt < 700 ? 0.7 : 1)
+      for (var sa = 0; sa < al.length; sa++) al[sa] *= sol
+    }
+    strip(crisp, tint, ln < HOLO_SLICES && ln % 2 === 0 ? mw2 * 1.3 : mw2, pts, al)
   }
   crisp.flush()
 
@@ -2821,7 +2832,7 @@ function paintHolo(ctx, size, spec) {
     var cloud = holoPoints()
     var cloudA = ok ? (1 + bump(rt, 150, 400)) * (1 - easeInOutCubic(seg(rt, 450, 800))) : (bad ? 1 - 0.5 * frag : 1)
     if (cloudA > 0.01) {
-      var dsz = Math.max(1, size * 0.0065)
+      var dsz = Math.max(1, size * 0.0058)
       for (var cpi = 0; cpi < cloud.length; cpi++) {
         var cpt = cloud[cpi]
         var CQ = project(cpt.P)
@@ -2832,7 +2843,7 @@ function paintHolo(ctx, size, spec) {
           cyq += dragOffset((cpt.k - 0.3) * 0.6, fragTau, 3)
         }
         var shimmer = 0.5 + 0.5 * Math.sin(t / 180 + cpt.j * 40)
-        var pa3 = (0.25 + 0.35 * shimmer + bandBoost(cyq)) * clamp01((CQ.z + 0.1) / 0.55) * cloudA * flick
+        var pa3 = (0.35 + 0.4 * shimmer + bandBoost(cyq)) * clamp01((CQ.z + 0.1) / 0.55) * cloudA * flick
         if (pa3 <= 0.02) continue
         var CP = toPx(cxq, cyq)
         ctx.fillStyle = rgba(tint, pa3)
