@@ -756,7 +756,7 @@ function paintHud(ctx, size, spec) {
   }
 
   // --- the cloud --------------------------------------------------------------
-  var dotBase = Math.max(1, size * (compact ? 0.030 : 0.0135))
+  var dotBase = Math.max(1, size * (compact ? 0.030 : 0.0168))
 
   if (!compact) {
     var meshFade = ok ? 1 - easeInOutCubic(seg(rt, 390, 620)) : 1
@@ -795,7 +795,7 @@ function paintHud(ctx, size, spec) {
     // texture behind them. Without this weighting the silhouette dissolves
     // on a light theme, where accent-on-near-white has little contrast.
     var kw = p2.kind === "field" ? 0.46
-      : (p2.kind === "edge" ? 1.0 : 0.25 + 1.0 * p2.shade)
+      : (p2.kind === "edge" ? 1.0 : 0.45 + 0.95 * p2.shade)
     // Floor keeps the silhouette readable between sweeps; the cubed term is
     // the bright crest that rides the scan plane itself.
     var alpha = (0.40 + 0.48 * l + (ok ? 0.1 : 0.34) * l * l * l) * kw * (0.70 + 0.30 * p2.z)
@@ -1514,7 +1514,8 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
     var y = mix(-0.76, 0.76, si / (HUD_STRIPES - 1))
     var sweepAt = 220 + (y + 0.82) * 380
     var cas = ok ? bump(rt, sweepAt, sweepAt + 260) : 0
-    var base = 0.2 + 0.55 * cas + 0.25 * resolved
+    // Faint while scanning, so the dot cloud stays the subject.
+    var base = (scanning ? 0.12 : 0.2) + 0.55 * cas + 0.25 * resolved
     var pts = [], al = []
     for (var k = 0; k <= 30; k++) {
       var x = mix(-0.66, 0.66, k / 30)
