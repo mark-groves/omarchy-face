@@ -150,7 +150,7 @@ check('scanning is a dot cloud', () => {
 })
 
 check('a settled recognised face has no dots left on it', () => {
-  for (const elapsed of [780, 900, 1050, 1400]) {
+  for (const elapsed of [780, 900, 1150, 1400]) {
     assert.strictEqual(dots(ops('recognized', elapsed)), 0, 'dots still painted at ' + elapsed + ' ms')
   }
 })
@@ -160,7 +160,19 @@ check('the dots are still there while recognition is being worked out', () => {
 })
 
 check('a settled recognised face is drawn with strokes', () => {
-  assert.ok(strokes(ops('recognized', 1050)) > 3, 'expected a drawn face')
+  assert.ok(strokes(ops('recognized', 1150)) > 3, 'expected a drawn face')
+})
+
+check('a scan boots in rather than popping on', () => {
+  const alpha = (list) => list.filter(o => o[0] === OP_RECT).reduce((a, o) => a + o[2], 0)
+  assert.ok(alpha(ops('scanning', 0)) < alpha(ops('scanning', 1500)) * 0.5, 'the cloud should assemble on entry')
+})
+
+check('a result eases out of the pose it was entered from', () => {
+  // Same entry clock, same elapsed: same frame. Different entry clock: the
+  // instrument was elsewhere when the result arrived, so the frame differs.
+  assert.deepStrictEqual(ops('recognized', 200, 120, 3200), ops('recognized', 200, 120, 3200))
+  assert.notDeepStrictEqual(ops('recognized', 200, 120, 3200), ops('recognized', 200, 120, 4700))
 })
 
 check('a miss stays a broken cloud rather than resolving', () => {
@@ -175,7 +187,9 @@ check('the card degrades to a vector glyph below 48 px', () => {
 check('every size paints something', () => {
   for (const size of SIZES) {
     for (const state of STATES) {
-      assert.ok(ops(state, 400, size).length > 3, state + ' at ' + size + ' px painted nothing')
+      // Strokes are batched, so count what gets drawn, not how many ops carry it.
+      const drawn = ops(state, 400, size).reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0)
+      assert.ok(drawn > 3, state + ' at ' + size + ' px painted nothing')
     }
   }
 })
@@ -197,8 +211,8 @@ check('a frame stays inside the host op budget', () => {
 // --- the timing contract the host reads ------------------------------------
 
 check('the host is told how long to hold each state', () => {
-  assert.strictEqual(holdMs('recognized'), 1050)
-  assert.strictEqual(holdMs('notRecognized'), 820)
+  assert.strictEqual(holdMs('recognized'), 1150)
+  assert.strictEqual(holdMs('notRecognized'), 900)
   assert.strictEqual(holdMs('scanning'), 0)
   assert.strictEqual(holdMs('anything else'), 0)
 })
@@ -207,7 +221,22 @@ check('the recognised hold outlasts the last thing it draws', () => {
   assert.notDeepStrictEqual(
     ops('recognized', holdMs('recognized')),
     ops('recognized', holdMs('recognized') - 200),
-    'the check should still be drawing 200 ms before the hold ends')
+    'the lock should still be settling 200 ms before the hold ends')
+})
+
+check('the host never needs more than two seconds of hold', () => {
+  for (const state of STATES) assert.ok(holdMs(state) <= 2000, state + ' asks for ' + holdMs(state))
+})
+
+// --- replay cost, which the host pays on a software canvas every frame -----
+
+check('a frame at the real 116 px slot stays cheap to replay', () => {
+  for (const state of STATES) {
+    for (let elapsed = 0; elapsed <= 1200; elapsed += 50) {
+      const n = ops(state, elapsed, 116, 5000 + elapsed).length
+      assert.ok(n < 450, state + '@' + elapsed + ' replays ' + n + ' ops')
+    }
+  }
 })
 
 console.log(failures === 0 ? '\nall frame tests passed' : '\n' + failures + ' frame test(s) failed')

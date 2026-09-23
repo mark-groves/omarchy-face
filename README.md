@@ -16,13 +16,17 @@ Without `--enable`, or if the plugin is later disabled, the first-party card kee
 
 ## The card
 
+A biometric instrument: a structured-light depth cloud inside counter-rotating instrument rings, with a landmark graph and seven-segment readouts in the corners.
+
 | State | What the user sees |
 | --- | --- |
-| Scanning | A structured-light dot cloud on a depth surface, wired by a mesh. A scan plane sweeps down and back up over 1900 ms. Dots ahead of it drift; dots behind it snap onto the surface and knit. |
-| Face recognized | Three beats. The cloud defocuses, which makes the lock-on read as a change. Feature-lock brackets close over the eyes, then the mouth, then the rim. Then each group hands itself to a stroke and the card settles on a drawn face with a check. No dots remain. |
-| Face not recognized | The depth lock shears into bands, the anchors release under closed-form drag, the mouth goes to a slight frown and the rim breaks into dashes. It stays a broken cloud, because a miss is the state that never resolves. |
+| Scanning | Boots in: the rings draw on and the cloud assembles out of a scatter. The cloud sways a few degrees in yaw and pitch, with depth parallax, so it reads as a surface rather than a sticker. A scan plane, clipped to the disc and carrying range ticks, sweeps down and back up over 1900 ms. Dots ahead of it drift; dots behind it snap on and knit, and landmark crosshairs flare as it crosses them. A graduated bezel with a travelling cursor, a segmented data ring with orbiting carets, and a dashed inner ring all turn at unrelated periods. |
+| Face recognized | Three beats, about 1.1 s. The cloud defocuses and the plane collapses. The sway stills and every ring snaps to its nearest detent with a spring. Thirteen landmarks lock in a cascade, reticles contract onto them, and the graph edges draw out between locked points. The cloud dissolves into that wireframe, the rim and data ring close, the cardinal clamps slam in, and a shockwave clears the field. Confidence counts to 99.7 and the status reads `PASS`. No dots remain, and there is no smile: the mouth is a measured line in every state. |
+| Face not recognized | The depth lock tears: bands shear, glitch strips re-roll every 45 ms, and the rings jump out of sync. Landmark reticles hunt and are struck through. The anchors release under closed-form drag and the rim breaks into dashes. Confidence climbs, stalls and collapses to `00.0`, and `FAIL` blinks. It stays a broken cloud, because a miss is the state that never resolves. |
 
-Below 48 px the cloud is rendered as a vector glyph instead. Same circle, same two eyes, same mouth, same morphs. A cloud of 240 dots is a smudge at the 30 px lock in-field slot and the 26 px polkit glyph slot.
+Corner readouts are frame counter (top left), match confidence over a ten-cell bar (top right), sample histogram (bottom left), and status word (bottom right). They are drawn at 100 px and up. The real lock, polkit and sudo slot is 116 px. Below 76 px the rings collapse to one. Below 48 px the cloud is rendered as a vector glyph instead: a segmented ring that closes on a lock and breaks on a miss, two eye marks, a mouth line and the scan line.
+
+Strokes that share a role, alpha and width are batched into one path op, so a frame is about 300 ops at the real slot, fewer than the old card's 460, even with the instrument on top.
 
 ## Contract
 
@@ -44,7 +48,7 @@ holdMs(state)     -> ms      // how long the host should hold that state
 | Field | Meaning |
 | --- | --- |
 | `state` | `"scanning"`, `"recognized"` or `"notRecognized"` |
-| `clock` | free-running milliseconds, drives the scan sweep |
+| `clock` | free-running milliseconds, drives every ambient motion |
 | `elapsed` | milliseconds since `state` was entered |
 
 There are no colours in the spec. Each op carries a role index (0 accent, 1 foreground, 2 error) and the host resolves it against the live theme, so the card follows whatever theme is set and the plugin never chooses a colour.
@@ -78,7 +82,7 @@ cmds entries:
 ## Develop
 
 ```bash
-quickshell -p Preview.qml     # three states, replaying, plus the size ladder
+quickshell -p Preview.qml     # scripted scan / lock / rescan / miss, the 116 px slot, the size ladder
 node test/frame-test.js       # boundary and visual tests
 ```
 
