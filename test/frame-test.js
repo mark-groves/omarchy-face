@@ -77,7 +77,7 @@ function ops(state, elapsed, size, clock) {
 }
 
 const STATES = ['scanning', 'recognized', 'notRecognized']
-const SIZES = [240, 120, 96, 64, 44, 30, 24]
+const SIZES = [240, 220, 120, 96, 64, 44, 30, 24]
 
 // --- everything crossing the boundary is a number --------------------------
 
@@ -231,18 +231,20 @@ check('the host never needs more than two seconds of hold', () => {
 // --- replay cost, which the host pays on a software canvas every frame -----
 
 // The host replays every op and path command in JS on a software canvas each
-// frame, so the real 116 px slot gets a budget well inside the host caps.
-const REPLAY_OPS = 1000
-const REPLAY_CMDS = 6500
+// frame, so the card the host paints (220 px on every surface) gets a budget
+// well inside the host caps.
+const CARD = 220
+const REPLAY_OPS = 1500
+const REPLAY_CMDS = 7500
 
 function replayCost(list) {
   return { ops: list.length, cmds: list.reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0) }
 }
 
-check('a frame at the real 116 px slot stays cheap to replay', () => {
+check('a frame on the large card stays cheap to replay', () => {
   for (const state of STATES) {
     for (let elapsed = 0; elapsed <= 1200; elapsed += 50) {
-      const c = replayCost(ops(state, elapsed, 116, 5000 + elapsed))
+      const c = replayCost(ops(state, elapsed, CARD, 5000 + elapsed))
       assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
     }
   }
@@ -379,22 +381,22 @@ for (const style of exported.STYLES) {
     }
   })
 
-  check(style + ': every frame at the 116 px slot stays inside the replay budget', () => {
+  check(style + ': every frame on the large card stays inside the replay budget', () => {
     for (const state of STATES) {
       for (let elapsed = 0; elapsed <= 2600; elapsed += 20) {
-        const c = replayCost(styled(style, state, elapsed, 116, 5000 + elapsed))
+        const c = replayCost(styled(style, state, elapsed, CARD, 5000 + elapsed))
         assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
       }
     }
   })
 
-  check(style + ': frames stay inside the host budgets and cheap at 116 px', () => {
+  check(style + ': frames stay inside the host budgets and cheap on the large card', () => {
     for (const size of SIZES) {
       for (const state of STATES) {
         for (let elapsed = 0; elapsed <= 3000; elapsed += 100) {
           const list = styled(style, state, elapsed, size, 5000 + elapsed)
           assert.ok(list.length < 6000, style + ' op budget blown: ' + list.length)
-          if (size === 116) {
+          if (size === CARD) {
             const c = replayCost(list)
             assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
           }
@@ -404,6 +406,99 @@ for (const style of exported.STYLES) {
     }
   })
 }
+
+
+// --- op level 2: glow, additive light and theme roles ---------------------------
+
+// The host tells the module its op level as a number. Without it the module
+// must draw exactly a level-1 frame, which is what keeps it working on a host
+// that predates level 2.
+const GLOW_AT = { 0: 5, 1: 7, 2: 10 }
+const OP_BLEND = 3
+function lumen(style, state, elapsed, size, clock) {
+  return frame(size === undefined ? CARD : size, { state, elapsed, clock: clock === undefined ? 5000 + elapsed : clock, style, host: 2 })
+}
+const paintOps = (list) => list.filter(o => o[0] !== OP_BLEND)
+const glowOf = (o) => o.length > GLOW_AT[o[0]] ? o[GLOW_AT[o[0]]] : 0
+
+check('without spec.host a frame is pure level 1: no blend ops, no glow, no roles past error', () => {
+  for (const style of exported.STYLES) {
+    for (const state of STATES) {
+      for (const elapsed of [0, 400, 900, 1600]) {
+        for (const o of styled(style, state, elapsed, CARD, 5000 + elapsed)) {
+          assert.ok(o[0] >= 0 && o[0] <= 2, style + ' emitted op ' + o[0] + ' to a level-1 host')
+          assert.ok(o[1] <= 2, style + ' emitted role ' + o[1] + ' to a level-1 host')
+          assert.strictEqual(o.length, { 0: 5, 1: 7, 2: 10 }[o[0]], style + ' emitted a trailing value to a level-1 host')
+        }
+      }
+    }
+  }
+})
+
+for (const style of exported.STYLES) {
+  check(style + ' level 2: numbers only, roles 0..5, alpha and glow in range, blend ops well formed', () => {
+    for (const state of STATES) {
+      for (const elapsed of [0, 300, 700, 1200, 1900]) {
+        for (const size of [CARD, 120, 30]) {
+          const list = lumen(style, state, elapsed, size)
+          assertNumeric(list, style + ' ' + state + '@' + elapsed)
+          for (const o of list) {
+            if (o[0] === OP_BLEND) { assert.ok(o.length === 2 && (o[1] === 0 || o[1] === 1), 'bad blend op'); continue }
+            assert.ok(o[1] >= 0 && o[1] <= 5 && Math.floor(o[1]) === o[1], 'role out of range: ' + o[1])
+            assert.ok(o[2] >= 0 && o[2] <= 1, 'alpha out of range')
+            const g = glowOf(o)
+            assert.ok(g >= 0 && g <= 1, 'glow out of range: ' + g)
+          }
+        }
+      }
+    }
+  })
+
+  check(style + ' level 2: the frame actually glows, adds light and uses the theme roles', () => {
+    const list = lumen(style, 'scanning', 3000)
+    assert.ok(list.some(o => o[0] === OP_BLEND && o[1] === 1), 'no additive blend')
+    assert.ok(list.filter(o => o[0] !== OP_BLEND && glowOf(o) > 0).length > 20, 'hardly anything glows')
+    for (const role of [3, 4, 5]) assert.ok(list.some(o => o[0] !== OP_BLEND && o[1] === role), 'role ' + role + ' unused')
+  })
+
+  check(style + ' level 2: a miss paints only in the error colour once the attempt fails', () => {
+    for (const elapsed of [800, 1200, 1800]) {
+      const off = paintOps(lumen(style, 'notRecognized', elapsed)).filter(o => o[1] === 0 || o[1] >= 3)
+      assert.strictEqual(off.length, 0, 'accent or theme roles in a miss at ' + elapsed)
+    }
+  })
+
+  check(style + ' level 2: a settled recognised face is strokes only, no dots', () => {
+    for (const elapsed of [1500, 1900, 2200]) {
+      const list = lumen(style, 'recognized', elapsed)
+      assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
+      assert.ok(strokes(list) > 3)
+    }
+  })
+
+  check(style + ' level 2: deterministic, clock-driven, and eases out of its entry pose', () => {
+    assert.deepStrictEqual(lumen(style, 'recognized', 430), lumen(style, 'recognized', 430))
+    assert.notDeepStrictEqual(lumen(style, 'scanning', 3000, CARD, 3300), lumen(style, 'scanning', 3000, CARD, 4400))
+    assert.notDeepStrictEqual(lumen(style, 'recognized', 200, CARD, 3200), lumen(style, 'recognized', 200, CARD, 4700))
+  })
+
+  check(style + ' level 2: every frame on the large card stays inside the replay and glow budgets', () => {
+    for (const state of STATES) {
+      for (let elapsed = 0; elapsed <= 2600; elapsed += 20) {
+        const list = lumen(style, state, elapsed)
+        const c = replayCost(list)
+        assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
+        assert.ok(list.filter(o => o[0] !== OP_BLEND && glowOf(o) > 0).length < 1200, 'glow budget blown')
+        for (const o of list) if (o[0] === 0) assert.ok(o[4].length < 600, 'path command budget blown')
+      }
+    }
+  })
+}
+
+check('the HUD keeps its dot cloud on level 2, denser on the large card', () => {
+  assert.ok(dots(lumen('hud', 'scanning', 1500)) > dots(ops('scanning', 1500, CARD)) * 1.5, 'expected a denser cloud')
+  assert.ok(dots(lumen('hud', 'recognized', 300)) > 100, 'the identify beat lost its cloud')
+})
 
 check('the HUD also paints a miss in the error role only once the attempt fails', () => {
   for (const elapsed of [800, 1200, 1800]) {
