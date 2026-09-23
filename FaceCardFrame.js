@@ -854,6 +854,9 @@ function paintHud(ctx, size, spec) {
     // on a light theme, where accent-on-near-white has little contrast.
     var kw = p2.kind === "field" ? 0.46
       : (p2.kind === "edge" ? 1.0 : 0.45 + 0.95 * p2.shade)
+    // Additive light flattens the slope shading, so the dense cloud leans
+    // harder on it to keep the sockets, nose and cheekbones legible.
+    if (dense && p2.kind === "skin") kw = 0.18 + 1.3 * p2.shade * p2.shade
     // Floor keeps the silhouette readable between sweeps; the cubed term is
     // the bright crest that rides the scan plane itself.
     var alpha = (0.40 + 0.48 * l + (ok ? 0.1 : 0.34) * l * l * l) * kw * (0.70 + 0.30 * p2.z)
@@ -1103,6 +1106,9 @@ function paintHud(ctx, size, spec) {
       var wk = easeOutCubic(seg(rt, waves[wv][0], waves[wv][1]))
       glowArc(halo, crisp, tint, wave * (wv ? 0.35 : 0.6), Math.max(1, size * 0.014 * (1 - wk * 0.7)), cx, cy, R * mix(0.74, 1.08, wk), 0, TAU)
     }
+    // PASS: the rim flashes white-hot for a beat.
+    var passHot = LUMEN ? bump(rt, REC_PASS - 30, REC_PASS + 300) : 0
+    if (passHot > 0.01) glowArc(halo, crisp, hotOf(tint), passHot, bold * 1.4, cx, cy, RF * RIM_R * faceScale, 0, TAU)
     // Lock burst: rays fire off the rim in a sweep that runs once round.
     if (!compact) {
       for (var ry = 0; ry < 60; ry++) {
@@ -1233,6 +1239,11 @@ function readStatus(p, g, size, state, t, rt, tint) {
   var a = wordOff ? 0.2 : (ok && rt >= REC_PASS ? 1 : (scanBlink ? g.fgA * 0.55 : g.fgA))
   var role = bad ? ROLE_ERROR : (ok && rt >= REC_PASS ? tint : ROLE_FG)
   seg7(p, role, a, g.ghost, g.w, size - g.m, g.base - g.ch, g.cw, g.ch, g.pitch, word, 1)
+  // A decided result burns in the segments' cores, so PASS and FAIL read at
+  // a glance against the busy instrument.
+  if (LUMEN && ((ok && rt >= REC_PASS) || (bad && rt >= 150)) && !wordOff) {
+    seg7(p, hotOf(role), a * 0.85, 0, Math.max(0.5, g.w * 0.45), size - g.m, g.base - g.ch, g.cw, g.ch, g.pitch, word, 1)
+  }
 }
 
 // Top left: a seven-segment value over a rule with a travelling tick.
@@ -2914,6 +2925,8 @@ function paintHolo(ctx, size, spec) {
     if (sgn * x < sgn * b.x) x = b.x
     return { x: x, y: b.y + (d > 0 ? (c.y - b.y) * d : (b.y - a.y) * d) }
   }
+  // The lock's confirmation: the rim light flares white-hot as PASS lands.
+  var passPulse = ok && LUMEN ? bump(rt, REC_PASS - 80, REC_PASS + 420) : 0
   for (var ln = 0; ln < mesh.length; ln++) {
     var L = mesh[ln]
     var pts = [], al = [], cpts = [], cal = [], rpts = [], ral = [], hal = []
@@ -2942,7 +2955,7 @@ function paintHolo(ctx, size, spec) {
       var a = baseA * flick * (0.06 + fr * 0.34 * (0.2 + 1.1 * L[sj][6]) + 0.42 * rim) + bandBoost(y0) * boot * (0.25 + 0.75 * fr)
       if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
       al.push(a)
-      hal.push(bad ? 0 : baseA * flick * 0.7 * rim)
+      hal.push(bad ? 0 : baseA * flick * 0.7 * rim * (1 + 1.8 * passPulse))
       cal.push(a * 0.45 * fr)
       ral.push(a * 0.38 * fr)
     }
