@@ -949,6 +949,26 @@ function paintHud(ctx, size, spec) {
       if (rimK > 0.004) {
         glowArc(halo, crisp, tint, Math.min(1, rimK * 2.4), bold * 0.85, cx, cy, RF * RIM_R * faceScale,
           -Math.PI / 2 - Math.PI * rimK, -Math.PI / 2 + Math.PI * rimK)
+        // The closed rim becomes a graduated dial.
+        var rr0 = RF * RIM_R * faceScale + R * 0.018
+        for (var dt = 0; dt < 120; dt++) {
+          var dta = -Math.PI / 2 + dt * TAU / 120
+          var drel = Math.abs(Math.atan2(Math.sin(dta + Math.PI / 2), Math.cos(dta + Math.PI / 2)))
+          if (drel > Math.PI * rimK) continue
+          var dl = R * (dt % 10 === 0 ? 0.04 : (dt % 5 === 0 ? 0.026 : 0.014))
+          crisp.line(tint, (dt % 10 === 0 ? 0.8 : 0.45), fine,
+            cx + Math.cos(dta) * rr0, cy + Math.sin(dta) * rr0, cx + Math.cos(dta) * (rr0 + dl), cy + Math.sin(dta) * (rr0 + dl))
+        }
+      }
+      // Landmark IDs flash up beside each reticle as it locks.
+      if (size >= 150) {
+        for (var lid = 0; lid < lmPx.length; lid++) {
+          var la3 = Math.max(bump(rt, REC_LOCK0 + LANDMARKS[lid].order * REC_LOCK_STEP, REC_LOCK0 + LANDMARKS[lid].order * REC_LOCK_STEP + 420), lmLock[lid] * 0.3)
+          if (la3 <= 0.02) continue
+          var idn = String(lid + 1)
+          if (idn.length < 2) idn = "0" + idn
+          seg7(crisp, tint, la3, 0, fine, lmPx[lid].x + R * 0.045, lmPx[lid].y - R * 0.085, R * 0.022, R * 0.04, R * 0.032, idn, 0)
+        }
       }
       flush()
     } else {
@@ -1023,6 +1043,32 @@ function paintHud(ctx, size, spec) {
     }
   }
 
+  // A second scanner crossing the plane at right angles. Where they meet, a
+  // scan head rides with both.
+  if (!compact && planeK > 0.01) {
+    var vph = frac(t / 3100)
+    var vtri = vph < 0.5 ? vph * 2 : (1 - vph) * 2
+    var vxu = mix(-0.9, 0.9, easeInOutCubic(vtri))
+    if (!scanning) vxu = mix(vxu, 0, easeInOutCubic(seg(rt, 0, 240)))
+    var vh = Math.sqrt(Math.max(0, 1 - vxu * vxu)) * R
+    var vx = cx + vxu * R
+    crisp.line(ROLE_FG, 0.3 * planeK, fine, vx, cy - vh, vx, cy + vh)
+    for (var vt = -8; vt <= 8; vt++) {
+      var vty = cy + vt * vh / 9
+      crisp.line(ROLE_FG, 0.35 * planeK, fine, vx, vty, vx + R * (vt % 4 === 0 ? 0.035 : 0.016), vty)
+    }
+    var hy0 = cy + plane.y * R
+    if (Math.abs(hy0 - cy) < vh) {
+      var hr = R * 0.045
+      glowArc(halo, crisp, tint, 0.9 * planeK, hair, vx, hy0, hr, 0, TAU)
+      crisp.line(tint, 0.9 * planeK, fine, vx - hr * 1.8, hy0, vx - hr * 0.6, hy0)
+      crisp.line(tint, 0.9 * planeK, fine, vx + hr * 0.6, hy0, vx + hr * 1.8, hy0)
+      crisp.line(tint, 0.9 * planeK, fine, vx, hy0 - hr * 1.8, vx, hy0 - hr * 0.6)
+      crisp.line(tint, 0.9 * planeK, fine, vx, hy0 + hr * 0.6, vx, hy0 + hr * 1.8)
+    }
+    flush()
+  }
+
   // --- result flourishes ---------------------------------------------------
   if (ok) {
     var waves = [REC_WAVE, [760, 1120]]
@@ -1047,6 +1093,19 @@ function paintHud(ctx, size, spec) {
   }
 
   if (bad && !compact) {
+    // Error flash: the whole disc floods red and drains top to bottom.
+    var flash = bump(rt, 0, 300)
+    if (flash > 0.02) {
+      for (var fs = 0; fs < 8; fs++) {
+        var fy0 = -1 + fs / 4, fy1 = fy0 + 0.25
+        var fw = Math.sqrt(Math.max(0, 1 - Math.pow(Math.abs(fy0) > Math.abs(fy1) ? fy1 : fy0, 2))) * R
+        var fgd = ctx.createLinearGradient(0, cy - R, 0, cy + R)
+        fgd.addColorStop(0, rgba(ROLE_ERROR, 0.2 * flash))
+        fgd.addColorStop(1, rgba(ROLE_ERROR, 0.02 * flash))
+        ctx.fillStyle = fgd
+        ctx.fillRect(cx - fw, cy + fy0 * R, fw * 2, 0.25 * R)
+      }
+    }
     // Static: short dashes re-rolled every 40 ms while the lock tears.
     var noiseK = 1 - seg(rt, 300, 700)
     if (noiseK > 0) {
@@ -1308,10 +1367,10 @@ function readoutDetail(p, g, size, state, t, rt, tint) {
 // HUD backplate: a fine polar grid behind the cloud, with registration
 // crosses at its major intersections.
 function hudGraticule(p, cx, cy, R, fine, hair, boot, tint, t) {
-  for (var r = 1; r <= 5; r++) p.arc(ROLE_FG, 0.055 * boot, fine, cx, cy, R * r * 0.15, 0, TAU)
+  for (var r = 1; r <= 5; r++) p.arc(ROLE_FG, 0.085 * boot, fine, cx, cy, R * r * 0.15, 0, TAU)
   for (var s = 0; s < 24; s++) {
     var a = s * TAU / 24
-    p.line(ROLE_FG, (s % 2 ? 0.03 : 0.05) * boot, fine,
+    p.line(ROLE_FG, (s % 2 ? 0.045 : 0.075) * boot, fine,
       cx + Math.cos(a) * R * 0.1, cy + Math.sin(a) * R * 0.1, cx + Math.cos(a) * R * 0.76, cy + Math.sin(a) * R * 0.76)
   }
   var k = R * 0.018
@@ -1353,8 +1412,8 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
       var drain = easeOutCubic(seg(rt, 60, 420))
       v = v * (1 - drain) + (hash(Math.floor(rt / 45) * 7 + i) > 0.86 ? 0.9 : 0.05) * drain
     }
-    var len = R * 0.062 * v
-    crisp.line(tint, (0.16 + 0.55 * v) * dim, i % 4 === 0 ? hair : fine,
+    var len = R * 0.075 * v
+    crisp.line(tint, (0.24 + 0.62 * v) * dim, i % 2 === 0 ? hair : fine,
       cx + Math.cos(ang) * rb, cy + Math.sin(ang) * rb, cx + Math.cos(ang) * (rb + len), cy + Math.sin(ang) * (rb + len))
   }
 
@@ -1364,7 +1423,7 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
     if (vi / 144 > boot) break
     var va = vr + vi * TAU / 144
     var vl = R * (vi % 12 === 0 ? 0.03 : 0.016)
-    crisp.line(ROLE_FG, (vi % 12 === 0 ? 0.4 : 0.22) * dim * (1 + passFlash), fine,
+    crisp.line(ROLE_FG, (vi % 12 === 0 ? 0.55 : 0.3) * dim * (1 + passFlash), fine,
       cx + Math.cos(va) * R * 0.936, cy + Math.sin(va) * R * 0.936,
       cx + Math.cos(va) * (R * 0.936 + vl), cy + Math.sin(va) * (R * 0.936 + vl))
   }
@@ -1421,7 +1480,7 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
   }
   function lightAt(u, base, seed) {
     var a = base
-    if (scanning) a += 0.45 * acquisition(plane, u * FSC)
+    if (scanning) a += 0.6 * acquisition(plane, u * FSC)
     if (bad && hash(seed) < brk) a = 0
     return a * boot
   }
@@ -1430,7 +1489,7 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
     var r = 0.88 * Math.sqrt(1 - z * z)
     var n = 20 + Math.round(r * 50)
     var cas = ok ? bump(rt, 240 + li * 55, 560 + li * 55) : 0
-    var base = 0.1 + 0.5 * cas + (ok ? 0.08 * seg(rt, 500, 900) : 0)
+    var base = 0.17 + 0.55 * cas + (ok ? 0.16 * seg(rt, 500, 900) : 0)
     var pts = [], al = []
     for (var k = 0; k <= n; k++) {
       var a = k / n * TAU
@@ -1441,7 +1500,7 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
     strip(crisp, tint, fine, pts, al)
   }
   var profiles = [[1, 0, 0], [0, 1, 0], [1, 0, 0.36], [1, 0, -0.36], [0, 1, 0.4], [0, 1, -0.4]]
-  var profA = 0.08 + (ok ? 0.25 * bump(rt, 300, 700) : 0)
+  var profA = 0.13 + (ok ? 0.3 * bump(rt, 300, 700) + 0.1 * seg(rt, 600, 900) : 0)
   for (var pi = 0; pi < profiles.length; pi++) {
     var P = profiles[pi]
     var pts2 = [], al2 = []
@@ -2171,7 +2230,7 @@ function holoPoints() {
 // face space; the pose is applied per frame.
 function holoContours() {
   if (CACHE.holoT) return CACHE.holoT
-  var nx = 24, ny = 32
+  var nx = 20, ny = 28
   var x0 = -0.64, x1 = 0.64, y0 = -0.82, y1 = 0.82
   var levels = [0.12, 0.22, 0.32, 0.41, 0.49, 0.56, 0.62, 0.67]
   var grid = []
@@ -2280,8 +2339,8 @@ function paintHolo(ctx, size, spec) {
   if (hash(Math.floor(t / 140)) > 0.93) flick *= 0.7
   if (ok) flick = mix(flick, 1, seg(rt, 0, 300))
   if (bad) {
-    flick *= 1 - 0.5 * easeOutCubic(seg(rt, 150, 700))
-    if (rt > 100 && rt < 600 && hash(Math.floor(rt / 70) + 17) > 0.55) flick *= 0.45
+    flick *= 1 - 0.35 * easeOutCubic(seg(rt, 150, 700))
+    if (rt > 100 && rt < 600 && hash(Math.floor(rt / 70) + 17) > 0.55) flick *= 0.55
   }
   flick *= boot
 
@@ -2309,7 +2368,7 @@ function paintHolo(ctx, size, spec) {
   var blockOn = bad ? rt < 520 : (scanning && hash(Math.floor(t / 200) + 11) > 0.93)
   if (blockOn) {
     var bs = Math.floor((bad ? rt : t) / 50)
-    for (var bi = 0; bi < (bad ? 5 : 2); bi++) {
+    for (var bi = 0; bi < (bad ? 7 : 2); bi++) {
       blocks.push({
         y: (hash(bs * 7 + bi) * 2 - 1) * 0.9, h: 0.04 + 0.1 * hash(bs * 3 + bi),
         x: (hash(bs * 5 + bi * 2) * 2 - 1) * 0.7, w: 0.2 + 0.4 * hash(bs * 13 + bi),
@@ -2327,7 +2386,7 @@ function paintHolo(ctx, size, spec) {
   }
 
   // Chromatic offset: a foreground copy of the mesh off register.
-  var chroma = (scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1 + 2.5 * bump(rt, 0, 600))) * boot
+  var chroma = (scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1 + 4 * bump(rt, 0, 600))) * boot
   var chX = size * 0.006 * chroma * (bad ? 1 + (hash(Math.floor(rt / 40)) - 0.5) : 1)
   var chY = -size * 0.003 * chroma
 
@@ -2404,12 +2463,12 @@ function paintHolo(ctx, size, spec) {
 
   // --- scanlines and a fine backplate grid --------------------------------------
   if (!compact) {
-    var lines = 64
+    var lines = 48
     for (var li = 0; li < lines; li++) {
       var ly = ((li + 0.5) / lines) * 2 - 1
       var half = Math.sqrt(Math.max(0, 1 - ly * ly))
       if (half <= 0.05) continue
-      crisp.line(ROLE_FG, (li % 4 === 0 ? 0.05 : 0.028) * boot, fine, cx - half * R, cy + ly * R, cx + half * R, cy + ly * R)
+      crisp.line(ROLE_FG, (li % 4 === 0 ? 0.05 : 0.03) * boot, fine, cx - half * R, cy + ly * R, cx + half * R, cy + ly * R)
     }
     for (var gv = -4; gv <= 4; gv++) {
       var gx = gv * 0.22
@@ -2445,7 +2504,7 @@ function paintHolo(ctx, size, spec) {
     if (ok) cageRot = t0 / 9000 * TAU + TAU * 0.6 * easeInOutCubic(seg(rt, 0, 600))
     if (bad) cageRot = t0 / 9000 * TAU + (hash(Math.floor(rt / 50) + 2) - 0.5) * 0.5 * (1 - seg(rt, 400, 700))
     var cageS = ok ? mix(1, 0.9, easeInOutCubic(seg(rt, 300, 750))) : 1
-    var cageA = (ok ? 1 - easeInOutCubic(seg(rt, 400, 800)) : (bad ? 1 - 0.7 * frag : 1)) * flick
+    var cageA = (ok ? 1 - 0.65 * easeInOutCubic(seg(rt, 400, 800)) : (bad ? 1 - 0.7 * frag : 1)) * flick
     if (cageA > 0.01) {
       var cr = Math.cos(cageRot), sr = Math.sin(cageRot)
       var CA = 0.8 * cageS, CB = 0.98 * cageS
@@ -2457,7 +2516,7 @@ function paintHolo(ctx, size, spec) {
           var Q = project([X, P[1], Z])
           pts.push(toPx(Q.x + glitchX(Q.x, Q.y), Q.y))
           var front = clamp01((Z + 0.8) / 1.6)
-          al.push((0.03 + 0.2 * front * front) * cageA * (dashed && i % 2 ? 0 : 1))
+          al.push((0.05 + 0.32 * front * front) * cageA * (dashed && i % 2 ? 0 : 1))
         }
         strip(crisp, tint, fine, pts, al)
       }
@@ -2580,7 +2639,7 @@ function paintHolo(ctx, size, spec) {
         // Vertices detach and drift outward under drag.
         var sid = ln * 31 + sj
         var nl = Math.hypot(x0, y0 - HOLO_CY) || 0.001
-        var sp2 = 0.35 * (0.4 + hash(sid))
+        var sp2 = 0.55 * (0.4 + hash(sid))
         x0 += dragOffset(sp2 * x0 / nl, fragTau, 3.5)
         y0 += dragOffset(sp2 * (y0 - HOLO_CY) / nl, fragTau, 3.5) + dragOffset(0.1, fragTau, 2)
       }
@@ -2591,11 +2650,13 @@ function paintHolo(ctx, size, spec) {
       cpts.push({ x: PX.x + chX, y: PX.y + chY })
       var da = clamp01((Q.z + 0.12) / 0.62)
       var a = baseA * (0.1 + 0.9 * Math.pow(da, 1.2)) * flick + bandBoost(y0) * boot
-      if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.6) a = 0
+      if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
       al.push(a)
       cal.push(a * 0.35)
     }
-    if (!compact && chroma > 0.02) strip(crisp, ROLE_FG, fine, cpts, cal)
+    // The offset copy rides the latitude lines only; that is enough to read
+    // as colour fringing and halves its cost.
+    if (!compact && chroma > 0.02 && ln < 13) strip(crisp, ROLE_FG, fine, cpts, cal)
     strip(crisp, tint, mw2, pts, al)
   }
   crisp.flush()
@@ -2607,7 +2668,7 @@ function paintHolo(ctx, size, spec) {
       var S = topo.segs[ts]
       var A0 = project([S[0], S[1], S[4]]), B0 = project([S[2], S[3], S[4]])
       var casc = ok ? bump(rt, 250 + (topo.levels - S[5]) * 45, 600 + (topo.levels - S[5]) * 45) : 0
-      var ca = (0.2 + 0.6 * casc + 0.1 * solid) * flick * clamp01((A0.z + 0.1) / 0.5) + bandBoost(A0.y) * 0.5
+      var ca = (0.22 + 0.6 * casc + 0.18 * solid) * flick * clamp01((A0.z + 0.1) / 0.5) + bandBoost(A0.y) * 0.5
       if (bad && hash(ts * 3 + 1) < frag) continue
       var ax = A0.x + glitchX(A0.x, A0.y), bx = B0.x + glitchX(B0.x, B0.y)
       var AP = toPx(ax, A0.y), BP = toPx(bx, B0.y)
@@ -2684,12 +2745,13 @@ function paintHolo(ctx, size, spec) {
     for (var ob = 0; ob < orbits.length; ob++) {
       var O = orbits[ob]
       var orad = O[0], tilt = O[1], orot = O[2]
-      var oA = flick * 0.6
+      var oA = flick * 0.75
       if (ok) {
+        // Both orbits level out and settle as a halo at eye height.
         var ok2 = easeInOutCubic(seg(rt, 150, 600))
         tilt = mix(tilt, 0, ok2)
-        orad = mix(orad, 0.72, ok2)
-        oA *= 1 - seg(rt, 550, 850)
+        orad = mix(orad, ob ? 0.7 : 0.76, ok2)
+        oA *= 1 - 0.45 * seg(rt, 550, 850)
       }
       if (bad) {
         tilt += (hash(Math.floor(rt / 60) * 5 + ob) - 0.5) * 0.8 * (1 - frag * 0.5)
@@ -2709,15 +2771,52 @@ function paintHolo(ctx, size, spec) {
       }
       strip(crisp, tint, fine * 1.3, opts, oal)
       for (var nd = 0; nd < 3; nd++) {
+        if (ok && seg(rt, 150, 600) >= 1 && nd > 0) break
         var na = t / (1800 + ob * 700) * TAU * (ob ? -1 : 1) + nd * TAU / 3
         var NX = Math.cos(na) * orad, NZ = Math.sin(na) * orad
         var NQ = project([NX, -NZ * stl + 0.05, NZ * ct])
         var NP = toPx(NQ.x, NQ.y)
         var nds = R * 0.024
         var front = clamp01((NZ * ct + orad) / (2 * orad))
-        crisp.poly(tint, oA * (0.3 + 0.7 * front), hair, [[NP.x, NP.y - nds], [NP.x + nds, NP.y], [NP.x, NP.y + nds], [NP.x - nds, NP.y], [NP.x, NP.y - nds]])
+        var ndia = [[NP.x, NP.y - nds], [NP.x + nds, NP.y], [NP.x, NP.y + nds], [NP.x - nds, NP.y], [NP.x, NP.y - nds]]
+        halo.poly(tint, oA * 0.2 * front, thin * 3, ndia)
+        crisp.poly(tint, oA * (0.3 + 0.7 * front), hair, ndia)
       }
     }
+    halo.flush()
+    crisp.flush()
+  }
+
+  // --- side scopes: the face's depth profile at the right, scan height at the left ----
+  if (hud) {
+    var sx0 = R * 0.7
+    var sy0 = HOLO_CY - 0.62, sy1 = HOLO_CY + 0.62
+    var sA = (bad ? 1 - 0.6 * frag : 1) * boot
+    crisp.line(ROLE_FG, 0.3 * sA, fine, cx + sx0, cy + sy0 * R, cx + sx0, cy + sy1 * R)
+    for (var sk = 0; sk <= 12; sk++) {
+      var sky = cy + mix(sy0, sy1, sk / 12) * R
+      crisp.line(ROLE_FG, 0.3 * sA, fine, cx + sx0, sky, cx + sx0 + R * (sk % 3 === 0 ? 0.03 : 0.015), sky)
+    }
+    var prof = [], pal = []
+    for (var sp = 0; sp <= 30; sp++) {
+      var py = mix(-0.6, 0.6, sp / 30)
+      var pz = holoZAt(0, py) * (bad ? 1 + (hash(Math.floor(rt / 40) * 31 + sp) - 0.5) * 0.5 * (1 - frag) : 1)
+      prof.push({ x: cx + sx0 + pz * R * 0.34, y: cy + (py + HOLO_CY) * R })
+      pal.push((0.55 + bandBoost(py + HOLO_CY)) * sA * flick)
+    }
+    strip(crisp, tint, fine * 1.5, prof, pal)
+    var mk = scanning ? bandY : (ok ? mix(bandY, HOLO_CY, seg(rt, 0, 300)) : bandY)
+    if (mk > sy0 && mk < sy1) {
+      var mz = holoZAt(0, mk - HOLO_CY)
+      crisp.line(tint, 0.8 * sA, fine, cx + sx0, cy + mk * R, cx + sx0 + mz * R * 0.34 + R * 0.04, cy + mk * R)
+    }
+    var lx = -R * 0.7
+    crisp.line(ROLE_FG, 0.3 * sA, fine, cx + lx, cy + sy0 * R, cx + lx, cy + sy1 * R)
+    for (var lk = 0; lk <= 24; lk++) {
+      var lky = cy + mix(sy0, sy1, lk / 24) * R
+      crisp.line(ROLE_FG, 0.25 * sA, fine, cx + lx, lky, cx + lx - R * (lk % 4 === 0 ? 0.03 : 0.014), lky)
+    }
+    if (mk > sy0 && mk < sy1) chevron(crisp, tint, 0.9 * sA, hair, cx + lx - R * 0.07, cy + mk * R, 0, R * 0.0, R * 0.035, 0.6)
     crisp.flush()
   }
 
@@ -2805,10 +2904,22 @@ function paintHolo(ctx, size, spec) {
       var ew = bump(rt, 0, 340)
       if (ew > 0.01) crisp.arc(ROLE_ERROR, ew * 0.6, Math.max(1, size * 0.018), cx, cy, R * mix(0.1, 1.05, easeOutCubic(seg(rt, 0, 340))), 0, TAU)
       drawTears(crisp, tears, cx, cy, R)
+      // Static while the projection fails.
+      var noiseK = 1 - seg(rt, 350, 800)
+      if (noiseK > 0) {
+        var nstep = Math.floor(rt / 40)
+        for (var nz = 0; nz < 80; nz++) {
+          var nr = Math.sqrt(hash(nstep * 131 + nz)) * R
+          var na = hash(nstep * 71 + nz * 3) * TAU
+          var nx = cx + Math.cos(na) * nr, ny = cy + Math.sin(na) * nr
+          var nlen = R * (0.02 + 0.07 * hash(nz * 13 + nstep))
+          crisp.line(nz % 3 ? ROLE_ERROR : ROLE_FG, 0.4 * noiseK, fine, nx - nlen, ny, nx + nlen, ny)
+        }
+      }
       for (var bb = 0; bb < blocks.length; bb++) {
         var B = blocks[bb]
         var BP = toPx(B.x + B.dx, B.y)
-        ctx.fillStyle = rgba(bb % 2 ? ROLE_FG : ROLE_ERROR, 0.08)
+        ctx.fillStyle = rgba(bb % 2 ? ROLE_FG : ROLE_ERROR, 0.14)
         ctx.fillRect(BP.x, BP.y, B.w * R, B.h * R)
         crisp.line(ROLE_ERROR, 0.4, fine, BP.x, BP.y, BP.x + B.w * R, BP.y)
       }
