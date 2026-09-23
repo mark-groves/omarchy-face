@@ -942,7 +942,9 @@ function paintInto(ctx, size, spec) {
       }
       flush()
     } else {
-      // A miss: the reticles hunt, fail to converge, and are struck through.
+      // A miss: the reticles hunt, fail to converge, and lose track, their
+      // corners drifting apart. Not struck through: an X on each eye is a
+      // cartoon dead face.
       for (var bl = 0; bl < lmPx.length; bl++) {
         var bc = lmPx[bl]
         var bk = seg(rt, 60 + LANDMARKS[bl].order * 22, 300 + LANDMARKS[bl].order * 22)
@@ -950,10 +952,20 @@ function paintInto(ctx, size, spec) {
         var shake = (1 - bk) * R * 0.04
         var bx2 = bc.x + Math.sin(rt / 23 + bl) * shake
         var by2 = bc.y + Math.cos(rt / 29 + bl * 2) * shake
-        var xs = R * 0.035
-        var xa = clamp01(bk * 2) * (0.85 - 0.35 * seg(rt, 500, 900))
-        crisp.line(ROLE_ERROR, xa, thin, bx2 - xs, by2 - xs, bx2 + xs, by2 + xs)
-        crisp.line(ROLE_ERROR, xa, thin, bx2 - xs, by2 + xs, bx2 + xs, by2 - xs)
+        var lost = easeOutCubic(seg(rt, 300 + LANDMARKS[bl].order * 22, 800))
+        var xs = R * (0.045 + 0.035 * lost)
+        var arm2 = R * 0.028 * (1 - 0.4 * lost)
+        var xa = clamp01(bk * 2) * (0.85 - 0.45 * lost)
+        var skewA = (hash(bl * 3 + 5) - 0.5) * 0.5 * lost
+        for (var q4 = 0; q4 < 4; q4++) {
+          var qa4 = skewA + q4 * Math.PI / 2 + Math.PI / 4
+          var kx = bx2 + Math.cos(qa4) * xs, ky = by2 + Math.sin(qa4) * xs
+          var ux4 = Math.cos(qa4 + Math.PI * 0.75), uy4 = Math.sin(qa4 + Math.PI * 0.75)
+          var vx4 = Math.cos(qa4 - Math.PI * 0.75), vy4 = Math.sin(qa4 - Math.PI * 0.75)
+          crisp.poly(ROLE_ERROR, xa, hair, [
+            [kx + ux4 * arm2, ky + uy4 * arm2], [kx, ky], [kx + vx4 * arm2, ky + vy4 * arm2]
+          ])
+        }
       }
       flush()
     }
