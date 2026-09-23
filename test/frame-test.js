@@ -61,7 +61,7 @@ check('reads no ambient state', () => {
 
 const body = source.replace(/^\.pragma library\s*$/m, '')
 const exported = {}
-new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs;')(exported)
+new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLE = STYLE; __out.STYLES = STYLES;')(exported)
 const { frame, holdMs } = exported
 
 check('the public API takes no context argument', () => {
@@ -236,6 +236,155 @@ check('a frame at the real 116 px slot stays cheap to replay', () => {
       const n = ops(state, elapsed, 116, 5000 + elapsed).length
       assert.ok(n < 450, state + '@' + elapsed + ' replays ' + n + ' ops')
     }
+  }
+})
+
+// --- styles and the selector --------------------------------------------------
+
+const STYLE_LINE = /^var STYLE = "([a-z]+)"/m
+
+check('the style line is in the exact form the switch filter rewrites', () => {
+  const lines = source.split('\n').filter(l => /^var STYLE = /.test(l))
+  assert.strictEqual(lines.length, 1, 'expected exactly one STYLE line')
+  assert.match(lines[0], /^var STYLE = "[a-z]+" \/\/ omarchy-face:style$/)
+})
+
+check('the published default is the HUD', () => {
+  assert.strictEqual(source.match(STYLE_LINE)[1], 'hud')
+  assert.strictEqual(exported.STYLE, 'hud')
+})
+
+check('the switch script offers exactly the module styles', () => {
+  const script = fs.readFileSync(path.join(root, 'bin/omarchy-face-style'), 'utf8')
+  const m = script.match(/^STYLES=\(([^)]*)\)/m)
+  assert.ok(m, 'no STYLES=(...) in the script')
+  assert.deepStrictEqual(m[1].trim().split(/\s+/), exported.STYLES)
+  assert.deepStrictEqual(exported.STYLES, ['hud', 'radar', 'holo'])
+})
+
+check('the filter is declared for the entry point', () => {
+  const attrs = fs.readFileSync(path.join(root, '.gitattributes'), 'utf8')
+  assert.match(attrs, /^FaceCardFrame\.js filter=omarchy-face-style$/m)
+})
+
+function styled(style, state, elapsed, size, clock) {
+  const s = { state: state, elapsed: elapsed, clock: clock === undefined ? 900 : clock }
+  if (style !== undefined) s.style = style
+  return frame(size === undefined ? 120 : size, s)
+}
+
+// The installed module with its STYLE line rewritten, loaded as the host does.
+function installedAs(style) {
+  const text = body.replace(STYLE_LINE, 'var STYLE = "' + style + '"')
+  const api = {}
+  new Function('__out', text + '\n__out.frame = frame;')(api)
+  return api.frame
+}
+
+check('spec.style picks the style', () => {
+  assert.deepStrictEqual(styled(undefined, 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.notDeepStrictEqual(styled('radar', 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.notDeepStrictEqual(styled('holo', 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.notDeepStrictEqual(styled('holo', 'scanning', 2000), styled('radar', 'scanning', 2000))
+})
+
+check('the STYLE line picks the style when spec.style is absent', () => {
+  for (const style of exported.STYLES) {
+    const f = installedAs(style)
+    assert.deepStrictEqual(f(120, { state: 'recognized', clock: 1200, elapsed: 500 }), styled(style, 'recognized', 500, 120, 1200), style)
+  }
+})
+
+check('an unknown style paints the installed one, never nothing', () => {
+  assert.deepStrictEqual(styled('sparkles', 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.deepStrictEqual(styled(42, 'scanning', 2000), styled('hud', 'scanning', 2000))
+  const radar = installedAs('radar')
+  assert.deepStrictEqual(radar(120, { state: 'scanning', clock: 900, elapsed: 2000, style: 'nope' }), styled('radar', 'scanning', 2000))
+  const broken = installedAs('nope')
+  assert.deepStrictEqual(broken(120, { state: 'scanning', clock: 900, elapsed: 2000 }), styled('hud', 'scanning', 2000))
+})
+
+for (const style of ['radar', 'holo']) {
+  check(style + ': a frame is nothing but finite numbers, roles and alphas in range', () => {
+    for (const state of STATES) {
+      for (const elapsed of [0, 200, 430, 700, 1080, 2600]) {
+        for (const size of [240, 120, 30]) {
+          const list = styled(style, state, elapsed, size, 5000 + elapsed)
+          assertNumeric(list, style + ' ' + state + '@' + elapsed + '/' + size)
+          for (const op of list) {
+            assert.ok(op[1] >= 0 && op[1] <= 2, 'role out of range')
+            assert.ok(op[2] >= 0 && op[2] <= 1, 'alpha out of range')
+          }
+        }
+      }
+    }
+  })
+
+  check(style + ': the same spec returns the same frame', () => {
+    for (const [state, elapsed] of [['scanning', 1500], ['recognized', 430], ['notRecognized', 300]]) {
+      assert.deepStrictEqual(styled(style, state, elapsed), styled(style, state, elapsed))
+    }
+  })
+
+  check(style + ': ambient motion is driven by the clock', () => {
+    assert.notDeepStrictEqual(styled(style, 'scanning', 3000, 120, 3300), styled(style, 'scanning', 3000, 120, 4400))
+  })
+
+  check(style + ': a scan boots in rather than popping on', () => {
+    const drawn = (list) => list.reduce((n, o) => n + (o[0] === 0 ? o[4].length * o[2] : o[2]), 0)
+    assert.ok(drawn(styled(style, 'scanning', 0)) < drawn(styled(style, 'scanning', 3000)) * 0.5)
+  })
+
+  check(style + ': a result eases out of the pose it was entered from', () => {
+    assert.notDeepStrictEqual(styled(style, 'recognized', 200, 120, 3200), styled(style, 'recognized', 200, 120, 4700))
+  })
+
+  check(style + ': a settled recognised face is strokes only, no dots', () => {
+    for (const elapsed of [900, 1150, 1400]) {
+      const list = styled(style, 'recognized', elapsed)
+      assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
+      assert.ok(strokes(list) > 3, 'expected a drawn face at ' + elapsed)
+    }
+  })
+
+  check(style + ': a miss paints in the error role only', () => {
+    for (const elapsed of [150, 500, 900]) {
+      const accent = styled(style, 'notRecognized', elapsed).filter(o => o[1] === 0)
+      assert.strictEqual(accent.length, 0, 'accent ops in a miss at ' + elapsed)
+    }
+  })
+
+  check(style + ': the recognised hold outlasts the last thing it draws', () => {
+    assert.notDeepStrictEqual(
+      styled(style, 'recognized', holdMs('recognized')),
+      styled(style, 'recognized', holdMs('recognized') - 200))
+  })
+
+  check(style + ': every size paints something', () => {
+    for (const size of SIZES) {
+      for (const state of STATES) {
+        const drawn = styled(style, state, 400, size).reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0)
+        assert.ok(drawn > 3, style + ' ' + state + ' at ' + size + ' px painted nothing')
+      }
+    }
+  })
+
+  check(style + ': frames stay inside the host budgets and cheap at 116 px', () => {
+    for (const size of SIZES) {
+      for (const state of STATES) {
+        for (let elapsed = 0; elapsed <= 3000; elapsed += 100) {
+          const list = styled(style, state, elapsed, size, 5000 + elapsed)
+          assert.ok(list.length < (size === 116 ? 450 : 6000), style + ' op budget blown: ' + list.length)
+          for (const op of list) if (op[0] === 0) assert.ok(op[4].length < 600, 'path command budget blown')
+        }
+      }
+    }
+  })
+}
+
+check('the HUD also paints a miss in the error role only', () => {
+  for (const elapsed of [150, 500, 900]) {
+    assert.strictEqual(styled('hud', 'notRecognized', elapsed).filter(o => o[1] === 0).length, 0)
   }
 })
 

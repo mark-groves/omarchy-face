@@ -18,6 +18,13 @@
 //   state        "scanning" | "recognized" | "notRecognized"
 //   clock        free-running milliseconds, drives every ambient motion
 //   elapsed      milliseconds since `state` was entered
+//   style        optional, "hud" | "radar" | "holo"; overrides STYLE below
+//
+// Three styles share the op vocabulary, the timing contract and the corner
+// readouts: the Depth Lattice HUD, the Phosphor Radar and the Holographic
+// Wireframe. The installed style is the STYLE line, which
+// bin/omarchy-face-style rewrites through a git filter so plugin updates
+// still fast-forward.
 //
 // Colours are not in the spec. Ops carry a role index and the host resolves
 // it against the live theme.
@@ -54,6 +61,19 @@ var OP_GRAD = 2   // [OP_GRAD, role, alphaFrom, alphaTo, x, y, w, h, yFrom, yTo]
 var PATH_CHUNK = 560
 
 var TAU = Math.PI * 2
+
+// The installed style. Keep this on one line in exactly this form: the
+// omarchy-face-style filter matches it. Unknown values paint the HUD.
+var STYLE = "hud" // omarchy-face:style
+
+var STYLES = ["hud", "radar", "holo"]
+
+function resolveStyle(spec) {
+  var asked = spec && typeof spec.style === "string" ? spec.style : ""
+  if (STYLES.indexOf(asked) !== -1) return asked
+  if (STYLES.indexOf(STYLE) !== -1) return STYLE
+  return "hud"
+}
 
 function mulberry32(a) {
   return function () {
@@ -504,7 +524,7 @@ function pad3(n) {
   return s
 }
 
-function paintInto(ctx, size, spec) {
+function paintHud(ctx, size, spec) {
   var state = spec.state || "scanning"
   var t = spec.clock || 0
   var rt = spec.elapsed || 0
@@ -559,19 +579,8 @@ function paintInto(ctx, size, spec) {
   var scatterTau = bad ? Math.max(0, rt - 150) / 1000 : 0
   var errWave = bad ? seg(rt, 0, 220) * 2.2 : 0
 
-  // Glitch tears. A few horizontal strips, re-rolled every 45 ms for the
-  // first 300 ms of a miss, each dragging the dots inside it sideways.
-  var tears = []
-  if (bad && rt < 300) {
-    var tstep = Math.floor(rt / 45)
-    for (var tj = 0; tj < 3; tj++) {
-      tears.push({
-        y: (hash(tstep * 5 + tj * 17) * 2 - 1) * 0.85,
-        h: 0.035 + hash(tstep * 9 + tj) * 0.06,
-        dx: (hash(tstep * 11 + tj * 3) - 0.5) * 0.42
-      })
-    }
-  }
+  // Glitch tears drag the dots inside them sideways.
+  var tears = bad ? glitchTears(rt) : []
 
   // Face space to screen, through the sway. `d` is depth toward the viewer.
   function project(x, y, d) {
@@ -588,7 +597,7 @@ function paintInto(ctx, size, spec) {
 
   // --- micro: a vector glyph, the cloud is a smudge down here ---------------
   if (micro) {
-    paintMicro(crisp, size, state, t, rt, cx, cy, R, tint)
+    paintHudMicro(crisp, size, state, t, rt, cx, cy, R, tint)
     crisp.flush()
     return
   }
@@ -758,9 +767,7 @@ function paintInto(ctx, size, spec) {
       // Depth lock breaks: horizontal slices shear, then anchors let go.
       var band = Math.floor((hy + 1.2) / 0.48)
       x += shearK * (band % 2 === 0 ? 0.16 : -0.16)
-      for (var tk = 0; tk < tears.length; tk++) {
-        if (Math.abs(y - tears[tk].y) < tears[tk].h) x += tears[tk].dx
-      }
+      x += tearShift(tears, y)
 
       if (scatterTau > 0) {
         var len2 = Math.hypot(hx, hy) || 0.001
@@ -896,35 +903,8 @@ function paintInto(ctx, size, spec) {
         crisp.line(tint, ea, hair, mx, my, mix(mx, B.x, ek), mix(my, B.y, ek))
       }
 
-      // Each landmark: a reticle contracts and rotates onto it, then leaves a
-      // small locked diamond behind.
       for (var rl = 0; rl < lmPx.length; rl++) {
-        var k = lmLock[rl]
-        if (k <= 0) continue
-        var C = lmPx[rl]
-        var ret = 1 - k
-        if (ret > 0.01) {
-          var rs = R * mix(0.05, 0.20, ret)
-          var rrot = ret * 0.8
-          var ra = clamp01(k * 3) * 0.95
-          var sq = []
-          for (var q2 = 0; q2 < 4; q2++) {
-            var qa2 = rrot + q2 * Math.PI / 2 + Math.PI / 4
-            sq.push([C.x + Math.cos(qa2) * rs, C.y + Math.sin(qa2) * rs])
-          }
-          for (var q3 = 0; q3 < 4; q3++) {
-            var Pq = sq[q3], Pn = sq[(q3 + 1) % 4], Pv = sq[(q3 + 3) % 4]
-            crisp.poly(tint, ra, hair, [
-              [mix(Pq[0], Pv[0], 0.3), mix(Pq[1], Pv[1], 0.3)],
-              Pq,
-              [mix(Pq[0], Pn[0], 0.3), mix(Pq[1], Pn[1], 0.3)]
-            ])
-          }
-        }
-        var ds = R * 0.032 * mix(1.8, 1, easeOutBack(k))
-        var dAlpha = clamp01(k * 2) * (0.9 + 0.1 * passFlash)
-        halo.poly(tint, dAlpha * 0.2, thin * 3.2, [[C.x, C.y - ds], [C.x + ds, C.y], [C.x, C.y + ds], [C.x - ds, C.y], [C.x, C.y - ds]])
-        crisp.poly(tint, dAlpha, thin, [[C.x, C.y - ds], [C.x + ds, C.y], [C.x, C.y + ds], [C.x - ds, C.y], [C.x, C.y - ds]])
+        drawLockReticle(halo, crisp, tint, lmPx[rl], lmLock[rl], R, hair, thin, passFlash)
       }
 
       // Eye contours and the rim close out of the dissolving cloud.
@@ -942,30 +922,15 @@ function paintInto(ctx, size, spec) {
       }
       flush()
     } else {
-      // A miss: the reticles hunt, fail to converge, and lose track, their
-      // corners drifting apart. Not struck through: an X on each eye is a
-      // cartoon dead face.
+      // A miss: the reticles hunt, fail to converge, and lose track.
       for (var bl = 0; bl < lmPx.length; bl++) {
         var bc = lmPx[bl]
         var bk = seg(rt, 60 + LANDMARKS[bl].order * 22, 300 + LANDMARKS[bl].order * 22)
         if (bk <= 0) continue
         var shake = (1 - bk) * R * 0.04
-        var bx2 = bc.x + Math.sin(rt / 23 + bl) * shake
-        var by2 = bc.y + Math.cos(rt / 29 + bl * 2) * shake
         var lost = easeOutCubic(seg(rt, 300 + LANDMARKS[bl].order * 22, 800))
-        var xs = R * (0.045 + 0.035 * lost)
-        var arm2 = R * 0.028 * (1 - 0.4 * lost)
-        var xa = clamp01(bk * 2) * (0.85 - 0.45 * lost)
-        var skewA = (hash(bl * 3 + 5) - 0.5) * 0.5 * lost
-        for (var q4 = 0; q4 < 4; q4++) {
-          var qa4 = skewA + q4 * Math.PI / 2 + Math.PI / 4
-          var kx = bx2 + Math.cos(qa4) * xs, ky = by2 + Math.sin(qa4) * xs
-          var ux4 = Math.cos(qa4 + Math.PI * 0.75), uy4 = Math.sin(qa4 + Math.PI * 0.75)
-          var vx4 = Math.cos(qa4 - Math.PI * 0.75), vy4 = Math.sin(qa4 - Math.PI * 0.75)
-          crisp.poly(ROLE_ERROR, xa, hair, [
-            [kx + ux4 * arm2, ky + uy4 * arm2], [kx, ky], [kx + vx4 * arm2, ky + vy4 * arm2]
-          ])
-        }
+        drawLostTrack(crisp, bc.x + Math.sin(rt / 23 + bl) * shake, bc.y + Math.cos(rt / 29 + bl * 2) * shake,
+          R, lost, clamp01(bk * 2) * (0.85 - 0.45 * lost), hair, bl)
       }
       flush()
     }
@@ -1039,12 +1004,7 @@ function paintInto(ctx, size, spec) {
   }
 
   if (bad) {
-    for (var tr = 0; tr < tears.length; tr++) {
-      var ty = cy + tears[tr].y * R
-      var tdx = tears[tr].dx * R
-      crisp.line(ROLE_ERROR, 0.45, Math.max(1, tears[tr].h * R * 0.5),
-        cx - R * 0.9 + tdx, ty, cx + R * 0.9 + tdx, ty)
-    }
+    drawTears(crisp, tears, cx, cy, R)
 
     // Error wave: a ring that races out as the anchors let go.
     var ew = bump(rt, 0, 340)
@@ -1065,83 +1025,114 @@ function paintInto(ctx, size, spec) {
   }
 
   // --- corner readouts ---------------------------------------------------------
-  if (hud) paintReadouts(crisp, size, state, t, rt, boot, tint)
+  if (hud) paintHudReadouts(crisp, size, state, t, rt, boot, tint)
   crisp.flush()
 }
 
-// Instrument readouts in the four corners the round instrument leaves free.
-function paintReadouts(p, size, state, t, rt, boot, tint) {
+// --- corner readouts, shared by every style ---------------------------------
+
+// Seven-segment cells in the four corners the round instrument leaves free.
+function readoutGeom(size, boot) {
+  var m = size * 0.035
+  var ch = size * 0.054
+  return {
+    m: m,
+    cw: size * 0.028,
+    ch: ch,
+    pitch: size * 0.041,
+    w: Math.max(1, size * 0.0075),
+    hair: Math.max(1, size * 0.0065),
+    ghost: 0.07 * boot,
+    fgA: 0.62 * boot,
+    boot: boot,
+    tagY: m + ch + size * 0.022,
+    base: size - m
+  }
+}
+
+// Top right: match confidence over a ten-cell bar. It wanders low while
+// scanning, counts to 99.7 on a lock, and climbs, stalls and collapses on a
+// miss.
+function readConfidence(p, g, size, state, t, rt, tint) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
   var t0 = t - rt
+  function wander(at) { return 8 + 6 * Math.sin(at / 700) + 4 * Math.sin(at / 233 + 1) + 3 * Math.sin(at / 91) }
+  var conf = wander(t)
+  if (ok) conf = mix(wander(t0), 99.7, easeOutCubic(seg(rt, REC_COUNT[0], REC_COUNT[1])))
+  if (bad) conf = mix(wander(t0), 41, easeOutCubic(seg(rt, 0, 180))) * (1 - easeInOutCubic(seg(rt, 200, 460)))
+  var str = g.boot < 0.6 ? "---" : pad3(conf * 10)
+  if (str !== "---") str = str.slice(0, 2) + "." + str.slice(2)
+  var blinkOff = bad && rt > 460 && Math.floor(rt / 120) % 2 === 1
+  var role = bad ? ROLE_ERROR : (ok ? tint : ROLE_FG)
+  var a = blinkOff ? 0.18 : (ok ? 0.95 : g.fgA)
+  seg7(p, role, a, g.ghost, g.w, size - g.m, g.m, g.cw, g.ch, g.pitch, str, 1)
+  var cells = 10
+  var barW = g.pitch * 3
+  var cellW = barW / cells
+  var filled = clamp01(conf / 100) * cells
+  for (var c = 0; c < cells; c++) {
+    var on = clamp01(filled - c)
+    var x0 = size - g.m - barW + c * cellW
+    p.line(on > 0 ? role : ROLE_FG, on > 0 ? mix(0.25, 0.9, on) * g.boot : 0.12 * g.boot, g.w * 1.6,
+      x0 + cellW * 0.18, g.tagY, x0 + cellW * 0.82, g.tagY)
+  }
+}
 
-  var m = size * 0.035
-  var cw = size * 0.028
-  var ch = size * 0.054
-  var pitch = size * 0.041
-  var w = Math.max(1, size * 0.0075)
-  var ghost = 0.07 * boot
-  var fgA = 0.62 * boot
-  var hair = Math.max(1, size * 0.0065)
+// Bottom right: status word.
+function readStatus(p, g, size, state, t, rt, tint) {
+  var ok = state === "recognized"
+  var bad = state === "notRecognized"
+  var word = "SCAN"
+  if (ok) word = rt < 300 ? "SCAN" : (rt < REC_PASS ? chase(rt) : "PASS")
+  if (bad) word = rt < 150 ? "SCAN" : "FAIL"
+  var wordOff = bad && rt > 150 && Math.floor(rt / 110) % 2 === 1
+  var scanBlink = !ok && !bad && Math.floor(t / 530) % 2 === 1
+  var a = wordOff ? 0.2 : (ok && rt >= REC_PASS ? 1 : (scanBlink ? g.fgA * 0.55 : g.fgA))
+  var role = bad ? ROLE_ERROR : (ok && rt >= REC_PASS ? tint : ROLE_FG)
+  seg7(p, role, a, g.ghost, g.w, size - g.m, g.base - g.ch, g.cw, g.ch, g.pitch, word, 1)
+}
+
+// Top left: a seven-segment value over a rule with a travelling tick.
+function readTopLeft(p, g, size, t, role, str) {
+  seg7(p, role, g.fgA, g.ghost, g.w, g.m, g.m, g.cw, g.ch, g.pitch, str, 0)
+  var tagW = g.pitch * 4 - (g.pitch - g.cw)
+  p.line(ROLE_FG, 0.22 * g.boot, g.hair, g.m, g.tagY, g.m + tagW, g.tagY)
+  var tick = ((t / 900) % 1) * tagW
+  p.line(role === ROLE_ERROR ? ROLE_ERROR : ROLE_ACCENT, 0.8 * g.boot, g.w * 1.3,
+    g.m + tick, g.tagY, g.m + Math.min(tagW, tick + size * 0.03), g.tagY)
+}
+
+function paintHudReadouts(p, size, state, t, rt, boot, tint) {
+  var ok = state === "recognized"
+  var bad = state === "notRecognized"
+  var t0 = t - rt
+  var g = readoutGeom(size, boot)
 
   // Top left: frame counter. It freezes on the frame a result was taken.
   var frameNo = t / 16.667
   if (ok) frameNo = seg(rt, 0, REC_PASS) < 1 ? frameNo : (t0 + REC_PASS) / 16.667
   if (bad) frameNo = rt < 300 ? hash(Math.floor(rt / 40)) * 65535 : (t0 + 300) / 16.667
-  seg7(p, bad ? ROLE_ERROR : ROLE_FG, fgA, ghost, w, m, m, cw, ch, pitch, hex4(frameNo), 0)
-  var tagY = m + ch + size * 0.022
-  var tagW = pitch * 4 - (pitch - cw)
-  p.line(ROLE_FG, 0.22 * boot, hair, m, tagY, m + tagW, tagY)
-  var tick = ((t / 900) % 1) * tagW
-  p.line(tint, 0.8 * boot, w * 1.3, m + tick, tagY, m + Math.min(tagW, tick + size * 0.03), tagY)
+  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_FG, hex4(frameNo))
 
-  // Top right: match confidence over a ten-cell bar.
-  var conf = 8 + 6 * Math.sin(t / 700) + 4 * Math.sin(t / 233 + 1) + 3 * Math.sin(t / 91)
-  var confT0 = 8 + 6 * Math.sin(t0 / 700) + 4 * Math.sin(t0 / 233 + 1) + 3 * Math.sin(t0 / 91)
-  if (ok) conf = mix(confT0, 99.7, easeOutCubic(seg(rt, REC_COUNT[0], REC_COUNT[1])))
-  if (bad) conf = mix(confT0, 41, easeOutCubic(seg(rt, 0, 180))) * (1 - easeInOutCubic(seg(rt, 200, 460)))
-  var confStr = boot < 0.6 ? "---" : pad3(conf * 10)
-  if (confStr !== "---") confStr = confStr.slice(0, 2) + "." + confStr.slice(2)
-  var blinkOff = bad && rt > 460 && Math.floor(rt / 120) % 2 === 1
-  var confRole = bad ? ROLE_ERROR : (ok ? tint : ROLE_FG)
-  var confA = blinkOff ? 0.18 : (ok ? 0.95 : fgA)
-  seg7(p, confRole, confA, ghost, w, size - m, m, cw, ch, pitch, confStr, 1)
-  var cells = 10
-  var barW = pitch * 3
-  var cellW = barW / cells
-  var filled = clamp01(conf / 100) * cells
-  for (var c = 0; c < cells; c++) {
-    var on = clamp01(filled - c)
-    var x0 = size - m - barW + c * cellW
-    p.line(on > 0 ? confRole : ROLE_FG, on > 0 ? mix(0.25, 0.9, on) * boot : 0.12 * boot, w * 1.6,
-      x0 + cellW * 0.18, tagY, x0 + cellW * 0.82, tagY)
-  }
+  readConfidence(p, g, size, state, t, rt, tint)
 
   // Bottom left: live sample histogram. Bars level out on a lock and drain
   // on a miss.
   var bars = 8
   var bw = size * 0.022
   var bh = size * 0.075
-  var base = size - m
   for (var b = 0; b < bars; b++) {
     var live = 0.18 + 0.82 * Math.abs(Math.sin(t / (170 + b * 37) + b * 1.7) * Math.sin(t / (410 + b * 53) + b))
     var hK = live
     if (ok) hK = mix(live, 0.55 + 0.35 * Math.cos(b * 0.9), easeOutCubic(seg(rt, 200, 620)))
     if (bad) hK = live * (1 - easeOutCubic(seg(rt, 100, 500))) * 0.8 + 0.06
-    var bx = m + b * bw * 1.35 + bw / 2
-    p.line(ROLE_FG, 0.12 * boot, bw, bx, base, bx, base - bh)
-    p.line(bad ? ROLE_ERROR : tint, 0.75 * boot, bw, bx, base, bx, base - bh * hK * boot)
+    var bx = g.m + b * bw * 1.35 + bw / 2
+    p.line(ROLE_FG, 0.12 * boot, bw, bx, g.base, bx, g.base - bh)
+    p.line(bad ? ROLE_ERROR : tint, 0.75 * boot, bw, bx, g.base, bx, g.base - bh * hK * boot)
   }
 
-  // Bottom right: status word.
-  var word = "SCAN"
-  if (ok) word = rt < 300 ? "SCAN" : (rt < REC_PASS ? chase(rt) : "PASS")
-  if (bad) word = rt < 150 ? "SCAN" : "FAIL"
-  var wordOff = bad && rt > 150 && Math.floor(rt / 110) % 2 === 1
-  var scanBlink = !ok && !bad && Math.floor(t / 530) % 2 === 1
-  var wordA = wordOff ? 0.2 : (ok && rt >= REC_PASS ? 1 : (scanBlink ? fgA * 0.55 : fgA))
-  var wordRole = bad ? ROLE_ERROR : (ok && rt >= REC_PASS ? tint : ROLE_FG)
-  seg7(p, wordRole, wordA, ghost, w, size - m, base - ch, cw, ch, pitch, word, 1)
+  readStatus(p, g, size, state, t, rt, tint)
 }
 
 // The matching beat on the status word: a single segment chases round.
@@ -1153,7 +1144,7 @@ function chase(rt) {
 // Below roughly 48 px the cloud is a smudge, so the same geometry is rendered
 // as vector strokes instead: a segmented ring that closes on a lock and
 // breaks on a miss, two eye marks, a measured mouth line, and the scan line.
-function paintMicro(p, size, state, t, rt, cx, cy, R, tint) {
+function paintHudMicro(p, size, state, t, rt, cx, cy, R, tint) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
   var w = Math.max(1, size * 0.072)
@@ -1194,6 +1185,897 @@ function paintMicro(p, size, state, t, rt, cx, cy, R, tint) {
         R * mix(0.84, 1.08, easeOutCubic(seg(rt, 40, 520))), 0, TAU)
     }
   }
+}
+
+// --- shared result gestures ---------------------------------------------------
+
+// Glitch tears. A few horizontal strips, re-rolled every 45 ms for the first
+// 300 ms of a miss.
+function glitchTears(rt) {
+  var tears = []
+  if (rt >= 300) return tears
+  var tstep = Math.floor(rt / 45)
+  for (var tj = 0; tj < 3; tj++) {
+    tears.push({
+      y: (hash(tstep * 5 + tj * 17) * 2 - 1) * 0.85,
+      h: 0.035 + hash(tstep * 9 + tj) * 0.06,
+      dx: (hash(tstep * 11 + tj * 3) - 0.5) * 0.42
+    })
+  }
+  return tears
+}
+
+function tearShift(tears, y) {
+  var dx = 0
+  for (var i = 0; i < tears.length; i++) if (Math.abs(y - tears[i].y) < tears[i].h) dx += tears[i].dx
+  return dx
+}
+
+function drawTears(p, tears, cx, cy, R) {
+  for (var i = 0; i < tears.length; i++) {
+    var ty = cy + tears[i].y * R
+    var tdx = tears[i].dx * R
+    p.line(ROLE_ERROR, 0.45, Math.max(1, tears[i].h * R * 0.5), cx - R * 0.9 + tdx, ty, cx + R * 0.9 + tdx, ty)
+  }
+}
+
+// A reticle contracting and rotating onto a landmark (k 0..1), leaving a
+// small locked diamond behind.
+function drawLockReticle(halo, crisp, tint, C, k, R, hair, thin, flash) {
+  if (k <= 0) return
+  var ret = 1 - k
+  if (ret > 0.01) {
+    var rs = R * mix(0.05, 0.20, ret)
+    var rrot = ret * 0.8
+    var ra = clamp01(k * 3) * 0.95
+    var sq = []
+    for (var q = 0; q < 4; q++) {
+      var qa = rrot + q * Math.PI / 2 + Math.PI / 4
+      sq.push([C.x + Math.cos(qa) * rs, C.y + Math.sin(qa) * rs])
+    }
+    for (var q3 = 0; q3 < 4; q3++) {
+      var Pq = sq[q3], Pn = sq[(q3 + 1) % 4], Pv = sq[(q3 + 3) % 4]
+      crisp.poly(tint, ra, hair, [
+        [mix(Pq[0], Pv[0], 0.3), mix(Pq[1], Pv[1], 0.3)],
+        Pq,
+        [mix(Pq[0], Pn[0], 0.3), mix(Pq[1], Pn[1], 0.3)]
+      ])
+    }
+  }
+  var ds = R * 0.032 * mix(1.8, 1, easeOutBack(k))
+  var dA = clamp01(k * 2) * (0.9 + 0.1 * flash)
+  var dia = [[C.x, C.y - ds], [C.x + ds, C.y], [C.x, C.y + ds], [C.x - ds, C.y], [C.x, C.y - ds]]
+  halo.poly(tint, dA * 0.2, thin * 3.2, dia)
+  crisp.poly(tint, dA, thin, dia)
+}
+
+// A reticle that hunted and lost track: its corners drift apart and fade.
+// Never an X: an X on each eye is a cartoon dead face.
+function drawLostTrack(crisp, bx, by, R, lost, alpha, hair, seed) {
+  var xs = R * (0.045 + 0.035 * lost)
+  var arm = R * 0.028 * (1 - 0.4 * lost)
+  var skew = (hash(seed * 3 + 5) - 0.5) * 0.5 * lost
+  for (var q = 0; q < 4; q++) {
+    var qa = skew + q * Math.PI / 2 + Math.PI / 4
+    var kx = bx + Math.cos(qa) * xs, ky = by + Math.sin(qa) * xs
+    var ux = Math.cos(qa + Math.PI * 0.75), uy = Math.sin(qa + Math.PI * 0.75)
+    var vx = Math.cos(qa - Math.PI * 0.75), vy = Math.sin(qa - Math.PI * 0.75)
+    crisp.poly(ROLE_ERROR, alpha, hair, [[kx + ux * arm, ky + uy * arm], [kx, ky], [kx + vx * arm, ky + vy * arm]])
+  }
+}
+
+// A V pointing at the centre, used for lock clamps and chevrons.
+function chevron(p, role, a, w, cx, cy, ang, r, depth, wing) {
+  p.poly(role, a, w, [
+    [cx + Math.cos(ang - wing) * (r + depth), cy + Math.sin(ang - wing) * (r + depth)],
+    [cx + Math.cos(ang) * r, cy + Math.sin(ang) * r],
+    [cx + Math.cos(ang + wing) * (r + depth), cy + Math.sin(ang + wing) * (r + depth)]
+  ])
+}
+
+// --- Phosphor Radar -------------------------------------------------------------
+//
+// A plan-position scope. The sweep arm refreshes a fixed set of returns laid
+// on the face: the rim, two iris rings, the nose and a level mouth line, over
+// sparse skin. Returns decay behind the arm but never below a floor, so the
+// whole face stays legible at 116 px between sweeps; the first revolution
+// after entry paints it in. Returns are range cells, short arcs about the
+// scope centre, never smooth outlines, so the face reads as sensor data.
+
+var RADAR_REV_MS = 2400
+var RADAR_CLUTTER = 90
+var RADAR_FLOOR = 0.2
+
+function radarReturns() {
+  if (CACHE.radar) return CACHE.radar
+  var rnd = mulberry32(4242)
+  var rs = []
+  function add(kind, x, y, gain) {
+    rs.push({ kind: kind, x: x, y: y, r: Math.hypot(x, y), a: Math.atan2(y, x), gain: gain, j: rnd() })
+  }
+  var i, a
+  for (i = 0; i < 44; i++) {
+    a = (i / 44) * TAU
+    add("rim", Math.cos(a) * RIM_R, Math.sin(a) * RIM_R, 1)
+  }
+  for (var e = 0; e < 2; e++) {
+    var ex = e === 0 ? EYE_L : EYE_R
+    for (i = 0; i < 7; i++) {
+      a = (i / 7) * TAU + 0.3
+      add("eye", ex + Math.cos(a) * 0.105, EYE_Y + Math.sin(a) * 0.085, 0.95)
+    }
+  }
+  add("nose", 0, -0.07, 0.7)
+  add("nose", 0, 0.03, 0.75)
+  add("nose", -0.05, 0.12, 0.7)
+  add("nose", 0.05, 0.12, 0.7)
+  for (i = 0; i < 9; i++) {
+    var u = (i / 8) * 2 - 1
+    add("mouth", u * MOUTH_HALF * 0.9, MOUTH_Y, 0.9)
+  }
+  var n = 0
+  while (n < 30) {
+    var sx = (rnd() * 2 - 1) * 0.7
+    var sy = (rnd() * 2 - 1) * 0.72
+    if (Math.hypot(sx, sy) > 0.7 || inEye(sx, sy, 0.06) || inMouth(sx, sy, 0.03)) continue
+    add("skin", sx, sy, 0.38)
+    n++
+  }
+  CACHE.radar = rs
+  return rs
+}
+
+// Unwrapped sweep angle. A lock spins the arm up for an extra revolution
+// that refreshes every return at once; a miss stutters it and runs it
+// backwards.
+function radarSweep(state, t, rt) {
+  var t0 = t - rt
+  if (state === "recognized") {
+    return t0 / RADAR_REV_MS * TAU + rt / RADAR_REV_MS * TAU + TAU * 1.2 * easeInOutCubic(seg(rt, 0, 450))
+  }
+  if (state === "notRecognized") {
+    var step = Math.min(7, Math.floor(rt / 60))
+    var off = step > 0 ? (hash(step * 5 + 2) - 0.5) * 1.4 : 0
+    return t0 / RADAR_REV_MS * TAU - rt / RADAR_REV_MS * TAU * 0.5 + off
+  }
+  return t / RADAR_REV_MS * TAU
+}
+
+function frac(v) { return v - Math.floor(v) }
+
+function paintRadar(ctx, size, spec) {
+  var state = spec.state || "scanning"
+  var t = spec.clock || 0
+  var rt = spec.elapsed || 0
+  var compact = size < 76
+  var micro = size < 48
+  var hud = size >= 100
+
+  var cx = size / 2
+  var cy = size / 2
+  var R = size * 0.45
+
+  ctx.reset()
+  ctx.lineCap = "round"
+  ctx.lineJoin = "round"
+
+  var ok = state === "recognized"
+  var bad = state === "notRecognized"
+  var scanning = !ok && !bad
+  var tint = bad ? ROLE_ERROR : ROLE_ACCENT
+
+  var hair = Math.max(1, size * 0.0065)
+  var thin = Math.max(1, size * 0.009)
+  var bold = Math.max(1, size * 0.016)
+
+  var boot = scanning ? easeOutCubic(seg(rt, 0, BOOT_MS)) : 1
+  var sweepU = radarSweep(state, t, rt)
+  var arm = sweepU - Math.PI / 2
+  // Everything the arm has passed since this state was entered.
+  var swept = scanning ? rt / RADAR_REV_MS * TAU : TAU
+
+  var armK = scanning ? boot : (ok ? 1 - easeOutCubic(seg(rt, 420, 680)) : mix(1, 0.45, seg(rt, 300, 700)))
+  var holdK = ok ? easeOutCubic(seg(rt, 150, 500)) : 0
+  var smearK = bad ? easeOutCubic(seg(rt, 120, 520)) : 0
+  var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
+  var tears = bad ? glitchTears(rt) : []
+
+  var halo = pen(ctx)
+  var crisp = pen(ctx)
+  function flush() { halo.flush(); crisp.flush() }
+
+  var R_ret = radarReturns()
+
+  // Age of a bearing behind the arm, as a fraction of a revolution, plus the
+  // sweep cycle it belongs to. The cycle flips exactly when the arm passes,
+  // so anything keyed to it changes under the arm, never behind it.
+  function ageOf(phi) {
+    var u = (arm - phi) / TAU
+    return { f: frac(u), c: Math.floor(u) }
+  }
+  function visible(f) {
+    return scanning ? clamp01((swept - f * TAU) / 0.15) : 1
+  }
+
+  if (micro) {
+    var mw = Math.max(1, size * 0.072)
+    if (bad) {
+      var brk = easeOutCubic(seg(rt, 200, 560))
+      for (var mb = 0; mb < 8; mb++) {
+        var ma = (mb / 8) * TAU + brk * 0.3 * (mb % 2 ? 1 : -1)
+        crisp.arc(tint, 0.9 * (1 - brk * 0.45), mw, cx, cy, R * (0.92 + brk * 0.08), ma, ma + 0.42)
+      }
+    } else {
+      crisp.arc(tint, ok ? 1 : 0.75, mw, cx, cy, R * 0.92, 0, TAU)
+    }
+    var mArm = ok ? (t - rt) / RADAR_REV_MS * TAU - Math.PI / 2 : arm
+    crisp.line(tint, (ok ? 1 - seg(rt, 0, 300) : 0.95), mw, cx, cy, cx + Math.cos(mArm) * R * 0.85, cy + Math.sin(mArm) * R * 0.85)
+    for (var me = 0; me < 2; me++) {
+      var mex = cx + (me === 0 ? EYE_L : EYE_R) * R
+      crisp.arc(tint, 0.95, mw * 1.1, cx, cy, Math.hypot(mex - cx, EYE_Y * R), Math.atan2(EYE_Y * R, mex - cx) - 0.2, Math.atan2(EYE_Y * R, mex - cx) + 0.2)
+    }
+    for (var mm = -1; mm <= 1; mm++) {
+      var mmx = cx + mm * MOUTH_HALF * 0.7 * R
+      crisp.line(tint, 0.95, mw, mmx, cy + (MOUTH_Y - 0.08) * R, mmx, cy + (MOUTH_Y + 0.08) * R)
+    }
+    if (ok) {
+      var mh = bump(rt, 40, 620)
+      if (mh > 0.01) crisp.arc(tint, mh * 0.7, Math.max(1, size * 0.04), cx, cy, R * mix(0.2, 1.08, easeOutCubic(seg(rt, 40, 620))), 0, TAU)
+    }
+    crisp.flush()
+    return
+  }
+
+  // --- graticule --------------------------------------------------------------
+  var wob = function (i) { return bad && rt < 420 ? 1 + (hash(Math.floor(rt / 60) * 3 + i) - 0.5) * 0.06 : 1 }
+  var ringDraw = TAU * seg(boot, 0, 0.9)
+  var breathe = 1 + 0.008 * Math.sin(t / 900)
+  var lockRing = ok ? easeInOutCubic(seg(rt, 300, 650)) : 0
+  if (!compact) {
+    crisp.arc(ROLE_FG, 0.11 * boot, hair, cx, cy, R * 0.33 * breathe * wob(1), -Math.PI / 2, -Math.PI / 2 + ringDraw)
+    var r2 = R * mix(0.66 * breathe, 0.9, lockRing) * wob(2)
+    glowArc(halo, crisp, lockRing > 0 ? tint : ROLE_FG, mix(0.11, 0.75 + 0.25 * passFlash, lockRing) * boot,
+      mix(hair, bold * 0.7, lockRing), cx, cy, r2, -Math.PI / 2, -Math.PI / 2 + ringDraw)
+    for (var sp = 0; sp < 8; sp++) {
+      var sa = sp * Math.PI / 4
+      var long = sp % 2 === 0
+      crisp.line(ROLE_FG, (long ? 0.08 : 0.045) * boot, hair,
+        cx + Math.cos(sa) * R * 0.05, cy + Math.sin(sa) * R * 0.05,
+        cx + Math.cos(sa) * R * 0.98, cy + Math.sin(sa) * R * 0.98)
+    }
+    // Bearing bezel. Ticks brighten as the arm passes, like the HUD cursor.
+    for (var bt = 0; bt < 72; bt++) {
+      if (bt / 72 > seg(boot, 0, 0.8)) break
+      var ba = bt * TAU / 72 - Math.PI / 2
+      var major = bt % 6 === 0
+      var rel = Math.atan2(Math.sin(ba - arm), Math.cos(ba - arm))
+      var near = Math.exp(-rel * rel / 0.02) * armK
+      var la = (major ? 0.5 : 0.2) + near * 0.6 + passFlash * 0.4
+      var len = R * (major ? 0.065 : 0.03)
+      crisp.line(tint, la, major ? thin : hair,
+        cx + Math.cos(ba) * R * 1.0, cy + Math.sin(ba) * R * 1.0,
+        cx + Math.cos(ba) * (R * 1.0 + len), cy + Math.sin(ba) * (R * 1.0 + len))
+    }
+    // Bearing index riding the bezel with the arm.
+    if (armK > 0.02) chevron(crisp, tint, 0.9 * armK, thin, cx, cy, arm, R * 1.075, R * 0.05, 0.07)
+  }
+  glowArc(halo, crisp, tint, (0.42 + passFlash * 0.4) * boot * (bad ? mix(1, 0.6, smearK) : 1), thin, cx, cy, R * 0.985 * wob(3), -Math.PI / 2, -Math.PI / 2 + ringDraw)
+  flush()
+
+  // --- sweep and its persistence wedge ------------------------------------------
+  if (armK > 0.01) {
+    var dir = bad ? -1 : 1
+    var trail = compact ? 10 : 26
+    for (var k = 1; k <= trail; k++) {
+      var wa = arm - dir * k * 0.045
+      crisp.line(tint, 0.3 * Math.exp(-k / 8) * armK, compact ? thin : hair,
+        cx + Math.cos(wa) * R * 0.04, cy + Math.sin(wa) * R * 0.04,
+        cx + Math.cos(wa) * R * 0.975, cy + Math.sin(wa) * R * 0.975)
+    }
+    crisp.flush()
+    glowLine(halo, crisp, tint, 0.95 * armK, thin, cx, cy, cx + Math.cos(arm) * R * 0.98, cy + Math.sin(arm) * R * 0.98)
+    flush()
+  }
+
+  // --- returns -----------------------------------------------------------------------
+  for (var i = 0; i < R_ret.length; i++) {
+    var q = R_ret[i]
+    if (compact && q.kind === "skin") continue
+    var ag = ageOf(q.a)
+    var vis = visible(ag.f)
+    if (vis <= 0) continue
+    var fresh = Math.exp(-ag.f * (bad ? 6 : 3))
+    fresh = mix(fresh, 1, holdK)
+    var flick = scanning ? 0.82 + 0.18 * hash(ag.c * 13 + i) : 1
+    var alpha = q.gain * (RADAR_FLOOR + (1 - RADAR_FLOOR) * fresh) * flick * vis
+    if (bad) alpha *= 1 - 0.45 * seg(rt, 200, 800)
+    alpha *= 1 + passFlash * 0.2
+    var w = clamp(0.03 / Math.max(q.r, 0.05), 0.05, 0.22)
+    if (q.kind === "rim") w *= mix(1, 1.8, holdK)
+    var feat = q.kind !== "skin"
+    var lw = compact ? Math.max(1, size * 0.03) : (feat ? Math.max(1, size * 0.02) : Math.max(1, size * 0.014))
+    var ox = bad ? tearShift(tears, q.y) * R : 0
+    if (q.kind === "mouth" || q.kind === "nose") {
+      // Radial ticks. Range arcs along the mouth bow into a smile at the
+      // bottom of the scope; ticks read as a measured row.
+      var tl = R * 0.035
+      crisp.line(tint, alpha, lw, cx + ox + Math.cos(q.a) * (q.r * R - tl), cy + Math.sin(q.a) * (q.r * R - tl),
+        cx + ox + Math.cos(q.a) * (q.r * R + tl), cy + Math.sin(q.a) * (q.r * R + tl))
+    } else {
+      crisp.arc(tint, alpha, lw, cx + ox, cy, q.r * R, q.a - w, q.a + w)
+    }
+    if (smearK > 0.01) {
+      // Returns smear radially as the track is lost.
+      var r0 = q.r * R, r1 = q.r * R * (1 + 0.32 * smearK * (0.5 + q.j))
+      crisp.line(tint, alpha * 0.5, hair, cx + ox + Math.cos(q.a) * r0, cy + Math.sin(q.a) * r0,
+        cx + ox + Math.cos(q.a) * r1, cy + Math.sin(q.a) * r1)
+    }
+  }
+
+  // Clutter: re-rolled per sweep cycle, flooding in on a miss and filtered
+  // out by a lock.
+  var nClutter = scanning ? 22 : (bad ? Math.round(22 + (RADAR_CLUTTER - 22) * easeOutCubic(seg(rt, 0, 400))) : 22)
+  var clutterGain = ok ? 1 - easeOutCubic(seg(rt, 100, 500)) : (bad ? 1.2 : 1)
+  if (!compact && clutterGain > 0.01) {
+    for (var ci = 0; ci < nClutter; ci++) {
+      var base = hash(ci * 7.3 + 1) * TAU
+      var cg = ageOf(base)
+      var cvis = visible(cg.f)
+      if (cvis <= 0 || hash(cg.c * 11 + ci * 2) < 0.45) continue
+      var cr = (0.12 + 0.86 * hash(cg.c * 17 + ci * 3)) * R
+      var cphi = base + (hash(cg.c * 5 + ci) - 0.5) * 0.2
+      var cfresh = Math.exp(-cg.f * 4)
+      crisp.arc(tint, 0.28 * clutterGain * (0.15 + 0.85 * cfresh) * cvis, Math.max(1, size * 0.012),
+        cx, cy, cr, cphi - 0.04, cphi + 0.04)
+    }
+  }
+  crisp.flush()
+
+  // --- lock symbology ------------------------------------------------------------------
+  if (ok || bad) {
+    var chevK = ok ? easeOutBack(seg(rt, 380, 620)) : easeOutCubic(seg(rt, 0, 260))
+    var drift = bad ? easeOutCubic(seg(rt, 260, 760)) : 0
+    // A miss brings the chevrons in, but they hunt instead of seating and
+    // fade out inside the scope, clear of the corner readouts.
+    var chevR = ok ? mix(1.35, 0.93, chevK) : mix(1.35, 0.95, chevK) + 0.04 * Math.sin(rt / 37) * (1 - drift)
+    var chevA = ok ? clamp01(chevK * 1.5) : clamp01(chevK * 1.5) * (1 - drift)
+    for (var cq = 0; cq < 4; cq++) {
+      var ang = Math.PI / 4 + cq * Math.PI / 2 + drift * 0.45 * (cq % 2 ? 1 : -1)
+      chevron(crisp, tint, chevA, thin, cx, cy, ang, R * chevR, R * 0.07, 0.09)
+    }
+    if (ok) {
+      // Two sonar pings clear the scope as the track is confirmed.
+      var pings = [[600, 1000], [740, 1120]]
+      for (var pi = 0; pi < pings.length; pi++) {
+        var pb = bump(rt, pings[pi][0], pings[pi][1])
+        if (pb <= 0.01) continue
+        var pk = easeOutCubic(seg(rt, pings[pi][0], pings[pi][1]))
+        glowArc(halo, crisp, tint, pb * 0.55, Math.max(1, size * 0.012 * (1 - pk * 0.6)), cx, cy, R * mix(0.08, 1.05, pk), 0, TAU)
+      }
+      // Track marker at the centre.
+      var tk = easeOutBack(seg(rt, 480, 680))
+      if (tk > 0) {
+        var ts = R * mix(0.12, 0.05, tk)
+        crisp.poly(tint, clamp01(tk * 2), thin, [[cx, cy - ts], [cx + ts, cy], [cx, cy + ts], [cx - ts, cy], [cx, cy - ts]])
+      }
+    } else {
+      var ew = bump(rt, 0, 340)
+      if (ew > 0.01) crisp.arc(ROLE_ERROR, ew * 0.6, Math.max(1, size * 0.018), cx, cy, R * mix(0.1, 1.05, easeOutCubic(seg(rt, 0, 340))), 0, TAU)
+      drawTears(crisp, tears, cx, cy, R)
+    }
+    flush()
+  }
+
+  crisp.arc(tint, 0.8 * boot, thin, cx, cy, R * 0.022, 0, TAU)
+  crisp.flush()
+
+  if (hud) paintRadarReadouts(crisp, size, state, t, rt, boot, tint, arm, R_ret, ageOf)
+  crisp.flush()
+}
+
+function paintRadarReadouts(p, size, state, t, rt, boot, tint, arm, returns, ageOf) {
+  var bad = state === "notRecognized"
+  var g = readoutGeom(size, boot)
+
+  // Top left: arm bearing in degrees. It spins with the lock and scrambles
+  // on a miss.
+  var deg = frac((arm + Math.PI / 2) / TAU) * 360
+  if (bad && rt < 300) deg = hash(Math.floor(rt / 40)) * 359
+  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_FG, " " + pad3(deg))
+
+  readConfidence(p, g, size, state, t, rt, tint)
+
+  // Bottom left: A-scope. Return amplitude against range along the arm.
+  var x0 = g.m
+  var wA = size * 0.23
+  var hA = size * 0.07
+  var yb = g.base
+  p.line(ROLE_FG, 0.18 * boot, g.hair, x0, yb, x0 + wA, yb)
+  p.line(ROLE_FG, 0.12 * boot, g.hair, x0, yb, x0, yb - hA)
+  var n = 28
+  var noiseStep = Math.floor(t / 50)
+  var pts = []
+  for (var s = 0; s <= n; s++) {
+    var rr = s / n
+    var amp = 0.06 + 0.07 * hash(noiseStep * 31 + s) * (bad ? 2.2 : 1)
+    for (var i = 0; i < returns.length; i++) {
+      var q = returns[i]
+      var d = Math.atan2(Math.sin(q.a - arm), Math.cos(q.a - arm))
+      if (Math.abs(d) > 0.14) continue
+      var dr = (rr - q.r / 1.0) / 0.045
+      amp += q.gain * 0.8 * Math.exp(-dr * dr) * (1 - Math.abs(d) / 0.14)
+    }
+    pts.push([x0 + rr * wA, yb - Math.min(1, amp) * hA * boot])
+  }
+  p.poly(bad ? ROLE_ERROR : tint, 0.85 * boot, g.hair, pts)
+
+  readStatus(p, g, size, state, t, rt, tint)
+}
+
+// --- Holographic Wireframe ---------------------------------------------------
+//
+// A projected face mask: a relief-mapped half ellipsoid, wired by latitude
+// and longitude lines in true perspective, rising from an emitter ring. It
+// turns no more than about 22 degrees, with a bold silhouette and surface
+// feature contours, so it stays a legible face at 116 px while the parallax
+// sells the depth. The mouth is a level line on the surface in every state.
+
+var HOLO_A = 0.60
+var HOLO_B = 0.78
+var HOLO_C = 0.55
+var HOLO_CY = -0.10
+var HOLO_F = 3.4
+var HOLO_BAND_MS = 2300
+
+function holoRelief(x, y) {
+  var ex = Math.abs(x) - 0.25
+  var nose = 0.15 * Math.exp(-((x / 0.075) * (x / 0.075) + ((y - 0.02) / 0.19) * ((y - 0.02) / 0.19)))
+  var sock = -0.07 * Math.exp(-((ex / 0.12) * (ex / 0.12) + ((y + 0.18) / 0.08) * ((y + 0.18) / 0.08)))
+  var brow = 0.03 * Math.exp(-((ex / 0.16) * (ex / 0.16) + ((y + 0.30) / 0.05) * ((y + 0.30) / 0.05)))
+  var lips = 0.025 * Math.exp(-((x / 0.2) * (x / 0.2) + ((y - 0.36) / 0.05) * ((y - 0.36) / 0.05)))
+  return nose + sock + brow + lips
+}
+
+function holoTaper(y) { return y > 0 ? 1 - 0.30 * (y / HOLO_B) * (y / HOLO_B) : 1 }
+
+function holoSurface(u, v) {
+  var cv = Math.cos(v)
+  var y = HOLO_B * Math.sin(v)
+  var x = HOLO_A * Math.sin(u) * cv * holoTaper(y)
+  var z = HOLO_C * Math.cos(u) * cv + holoRelief(x, y) * Math.max(0, Math.cos(u))
+  return [x, y, z]
+}
+
+function holoZAt(x, y) {
+  var xt = x / holoTaper(y)
+  var q = 1 - (xt / HOLO_A) * (xt / HOLO_A) - (y / HOLO_B) * (y / HOLO_B)
+  return HOLO_C * Math.sqrt(Math.max(0, q)) + holoRelief(x, y)
+}
+
+function holoYaw(t) { return 0.38 * Math.sin(t / 6400 * TAU) + 0.04 * Math.sin(t / 1900 * TAU) }
+function holoPitch(t) { return 0.08 * Math.sin(t / 8100 * TAU + 0.7) }
+
+function holoMesh(compact) {
+  var key = compact ? "holoC" : "holo"
+  if (CACHE[key]) return CACHE[key]
+  var lines = []
+  var nLat = compact ? 5 : 9
+  var nLon = compact ? 5 : 9
+  var i, j, pts
+  for (i = 0; i < nLat; i++) {
+    var v = mix(-1.22, 1.22, i / (nLat - 1))
+    pts = []
+    for (j = 0; j <= 22; j++) pts.push(holoSurface(mix(-1.75, 1.75, j / 22), v))
+    lines.push(pts)
+  }
+  for (i = 0; i < nLon; i++) {
+    var u = mix(-1.4, 1.4, i / (nLon - 1))
+    pts = []
+    for (j = 0; j <= 18; j++) pts.push(holoSurface(u, mix(-1.35, 1.35, j / 18)))
+    lines.push(pts)
+  }
+  CACHE[key] = lines
+  return lines
+}
+
+function holoFeatures() {
+  if (CACHE.holoF) return CACHE.holoF
+  var f = []
+  var i, pts
+  function onSurface(x, y) { return [x, y, holoZAt(x, y) + 0.004] }
+  for (var e = -1; e <= 1; e += 2) {
+    pts = []
+    for (i = 0; i <= 16; i++) {
+      var a = (i / 16) * TAU
+      pts.push(onSurface(e * 0.25 + Math.cos(a) * 0.10, -0.18 + Math.sin(a) * 0.045))
+    }
+    f.push(pts)
+    pts = []
+    for (i = 0; i <= 6; i++) {
+      var bx = 0.13 + 0.25 * i / 6
+      pts.push(onSurface(e * bx, -0.29 - 0.025 * Math.sin(Math.PI * i / 6)))
+    }
+    f.push(pts)
+  }
+  pts = []
+  for (i = 0; i <= 6; i++) pts.push(onSurface(0, mix(-0.14, 0.11, i / 6)))
+  f.push(pts)
+  f.push([onSurface(-0.06, 0.14), onSurface(0, 0.17), onSurface(0.06, 0.14)])
+  pts = []
+  for (i = 0; i <= 8; i++) pts.push(onSurface(mix(-0.19, 0.19, i / 8), 0.36))
+  f.push(pts)
+  CACHE.holoF = f
+  return f
+}
+
+function paintHolo(ctx, size, spec) {
+  var state = spec.state || "scanning"
+  var t = spec.clock || 0
+  var rt = spec.elapsed || 0
+  var compact = size < 76
+  var micro = size < 48
+  var hud = size >= 100
+
+  var cx = size / 2
+  var cy = size / 2
+  var R = size * 0.45
+
+  ctx.reset()
+  ctx.lineCap = "round"
+  ctx.lineJoin = "round"
+
+  var ok = state === "recognized"
+  var bad = state === "notRecognized"
+  var scanning = !ok && !bad
+  var tint = bad ? ROLE_ERROR : ROLE_ACCENT
+  var t0 = t - rt
+
+  var hair = Math.max(1, size * 0.0065)
+  var thin = Math.max(1, size * 0.009)
+  var bold = Math.max(1, size * 0.016)
+
+  var boot = scanning ? easeOutCubic(seg(rt, 0, BOOT_MS)) : 1
+
+  // Pose: slow turn, eased face-on by a lock, jerked by a miss.
+  var yaw = holoYaw(t)
+  var pitch = holoPitch(t)
+  if (ok) {
+    var still = easeOutCubic(seg(rt, 0, 450))
+    yaw = mix(holoYaw(t0 + rt * (1 - still)), 0, still)
+    pitch = mix(holoPitch(t0 + rt * (1 - still)), 0, still)
+  } else if (bad) {
+    var jstep = Math.min(6, Math.floor(rt / 55))
+    yaw = holoYaw(t0 + rt * 0.2) + (jstep > 0 ? (hash(jstep * 7 + 3) - 0.5) * 0.35 : 0)
+    pitch = holoPitch(t0 + rt * 0.2) + (jstep > 0 ? (hash(jstep * 5 + 1) - 0.5) * 0.12 : 0)
+  }
+  var cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), spp = Math.sin(pitch)
+
+  // Projector flicker. Steady on a lock; failing on a miss.
+  var flick = 0.9 + 0.1 * Math.sin(t / 41) * Math.sin(t / 97)
+  if (hash(Math.floor(t / 140)) > 0.93) flick *= 0.7
+  if (ok) flick = mix(flick, 1, seg(rt, 0, 300))
+  if (bad) {
+    flick *= 1 - 0.5 * easeOutCubic(seg(rt, 150, 700))
+    if (rt > 100 && rt < 600 && hash(Math.floor(rt / 70) + 17) > 0.55) flick *= 0.45
+  }
+  flick *= boot
+
+  var bandY = mix(-1.1, 1.1, frac(t / HOLO_BAND_MS))
+  var bandK = scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1)
+  var ringY = ok ? mix(HOLO_CY - 0.86, HOLO_CY + 0.8, easeInOutCubic(seg(rt, 150, 700))) : -9
+  var ringK = ok ? bump(rt, 150, 760) : 0
+  var solid = ok ? easeOutCubic(seg(rt, 150, 700)) : 0
+  var frag = bad ? easeOutCubic(seg(rt, 120, 700)) : 0
+  var fragTau = bad ? Math.max(0, rt - 120) / 1000 : 0
+  var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
+  var tears = bad ? glitchTears(rt) : []
+
+  function project(P) {
+    var xr = P[0] * cyw + P[2] * syw
+    var zr = -P[0] * syw + P[2] * cyw
+    var yr = P[1] * cp - zr * spp
+    var z2 = P[1] * spp + zr * cp
+    var s = HOLO_F / (HOLO_F - z2)
+    return { x: xr * s, y: yr * s + HOLO_CY, z: z2 }
+  }
+  function toPx(x, y) { return { x: cx + x * R, y: cy + y * R } }
+
+  var halo = pen(ctx)
+  var crisp = pen(ctx)
+  function flush() { halo.flush(); crisp.flush() }
+
+  if (micro) {
+    var mw = Math.max(1, size * 0.07)
+    var mrot = ok ? 0 : t / 2200 * TAU
+    if (bad) {
+      var brk = easeOutCubic(seg(rt, 200, 560))
+      for (var mb = 0; mb < 8; mb++) {
+        var ma = (mb / 8) * TAU + brk * 0.3 * (mb % 2 ? 1 : -1)
+        crisp.arc(tint, 0.9 * (1 - brk * 0.45), mw, cx, cy - R * 0.08, R * (0.72 + brk * 0.12), ma, ma + 0.42)
+      }
+    } else {
+      crisp.arc(tint, ok ? 1 : 0.85, mw, cx, cy - R * 0.08, R * 0.72, 0, TAU)
+      for (var ml = 0; ml < 2; ml++) {
+        var rx = Math.abs(Math.cos(mrot + ml * Math.PI / 2)) * R * 0.72
+        var pts = []
+        for (var mi = 0; mi <= 16; mi++) {
+          var aa = mi / 16 * TAU
+          pts.push([cx + Math.cos(aa) * rx, cy - R * 0.08 + Math.sin(aa) * R * 0.72])
+        }
+        crisp.poly(tint, 0.55, Math.max(1, mw * 0.6), pts)
+      }
+    }
+    // Features slide with the turn, which is what reads as a head at 24 px.
+    var turn = bad ? 0 : Math.sin(mrot) * R * 0.16
+    var fy = cy - R * 0.08
+    for (var me = -1; me <= 1; me += 2) {
+      crisp.line(tint, 0.95, mw, cx + turn + me * R * 0.3 - R * 0.08, fy - R * 0.14, cx + turn + me * R * 0.3 + R * 0.08, fy - R * 0.14)
+    }
+    crisp.line(tint, 0.95, mw, cx + turn - R * 0.2, fy + R * 0.3, cx + turn + R * 0.2, fy + R * 0.3)
+    crisp.line(tint, 0.9, mw, cx - R * 0.5, cy + R * 0.86, cx + R * 0.5, cy + R * 0.86)
+    if (ok) {
+      var mh = bump(rt, 40, 520)
+      if (mh > 0.01) crisp.arc(tint, mh * 0.7, Math.max(1, size * 0.04), cx, cy, R * mix(0.84, 1.08, easeOutCubic(seg(rt, 40, 520))), 0, TAU)
+    }
+    crisp.flush()
+    return
+  }
+
+  // --- scanlines --------------------------------------------------------------
+  if (!compact) {
+    var lines = 38
+    for (var li = 0; li < lines; li++) {
+      var ly = ((li + 0.5) / lines) * 2 - 1
+      var half = Math.sqrt(Math.max(0, 1 - ly * ly))
+      if (half <= 0.05) continue
+      crisp.line(ROLE_FG, 0.04 * boot, hair, cx - half * R, cy + ly * R, cx + half * R, cy + ly * R)
+    }
+    var roll = mix(-1, 1, frac(t / 900))
+    var rh = Math.sqrt(Math.max(0, 1 - roll * roll))
+    crisp.line(tint, 0.12 * flick * (1 - solid), hair, cx - rh * R, cy + roll * R, cx + rh * R, cy + roll * R)
+    crisp.flush()
+  }
+
+  // --- emitter and projection cone ------------------------------------------
+  var EY = 0.9
+  var erx = 0.46
+  var ery = 0.07
+  var ePulse = 0.5 + 0.5 * Math.sin(t / 420)
+  var eA = (0.55 + 0.25 * passFlash) * boot * (bad ? mix(1, 0.4, frag) : 1)
+  var ring = []
+  var ringIn = []
+  for (var ei = 0; ei <= 28; ei++) {
+    var ea = ei / 28 * TAU
+    ring.push([cx + Math.cos(ea) * erx * R, cy + (EY + Math.sin(ea) * ery) * R])
+    ringIn.push([cx + Math.cos(ea) * (0.26 + 0.04 * ePulse) * R, cy + (EY + Math.sin(ea) * ery * 0.6) * R])
+  }
+  if (bad) {
+    for (var ed = 0; ed < 28; ed += 2) {
+      if (hash(Math.floor(rt / 60) * 3 + ed) < frag * 0.7) continue
+      crisp.line(tint, eA, thin, ring[ed][0], ring[ed][1], ring[ed + 1][0], ring[ed + 1][1])
+    }
+  } else {
+    halo.poly(tint, eA * 0.16, thin * 3.6, ring)
+    crisp.poly(tint, eA, thin, ring)
+  }
+  crisp.poly(tint, eA * 0.6, hair, ringIn)
+
+  var outlineW = function (y) {
+    return Math.sqrt(HOLO_A * HOLO_A * cyw * cyw + HOLO_C * HOLO_C * syw * syw) * holoTaper(y - HOLO_CY)
+  }
+  if (!compact) {
+    var coneA = 0.09 * flick * (bad ? 1 - frag : 1)
+    var topY = HOLO_CY + 0.1
+    var tw = outlineW(topY) * 0.98
+    crisp.line(tint, coneA, hair, cx - erx * R, cy + EY * R, cx - tw * R, cy + topY * R)
+    crisp.line(tint, coneA, hair, cx + erx * R, cy + EY * R, cx + tw * R, cy + topY * R)
+    for (var cr = 1; cr <= 4; cr++) {
+      var fx = mix(-1, 1, cr / 5)
+      crisp.line(tint, coneA * 0.6, hair, cx + fx * erx * R, cy + EY * R, cx + fx * tw * 0.8 * R, cy + (topY + 0.2) * R)
+    }
+    // Motes rising through the cone. A lock blows them upward and clears
+    // them; a miss lets them fall.
+    var moteSpeed = ok ? 1 + 3 * seg(rt, 0, 300) : 1
+    var moteA = ok ? 1 - seg(rt, 350, 700) : (bad ? 1 - frag : 1)
+    for (var mo = 0; mo < 16; mo++) {
+      var ph = frac((ok ? t0 + rt * moteSpeed : t) / 1700 + hash(mo * 1.7))
+      if (bad) ph = frac(t0 / 1700 + hash(mo * 1.7)) - 0.4 * fragTau
+      var my = EY - ph * 1.55
+      var mx = (hash(mo * 3.1) - 0.5) * mix(erx * 2, 1.0, ph)
+      var ma2 = 0.55 * Math.sin(Math.PI * clamp01(ph)) * moteA * flick
+      if (ma2 <= 0.02) continue
+      crisp.line(tint, ma2, hair, cx + mx * R, cy + my * R, cx + mx * R, cy + (my + 0.035) * R)
+    }
+  }
+  flush()
+
+  // --- the mask ------------------------------------------------------------------
+  var mesh = holoMesh(compact)
+  var baseA = mix(0.78, 1, solid)
+  for (var ln = 0; ln < mesh.length; ln++) {
+    var L = mesh[ln]
+    var prev = project(L[0])
+    for (var sj = 1; sj < L.length; sj++) {
+      var cur = project(L[sj])
+      var mz = (prev.z + cur.z) / 2
+      var my2 = (prev.y + cur.y) / 2
+      var da = clamp01((mz + 0.12) / 0.62)
+      var a = baseA * (0.1 + 0.9 * Math.pow(da, 1.2)) * flick
+      var x0 = prev.x, y0 = prev.y, x1 = cur.x, y1 = cur.y
+      var dx = 0
+      if (bandK > 0) {
+        var bd = Math.abs(my2 - bandY)
+        if (bd < 0.09) {
+          a += 0.45 * (1 - bd / 0.09) * bandK * boot
+          dx += (hash(Math.floor(t / 60) * 7 + ln) - 0.5) * 0.06 * bandK
+        }
+      }
+      if (ringK > 0) {
+        var rd = Math.abs(my2 - ringY)
+        if (rd < 0.1) a += 0.5 * (1 - rd / 0.1) * ringK
+      }
+      if (bad) {
+        dx += tearShift(tears, my2)
+        if (frag > 0) {
+          // Segments detach, shrink and drift outward under drag.
+          var sid = ln * 31 + sj
+          var mxs = (x0 + x1) / 2, mys = (y0 + y1) / 2
+          var nl = Math.hypot(mxs, mys - HOLO_CY) || 0.001
+          var sp2 = 0.35 * (0.4 + hash(sid))
+          var ox = dragOffset(sp2 * mxs / nl, fragTau, 3.5)
+          var oy = dragOffset(sp2 * (mys - HOLO_CY) / nl, fragTau, 3.5) + dragOffset(0.1, fragTau, 2)
+          var shrink = 1 - 0.55 * frag * (0.5 + 0.5 * hash(sid + 9))
+          x0 = mxs + (x0 - mxs) * shrink + ox
+          x1 = mxs + (x1 - mxs) * shrink + ox
+          y0 = mys + (y0 - mys) * shrink + oy
+          y1 = mys + (y1 - mys) * shrink + oy
+        }
+      }
+      var A = toPx(x0 + dx, y0), B = toPx(x1 + dx, y1)
+      crisp.line(tint, a, compact ? Math.max(1, size * 0.018) : hair, A.x, A.y, B.x, B.y)
+      prev = cur
+    }
+  }
+  crisp.flush()
+
+  // Silhouette. It carries the face at the small slot.
+  var outline = []
+  for (var oi = 0; oi <= 40; oi++) {
+    var oa = oi / 40 * TAU
+    var oy2 = Math.sin(oa) * HOLO_B * (1 + 0.02 * Math.cos(oa))
+    var ox2 = Math.cos(oa) * outlineW(oy2 + HOLO_CY) * 1.0
+    var oyy = oy2 + HOLO_CY
+    ox2 += bad ? tearShift(tears, oyy) : 0
+    var OP = toPx(ox2, oyy)
+    outline.push([OP.x, OP.y])
+  }
+  var outA = (0.5 + 0.35 * solid + 0.15 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
+  if (bad && frag > 0.05) {
+    for (var od = 0; od < 40; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
+  } else {
+    halo.poly(tint, outA * 0.16, thin * 3.6, outline)
+    crisp.poly(tint, outA, thin, outline)
+  }
+
+  // Feature contours on the surface.
+  var feats = holoFeatures()
+  var fA = (0.72 + 0.28 * solid) * flick * (bad ? 1 - 0.5 * frag : 1)
+  for (var fi = 0; fi < feats.length; fi++) {
+    var fp = []
+    for (var fj = 0; fj < feats[fi].length; fj++) {
+      var P = project(feats[fi][fj])
+      var fdx = bad ? tearShift(tears, P.y) : 0
+      if (bad && frag > 0) {
+        fdx += dragOffset(0.25 * (hash(fi + 40) - 0.5), fragTau, 3.5)
+      }
+      var FP = toPx(P.x + fdx, P.y + (bad ? dragOffset(0.08, fragTau, 2) : 0))
+      fp.push([FP.x, FP.y])
+    }
+    crisp.poly(tint, fA, compact ? Math.max(1, size * 0.022) : thin, fp)
+  }
+  flush()
+
+  // --- landmarks, scanner ring and result gestures -------------------------------------
+  var lmPx = []
+  for (var lm = 0; lm < LANDMARKS.length; lm++) {
+    var LMk = LANDMARKS[lm]
+    var LP = project([LMk.x * 0.9, LMk.y * 0.92, holoZAt(LMk.x * 0.9, LMk.y * 0.92)])
+    lmPx.push({ p: toPx(LP.x + (bad ? tearShift(tears, LP.y) : 0), LP.y), y: LP.y, z: LP.z })
+  }
+  if (!compact) {
+    if (scanning) {
+      for (var sl = 0; sl < lmPx.length; sl++) {
+        var bd2 = Math.abs(lmPx[sl].y - bandY)
+        var sh = clamp01(1 - bd2 / 0.16) * boot
+        if (sh <= 0.02 || lmPx[sl].z < 0) continue
+        var ds = R * 0.028
+        var C0 = lmPx[sl].p
+        crisp.poly(tint, sh * 0.9, hair, [[C0.x, C0.y - ds], [C0.x + ds, C0.y], [C0.x, C0.y + ds], [C0.x - ds, C0.y], [C0.x, C0.y - ds]])
+      }
+    } else if (ok) {
+      for (var rl = 0; rl < lmPx.length; rl++) {
+        var lockAt = 300 + LANDMARKS[rl].order * 30
+        drawLockReticle(halo, crisp, tint, lmPx[rl].p, seg(rt, lockAt, lockAt + REC_LOCK_LEN), R, hair, thin, passFlash)
+      }
+      if (ringK > 0.01) {
+        // A body-scanner ring travels down the mask once as it solidifies.
+        var rw = outlineW(ringY) * 1.1
+        var rp = []
+        for (var ri = 0; ri <= 28; ri++) {
+          var ra = ri / 28 * TAU
+          rp.push([cx + Math.cos(ra) * rw * R, cy + (ringY + Math.sin(ra) * 0.07) * R])
+        }
+        halo.poly(tint, ringK * 0.2, bold * 3, rp)
+        crisp.poly(tint, ringK * 0.9, thin, rp)
+      }
+      var wave = bump(rt, REC_WAVE[0], REC_WAVE[1])
+      if (wave > 0.01) {
+        var wk = easeOutCubic(seg(rt, REC_WAVE[0], REC_WAVE[1]))
+        var wp = []
+        for (var wi = 0; wi <= 28; wi++) {
+          var wa2 = wi / 28 * TAU
+          wp.push([cx + Math.cos(wa2) * mix(erx, 1.05, wk) * R, cy + (EY + Math.sin(wa2) * mix(ery, 0.2, wk)) * R])
+        }
+        halo.poly(tint, wave * 0.12, bold * 3, wp)
+        crisp.poly(tint, wave * 0.6, thin, wp)
+      }
+    } else {
+      for (var bl = 0; bl < lmPx.length; bl++) {
+        var bk = seg(rt, 60 + LANDMARKS[bl].order * 22, 300 + LANDMARKS[bl].order * 22)
+        if (bk <= 0) continue
+        var lost = easeOutCubic(seg(rt, 300 + LANDMARKS[bl].order * 22, 800))
+        var shake = (1 - bk) * R * 0.04
+        drawLostTrack(crisp, lmPx[bl].p.x + Math.sin(rt / 23 + bl) * shake, lmPx[bl].p.y + Math.cos(rt / 29 + bl * 2) * shake,
+          R, lost, clamp01(bk * 2) * (0.85 - 0.45 * lost), hair, bl)
+      }
+      var ew = bump(rt, 0, 340)
+      if (ew > 0.01) crisp.arc(ROLE_ERROR, ew * 0.6, Math.max(1, size * 0.018), cx, cy, R * mix(0.1, 1.05, easeOutCubic(seg(rt, 0, 340))), 0, TAU)
+      drawTears(crisp, tears, cx, cy, R)
+    }
+    flush()
+  }
+
+  if (hud) paintHoloReadouts(crisp, size, state, t, rt, boot, tint, yaw, pitch, flick)
+  crisp.flush()
+}
+
+function paintHoloReadouts(p, size, state, t, rt, boot, tint, yaw, pitch, flick) {
+  var bad = state === "notRecognized"
+  var ok = state === "recognized"
+  var g = readoutGeom(size, boot)
+
+  // Top left: head yaw in degrees.
+  var deg = yaw * 180 / Math.PI
+  var mag = Math.min(99.9, Math.abs(deg))
+  var tenths = Math.round(mag * 10)
+  var digits = String(Math.floor(tenths / 10))
+  while (digits.length < 2) digits = "0" + digits
+  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_FG, (deg < -0.05 ? "-" : " ") + digits + "." + (tenths % 10))
+
+  readConfidence(p, g, size, state, t, rt, tint)
+
+  // Bottom left: pose and sync gauges. Pointers centre on a lock.
+  var gw = size * 0.22
+  var gauges = [yaw / 0.45, pitch / 0.12, (flick - 0.9) * 10 - (ok ? 0 : 0.2)]
+  for (var i = 0; i < 3; i++) {
+    var gy = g.base - size * 0.01 - i * size * 0.026
+    var v = clamp(gauges[i], -1, 1)
+    if (ok) v = mix(v, 0, easeOutCubic(seg(rt, 0, 450)))
+    if (bad) v = clamp(v + (hash(Math.floor(rt / 50) * 3 + i) - 0.5) * 1.2 * (1 - seg(rt, 300, 700)), -1, 1)
+    p.line(ROLE_FG, 0.2 * boot, g.hair, g.m, gy, g.m + gw, gy)
+    p.line(ROLE_FG, 0.3 * boot, g.hair, g.m + gw / 2, gy - size * 0.008, g.m + gw / 2, gy + size * 0.008)
+    var px = g.m + gw / 2 + v * gw / 2
+    p.line(bad ? ROLE_ERROR : tint, 0.9 * boot, g.w * 1.6, px - size * 0.012, gy, px + size * 0.012, gy)
+  }
+
+  readStatus(p, g, size, state, t, rt, tint)
+}
+
+function paintInto(ctx, size, spec) {
+  var style = resolveStyle(spec)
+  if (style === "radar") paintRadar(ctx, size, spec)
+  else if (style === "holo") paintHolo(ctx, size, spec)
+  else paintHud(ctx, size, spec)
 }
 
 // How long the host should hold each state before it tears the card down.
