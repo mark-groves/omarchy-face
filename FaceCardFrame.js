@@ -523,9 +523,11 @@ function paintHud(ctx, size, spec) {
   var yaw = swayYaw(t)
   var pitch = swayPitch(t)
   if (ok) {
+    // The lock settles slightly off-axis, so the relief reads in 3D rather
+    // than as flat nested rings.
     var still = easeOutCubic(seg(rt, 0, 420))
-    yaw = mix(swayYaw(t0 + rt * (1 - still)), 0, still)
-    pitch = mix(swayPitch(t0 + rt * (1 - still)), 0, still)
+    yaw = mix(swayYaw(t0 + rt * (1 - still)), 0.2, still)
+    pitch = mix(swayPitch(t0 + rt * (1 - still)), 0.06, still)
   } else if (bad) {
     yaw = swayYaw(t0 + rt * 0.2)
     pitch = swayPitch(t0 + rt * 0.2)
@@ -1680,7 +1682,7 @@ function radarReturns() {
   var rnd = mulberry32(4242)
   var rs = []
   function add(kind, x, y, gain) {
-    var z = holoInside(x, y) > 0 ? holoZAt(x, y) : 0
+    var z = holoInside(x, y) > 0 ? classicZAt(x, y) : 0
     rs.push({ kind: kind, x: x, y: y, r: Math.hypot(x, y), a: Math.atan2(y, x), gain: gain * (0.7 + 0.5 * z), j: rnd() })
   }
   var i, a
@@ -1695,7 +1697,7 @@ function radarReturns() {
   // socket loops are left out; concentric loops there read as eyes.
   var lv = []
   for (i = 0; i < 13; i++) lv.push(0.05 + i * 0.053)
-  var topo = reliefContours("radarT", 20, 27, lv, true)
+  var topo = reliefContours("radarT", 20, 27, lv, true, classicZAt)
   for (i = 0; i < topo.segs.length; i++) {
     var S = topo.segs[i]
     add("topo", (S[0] + S[2]) / 2, (S[1] + S[3]) / 2, 0.42 + 0.035 * S[5])
@@ -2204,7 +2206,7 @@ var HOLO_SLICES = 24
 // The face's bone structure as relief on the mask. Every style draws the
 // face from this surface alone (its depth, slope and contours), never from
 // drawn eyes or a mouth, which is what keeps it from reading as an emoji.
-function holoRelief(x, y) {
+function reliefClassic(x, y) {
   var ex = Math.abs(x) - 0.25
   var nose = 0.2 * Math.exp(-((x / 0.07) * (x / 0.07) + ((y - 0.02) / 0.2) * ((y - 0.02) / 0.2)))
   var tip = 0.04 * Math.exp(-((x / 0.06) * (x / 0.06) + ((y - 0.13) / 0.05) * ((y - 0.13) / 0.05)))
@@ -2215,6 +2217,22 @@ function holoRelief(x, y) {
   var lips = 0.03 * Math.exp(-((x / 0.18) * (x / 0.18) + ((y - 0.36) / 0.045) * ((y - 0.36) / 0.045)))
   var chin = 0.03 * Math.exp(-((x / 0.15) * (x / 0.15) + ((y - 0.6) / 0.08) * ((y - 0.6) / 0.08)))
   return nose + tip + sock + brow + cheek + lips + chin
+}
+
+function holoRelief(x, y) {
+  var ax = Math.abs(x)
+  function g(dx, sx, dy, sy) { return Math.exp(-((dx / sx) * (dx / sx) + (dy / sy) * (dy / sy))) }
+  var dome = 0.04 * g(x, 0.32, y + 0.52, 0.16)
+  var brow = 0.07 * g(ax - 0.2, 0.2, y + 0.3, 0.05)
+  var sock = -0.11 * g(ax - 0.25, 0.13, y + 0.17, 0.09)
+  var bridge = 0.06 * g(x, 0.045, y + 0.08, 0.1)
+  var nose = 0.15 * g(x, 0.065, y - 0.07, 0.11)
+  var tip = 0.05 * g(x, 0.055, y - 0.15, 0.045)
+  var wings = 0.03 * g(ax - 0.08, 0.04, y - 0.15, 0.04)
+  var cheek = 0.06 * g(ax - 0.31, 0.12, y - 0.07, 0.11)
+  var lips = 0.022 * g(x, 0.16, y - 0.36, 0.05)
+  var chin = 0.05 * g(x, 0.14, y - 0.62, 0.07)
+  return dome + brow + sock + bridge + nose + tip + wings + cheek + lips + chin
 }
 
 // Width of the mask at height y: a narrower brow, cheekbones, and a jaw
@@ -2240,6 +2258,11 @@ function holoInside(x, y) {
 
 function holoZAt(x, y) {
   return HOLO_C * Math.sqrt(Math.max(0, holoInside(x, y))) + holoRelief(x, y)
+}
+
+// The radar keeps the first relief it was tuned on.
+function classicZAt(x, y) {
+  return HOLO_C * Math.sqrt(Math.max(0, holoInside(x, y))) + reliefClassic(x, y)
 }
 
 function holoYaw(t) { return 0.38 * Math.sin(t / 6400 * TAU) + 0.04 * Math.sin(t / 1900 * TAU) }
@@ -2315,7 +2338,8 @@ function holoContours() {
 
 // Marching squares over the relief. `skipSockets` drops the closed loops
 // the eye sockets make: concentric loops in two sockets read as eyes.
-function reliefContours(key, nx, ny, levels, skipSockets) {
+function reliefContours(key, nx, ny, levels, skipSockets, zfn) {
+  var zf = zfn || holoZAt
   if (CACHE[key]) return CACHE[key]
   var x0 = -0.64, x1 = 0.64, y0 = -0.82, y1 = 0.82
   var grid = []
@@ -2323,7 +2347,7 @@ function reliefContours(key, nx, ny, levels, skipSockets) {
     var row = []
     for (var i = 0; i <= nx; i++) {
       var x = mix(x0, x1, i / nx), y = mix(y0, y1, j / ny)
-      row.push(holoInside(x, y) > 0 ? holoZAt(x, y) : -1)
+      row.push(holoInside(x, y) > 0 ? zf(x, y) : -1)
     }
     grid.push(row)
   }
@@ -2364,7 +2388,9 @@ function holoNodes() {
   var us = [-0.95, -0.48, 0, 0.48, 0.95], vs = [-0.95, -0.5, -0.05, 0.4, 0.85]
   for (var i = 0; i < vs.length; i++) {
     for (var j = 0; j < us.length; j++) {
-      var u = us[j] + (hash(i * 7 + j * 3 + 1) - 0.5) * 0.22
+      // Rows are staggered like brickwork so no mirrored pair lands where
+      // eyes would be.
+      var u = us[j] + (i % 2 ? 0.24 : -0.08) + (hash(i * 7 + j * 3 + 1) - 0.5) * 0.22
       var v = vs[i] + (hash(i * 5 + j * 11 + 2) - 0.5) * 0.18
       var P = holoSurface(u, v)
       nodes.push({ P: P, i: i, j: j, order: Math.hypot(P[0], P[1] - 0.05) * 6 + hash(i * 13 + j) })
