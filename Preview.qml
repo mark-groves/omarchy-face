@@ -21,6 +21,14 @@ ShellRoot {
   property real enteredAt: 0
   property bool sequence: true
   property bool dark: true
+  // The harness passes the style per frame as spec.style. An installed card
+  // takes it from the STYLE line instead (bin/omarchy-face-style).
+  property string style: Quickshell.env("FACE_STYLE") || "hud"
+  readonly property var styles: [
+    { s: "hud", l: "Depth Lattice HUD" },
+    { s: "radar", l: "Phosphor Radar" },
+    { s: "holo", l: "Holographic Wireframe" }
+  ]
 
   // Scripted walk through every state and transition, the way a lock screen
   // sees them: scan, lock, rescan, miss.
@@ -122,7 +130,7 @@ ShellRoot {
 
     onPaint: {
       var began = measure ? Date.now() : 0
-      var ops = FaceCard.frame(side, { state: state_, clock: root.clock, elapsed: elapsed })
+      var ops = FaceCard.frame(side, { state: state_, clock: root.clock, elapsed: elapsed, style: root.style })
       root.paintOps(getContext("2d"), side, ops)
       if (measure) {
         root.paintMs = root.paintMs * 0.9 + (Date.now() - began) * 0.1
@@ -132,6 +140,7 @@ ShellRoot {
     Connections {
       target: root
       function onClockChanged() { card.requestPaint() }
+      function onStyleChanged() { card.requestPaint() }
     }
     onState_Changed: requestPaint()
     Component.onCompleted: requestPaint()
@@ -166,7 +175,7 @@ ShellRoot {
   FloatingWindow {
     title: "omarchy-face card preview"
     implicitWidth: 900
-    implicitHeight: 540
+    implicitHeight: 570
 
     Rectangle {
       anchors.fill: parent
@@ -207,8 +216,32 @@ ShellRoot {
       }
 
       Row {
+        id: styleChips
+        spacing: 7
         anchors.top: chips.bottom
-        anchors.topMargin: 22
+        anchors.topMargin: 8
+        anchors.horizontalCenter: parent.horizontalCenter
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "style"
+          color: root.foreground
+          opacity: 0.5
+          font.family: "monospace"
+          font.pixelSize: 11
+        }
+        Repeater {
+          model: root.styles
+          Chip {
+            label: modelData.l
+            on: root.style === modelData.s
+            onPicked: root.style = modelData.s
+          }
+        }
+      }
+
+      Row {
+        anchors.top: styleChips.bottom
+        anchors.topMargin: 16
         anchors.horizontalCenter: parent.horizontalCenter
         spacing: 40
 
