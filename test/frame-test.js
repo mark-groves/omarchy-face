@@ -61,7 +61,7 @@ check('reads no ambient state', () => {
 
 const body = source.replace(/^\.pragma library\s*$/m, '')
 const exported = {}
-new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs;')(exported)
+new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLE = STYLE; __out.STYLES = STYLES;')(exported)
 const { frame, holdMs } = exported
 
 check('the public API takes no context argument', () => {
@@ -150,7 +150,7 @@ check('scanning is a dot cloud', () => {
 })
 
 check('a settled recognised face has no dots left on it', () => {
-  for (const elapsed of [780, 900, 1050, 1400]) {
+  for (const elapsed of [1500, 1900, 2200]) {
     assert.strictEqual(dots(ops('recognized', elapsed)), 0, 'dots still painted at ' + elapsed + ' ms')
   }
 })
@@ -160,11 +160,23 @@ check('the dots are still there while recognition is being worked out', () => {
 })
 
 check('a settled recognised face is drawn with strokes', () => {
-  assert.ok(strokes(ops('recognized', 1050)) > 3, 'expected a drawn face')
+  assert.ok(strokes(ops('recognized', holdMs('recognized'))) > 3, 'expected a drawn face')
+})
+
+check('a scan boots in rather than popping on', () => {
+  const alpha = (list) => list.filter(o => o[0] === OP_RECT).reduce((a, o) => a + o[2], 0)
+  assert.ok(alpha(ops('scanning', 0)) < alpha(ops('scanning', 1500)) * 0.5, 'the cloud should assemble on entry')
+})
+
+check('a result eases out of the pose it was entered from', () => {
+  // Same entry clock, same elapsed: same frame. Different entry clock: the
+  // instrument was elsewhere when the result arrived, so the frame differs.
+  assert.deepStrictEqual(ops('recognized', 200, 120, 3200), ops('recognized', 200, 120, 3200))
+  assert.notDeepStrictEqual(ops('recognized', 200, 120, 3200), ops('recognized', 200, 120, 4700))
 })
 
 check('a miss stays a broken cloud rather than resolving', () => {
-  assert.ok(dots(ops('notRecognized', 820)) > 50, 'the miss should not resolve into a clean face')
+  assert.ok(dots(ops('notRecognized', holdMs('notRecognized'))) > 50, 'the miss should not resolve into a clean face')
 })
 
 check('the card degrades to a vector glyph below 48 px', () => {
@@ -175,7 +187,9 @@ check('the card degrades to a vector glyph below 48 px', () => {
 check('every size paints something', () => {
   for (const size of SIZES) {
     for (const state of STATES) {
-      assert.ok(ops(state, 400, size).length > 3, state + ' at ' + size + ' px painted nothing')
+      // Strokes are batched, so count what gets drawn, not how many ops carry it.
+      const drawn = ops(state, 400, size).reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0)
+      assert.ok(drawn > 3, state + ' at ' + size + ' px painted nothing')
     }
   }
 })
@@ -197,8 +211,8 @@ check('a frame stays inside the host op budget', () => {
 // --- the timing contract the host reads ------------------------------------
 
 check('the host is told how long to hold each state', () => {
-  assert.strictEqual(holdMs('recognized'), 1050)
-  assert.strictEqual(holdMs('notRecognized'), 820)
+  assert.strictEqual(holdMs('recognized'), 1900)
+  assert.strictEqual(holdMs('notRecognized'), 1800)
   assert.strictEqual(holdMs('scanning'), 0)
   assert.strictEqual(holdMs('anything else'), 0)
 })
@@ -207,7 +221,194 @@ check('the recognised hold outlasts the last thing it draws', () => {
   assert.notDeepStrictEqual(
     ops('recognized', holdMs('recognized')),
     ops('recognized', holdMs('recognized') - 200),
-    'the check should still be drawing 200 ms before the hold ends')
+    'the lock should still be settling 200 ms before the hold ends')
+})
+
+check('the host never needs more than two seconds of hold', () => {
+  for (const state of STATES) assert.ok(holdMs(state) <= 2000, state + ' asks for ' + holdMs(state))
+})
+
+// --- replay cost, which the host pays on a software canvas every frame -----
+
+// The host replays every op and path command in JS on a software canvas each
+// frame, so the real 116 px slot gets a budget well inside the host caps.
+const REPLAY_OPS = 1000
+const REPLAY_CMDS = 6500
+
+function replayCost(list) {
+  return { ops: list.length, cmds: list.reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0) }
+}
+
+check('a frame at the real 116 px slot stays cheap to replay', () => {
+  for (const state of STATES) {
+    for (let elapsed = 0; elapsed <= 1200; elapsed += 50) {
+      const c = replayCost(ops(state, elapsed, 116, 5000 + elapsed))
+      assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
+    }
+  }
+})
+
+// --- styles and the selector --------------------------------------------------
+
+const STYLE_LINE = /^var STYLE = "([a-z]+)"/m
+
+check('the style line is in the exact form the switch filter rewrites', () => {
+  const lines = source.split('\n').filter(l => /^var STYLE = /.test(l))
+  assert.strictEqual(lines.length, 1, 'expected exactly one STYLE line')
+  assert.match(lines[0], /^var STYLE = "[a-z]+" \/\/ omarchy-face:style$/)
+})
+
+check('the published default is the HUD', () => {
+  assert.strictEqual(source.match(STYLE_LINE)[1], 'hud')
+  assert.strictEqual(exported.STYLE, 'hud')
+})
+
+check('the switch script offers exactly the module styles', () => {
+  const script = fs.readFileSync(path.join(root, 'bin/omarchy-face-style'), 'utf8')
+  const m = script.match(/^STYLES=\(([^)]*)\)/m)
+  assert.ok(m, 'no STYLES=(...) in the script')
+  assert.deepStrictEqual(m[1].trim().split(/\s+/), exported.STYLES)
+  assert.deepStrictEqual(exported.STYLES, ['hud', 'radar', 'holo'])
+})
+
+check('the filter is declared for the entry point', () => {
+  const attrs = fs.readFileSync(path.join(root, '.gitattributes'), 'utf8')
+  assert.match(attrs, /^FaceCardFrame\.js filter=omarchy-face-style$/m)
+})
+
+function styled(style, state, elapsed, size, clock) {
+  const s = { state: state, elapsed: elapsed, clock: clock === undefined ? 900 : clock }
+  if (style !== undefined) s.style = style
+  return frame(size === undefined ? 120 : size, s)
+}
+
+// The installed module with its STYLE line rewritten, loaded as the host does.
+function installedAs(style) {
+  const text = body.replace(STYLE_LINE, 'var STYLE = "' + style + '"')
+  const api = {}
+  new Function('__out', text + '\n__out.frame = frame;')(api)
+  return api.frame
+}
+
+check('spec.style picks the style', () => {
+  assert.deepStrictEqual(styled(undefined, 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.notDeepStrictEqual(styled('radar', 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.notDeepStrictEqual(styled('holo', 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.notDeepStrictEqual(styled('holo', 'scanning', 2000), styled('radar', 'scanning', 2000))
+})
+
+check('the STYLE line picks the style when spec.style is absent', () => {
+  for (const style of exported.STYLES) {
+    const f = installedAs(style)
+    assert.deepStrictEqual(f(120, { state: 'recognized', clock: 1200, elapsed: 500 }), styled(style, 'recognized', 500, 120, 1200), style)
+  }
+})
+
+check('an unknown style paints the installed one, never nothing', () => {
+  assert.deepStrictEqual(styled('sparkles', 'scanning', 2000), styled('hud', 'scanning', 2000))
+  assert.deepStrictEqual(styled(42, 'scanning', 2000), styled('hud', 'scanning', 2000))
+  const radar = installedAs('radar')
+  assert.deepStrictEqual(radar(120, { state: 'scanning', clock: 900, elapsed: 2000, style: 'nope' }), styled('radar', 'scanning', 2000))
+  const broken = installedAs('nope')
+  assert.deepStrictEqual(broken(120, { state: 'scanning', clock: 900, elapsed: 2000 }), styled('hud', 'scanning', 2000))
+})
+
+for (const style of exported.STYLES) {
+  check(style + ': a frame is nothing but finite numbers, roles and alphas in range', () => {
+    for (const state of STATES) {
+      for (const elapsed of [0, 200, 430, 700, 1080, 2600]) {
+        for (const size of [240, 120, 30]) {
+          const list = styled(style, state, elapsed, size, 5000 + elapsed)
+          assertNumeric(list, style + ' ' + state + '@' + elapsed + '/' + size)
+          for (const op of list) {
+            assert.ok(op[1] >= 0 && op[1] <= 2, 'role out of range')
+            assert.ok(op[2] >= 0 && op[2] <= 1, 'alpha out of range')
+          }
+        }
+      }
+    }
+  })
+
+  check(style + ': the same spec returns the same frame', () => {
+    for (const [state, elapsed] of [['scanning', 1500], ['recognized', 430], ['notRecognized', 300]]) {
+      assert.deepStrictEqual(styled(style, state, elapsed), styled(style, state, elapsed))
+    }
+  })
+
+  check(style + ': ambient motion is driven by the clock', () => {
+    assert.notDeepStrictEqual(styled(style, 'scanning', 3000, 120, 3300), styled(style, 'scanning', 3000, 120, 4400))
+  })
+
+  check(style + ': a scan boots in rather than popping on', () => {
+    const drawn = (list) => list.reduce((n, o) => n + (o[0] === 0 ? o[4].length * o[2] : o[2]), 0)
+    assert.ok(drawn(styled(style, 'scanning', 0)) < drawn(styled(style, 'scanning', 3000)) * 0.5)
+  })
+
+  check(style + ': a result eases out of the pose it was entered from', () => {
+    assert.notDeepStrictEqual(styled(style, 'recognized', 200, 120, 3200), styled(style, 'recognized', 200, 120, 4700))
+  })
+
+  check(style + ': a settled recognised face is strokes only, no dots', () => {
+    for (const elapsed of [1500, 1900, 2200]) {
+      const list = styled(style, 'recognized', elapsed)
+      assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
+      assert.ok(strokes(list) > 3, 'expected a drawn face at ' + elapsed)
+    }
+  })
+
+  check(style + ': a miss attempts the lock in the accent, then paints in the error role only', () => {
+    assert.ok(styled(style, 'notRecognized', 200).some(o => o[1] === 0), 'expected the attempt in the accent')
+    for (const elapsed of [800, 1200, 1800]) {
+      const accent = styled(style, 'notRecognized', elapsed).filter(o => o[1] === 0)
+      assert.strictEqual(accent.length, 0, 'accent ops in a miss at ' + elapsed)
+    }
+  })
+
+  check(style + ': the recognised hold outlasts the last thing it draws', () => {
+    assert.notDeepStrictEqual(
+      styled(style, 'recognized', holdMs('recognized')),
+      styled(style, 'recognized', holdMs('recognized') - 200))
+  })
+
+  check(style + ': every size paints something', () => {
+    for (const size of SIZES) {
+      for (const state of STATES) {
+        const drawn = styled(style, state, 400, size).reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0)
+        assert.ok(drawn > 3, style + ' ' + state + ' at ' + size + ' px painted nothing')
+      }
+    }
+  })
+
+  check(style + ': every frame at the 116 px slot stays inside the replay budget', () => {
+    for (const state of STATES) {
+      for (let elapsed = 0; elapsed <= 2600; elapsed += 20) {
+        const c = replayCost(styled(style, state, elapsed, 116, 5000 + elapsed))
+        assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
+      }
+    }
+  })
+
+  check(style + ': frames stay inside the host budgets and cheap at 116 px', () => {
+    for (const size of SIZES) {
+      for (const state of STATES) {
+        for (let elapsed = 0; elapsed <= 3000; elapsed += 100) {
+          const list = styled(style, state, elapsed, size, 5000 + elapsed)
+          assert.ok(list.length < 6000, style + ' op budget blown: ' + list.length)
+          if (size === 116) {
+            const c = replayCost(list)
+            assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
+          }
+          for (const op of list) if (op[0] === 0) assert.ok(op[4].length < 600, 'path command budget blown')
+        }
+      }
+    }
+  })
+}
+
+check('the HUD also paints a miss in the error role only once the attempt fails', () => {
+  for (const elapsed of [800, 1200, 1800]) {
+    assert.strictEqual(styled('hud', 'notRecognized', elapsed).filter(o => o[1] === 0).length, 0)
+  }
 })
 
 console.log(failures === 0 ? '\nall frame tests passed' : '\n' + failures + ' frame test(s) failed')

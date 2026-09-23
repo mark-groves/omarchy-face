@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Pick the face card style: hud (default), radar or holo.
+#
+#   omarchy-face-style            show the active style and the choices
+#   omarchy-face-style radar      switch; the card reloads on its own
+#   omarchy-face-style apply      re-apply the saved style (after a reinstall)
+#   omarchy-face-style list       print the style names
+#
+# The choice is saved in ~/.config/omarchy/face-style and written into the
+# STYLE line of FaceCardFrame.js. The host watches that file, so a switch
+# shows up on the next frame without restarting the shell.
+#
+# The plugin is a git checkout that `omarchy plugin update` fast-forwards, so
+# the edit goes through a git clean/smudge filter (declared in
+# .gitattributes): git sees the default style and a clean tree, and every
+# checkout or update writes the saved style back in.
+set -euo pipefail
+
+STYLES=(hud radar holo)
+DEFAULT=hud
+FILTER=omarchy-face-style
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+MODULE="$PLUGIN_DIR/FaceCardFrame.js"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/face-style"
+
+fail() {
+  echo "omarchy-face-style: $*" >&2
+  exit 1
+}
+
+valid() {
+  local s
+  for s in "${STYLES[@]}"; do
+    [[ $1 == "$s" ]] && return 0
+  done
+  return 1
+}
+
+saved() {
+  local s=""
+  [[ -r $CONFIG ]] && s=$(tr -d '[:space:]' <"$CONFIG")
+  if valid "$s"; then echo "$s"; else echo "$DEFAULT"; fi
+}
+
+active() {
+  sed -nE 's/^var STYLE = "([a-z]+)".*/\1/p' "$MODULE" | head -n1
+}
+
+# stdin to stdout with the STYLE line set to $1.
+rewrite() {
+  sed -E "s/^var STYLE = \"[a-z]+\"/var STYLE = \"$1\"/"
+}
+
+configure_filter() {
+  git -C "$PLUGIN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git -C "$PLUGIN_DIR" config "filter.$FILTER.clean" "\"$SELF\" clean"
+  git -C "$PLUGIN_DIR" config "filter.$FILTER.smudge" "\"$SELF\" smudge"
+}
+
+# Rewrite in place, not by rename: the host watches this inode.
+apply_style() {
+  local style="$1" tmp
+  [[ -f $MODULE ]] || fail "no FaceCardFrame.js next to this script"
+  grep -qE '^var STYLE = "[a-z]+"' "$MODULE" || fail "FaceCardFrame.js has no STYLE line"
+  configure_filter
+  tmp=$(mktemp)
+  rewrite "$style" <"$MODULE" >"$tmp"
+  cmp -s "$tmp" "$MODULE" || cat "$tmp" >"$MODULE"
+  rm -f "$tmp"
+  # Re-stage through the clean filter. The staged content is the published
+  # file again, but the index learns the new size; without this git reports
+  # the file modified on size alone and the update refuses to fast-forward.
+  if git -C "$PLUGIN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$PLUGIN_DIR" add -- FaceCardFrame.js
+  fi
+}
+
+show() {
+  local now
+  now=$(active)
+  echo "Face style: ${now:-unknown} (saved: $(saved))"
+  echo "Styles: ${STYLES[*]}"
+}
+
+case "${1:-}" in
+"" | show)
+  show
+  ;;
+list)
+  printf '%s\n' "${STYLES[@]}"
+  ;;
+apply)
+  apply_style "$(saved)"
+  show
+  ;;
+smudge)
+  rewrite "$(saved)"
+  ;;
+clean)
+  rewrite "$DEFAULT"
+  ;;
+-h | --help)
+  sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'
+  ;;
+*)
+  valid "$1" || fail "unknown style '$1' (choose from: ${STYLES[*]})"
+  mkdir -p "$(dirname "$CONFIG")"
+  printf '%s\n' "$1" >"$CONFIG"
+  apply_style "$1"
+  show
+  ;;
+esac
