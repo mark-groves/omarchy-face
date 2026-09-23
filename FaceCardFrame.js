@@ -302,7 +302,7 @@ function acquisition(plane, y) {
 }
 
 // Idle head pose. Two incommensurate periods, so the sway never visibly loops.
-function swayYaw(t) { return 0.15 * Math.sin(t / 5200 * TAU) + 0.03 * Math.sin(t / 1730 * TAU) }
+function swayYaw(t) { return 0.24 * Math.sin(t / 5200 * TAU) + 0.03 * Math.sin(t / 1730 * TAU) }
 function swayPitch(t) { return 0.07 * Math.sin(t / 7300 * TAU + 1.1) }
 
 // Instrument ring angles at clock t. Each ring has its own period so the
@@ -805,7 +805,7 @@ function paintHud(ctx, size, spec) {
     // texture behind them. Without this weighting the silhouette dissolves
     // on a light theme, where accent-on-near-white has little contrast.
     var kw = p2.kind === "field" ? 0.46
-      : (p2.kind === "edge" ? 1.05 : 0.5 + 0.7 * p2.shade)
+      : (p2.kind === "edge" ? 1.0 : 0.25 + 1.0 * p2.shade)
     // Floor keeps the silhouette readable between sweeps; the cubed term is
     // the bright crest that rides the scan plane itself.
     var alpha = (0.40 + 0.48 * l + 0.34 * l * l * l) * kw * (0.70 + 0.30 * p2.z)
@@ -879,7 +879,7 @@ function paintHud(ctx, size, spec) {
         if (ek <= 0.01) continue
         var A = lmPx[E[0]], B = lmPx[E[1]]
         var mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2
-        var ea = 0.34 + 0.2 * passFlash
+        var ea = 0.16 + 0.12 * passFlash
         crisp.line(tint, ea, hair, mx, my, mix(mx, A.x, ek), mix(my, A.y, ek))
         crisp.line(tint, ea, hair, mx, my, mix(mx, B.x, ek), mix(my, B.y, ek))
       }
@@ -1498,6 +1498,12 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
   }
 }
 
+function hudContours() {
+  var lv = []
+  for (var i = 0; i < 12; i++) lv.push(0.06 + i * 0.056)
+  return reliefContours("hudT", 22, 30, lv, true)
+}
+
 // HUD face topology: iso-depth contours of the relief and profile curves
 // over the cloud, swayed with it and lit by the scan plane. A lock lights
 // the contours from the deepest level up in a cascade; a miss shears and
@@ -1522,15 +1528,21 @@ function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, p
     if (bad && hash(seed) < brk) a = 0
     return a * boot
   }
-  var topo = holoContours()
+  // The face's topography is the headline layer: a dense contour map of
+  // the relief, the socket loops left out. A lock resolves it level by
+  // level into a bright, glowing map.
+  var topo = hudContours()
+  var resolved = ok ? easeOutCubic(seg(rt, 450, 900)) : 0
   for (var ts = 0; ts < topo.segs.length; ts++) {
     var S = topo.segs[ts]
     var li = S[5]
-    var cas = ok ? bump(rt, 240 + li * 45, 560 + li * 45) : 0
-    var base = 0.14 + 0.55 * cas + (ok ? 0.16 * seg(rt, 500, 900) : 0)
+    var cas = ok ? bump(rt, 220 + li * 40, 560 + li * 40) : 0
+    var base = 0.26 + 0.5 * cas + 0.3 * resolved
     var A = place(S[0], S[1], S[4] * DEPTH), B = place(S[2], S[3], S[4] * DEPTH)
     var a = lightAt((A.u + B.u) / 2, base, ts * 7 + 1)
-    if (a > 0.004) crisp.line(tint, a, fine, A.p.x, A.p.y, B.p.x, B.p.y)
+    if (a <= 0.004) continue
+    crisp.line(tint, a, fine * 1.2, A.p.x, A.p.y, B.p.x, B.p.y)
+    if (resolved > 0.05 && ts % 2 === 0) halo.line(tint, a * 0.2 * resolved, hair * 3, A.p.x, A.p.y, B.p.x, B.p.y)
   }
   var profiles = [[1, 0, 0], [0, 1, 0], [1, 0, 0.36], [1, 0, -0.36], [0, 1, 0.4], [0, 1, -0.4]]
   var profA = 0.13 + (ok ? 0.3 * bump(rt, 300, 700) + 0.1 * seg(rt, 600, 900) : 0)
@@ -2291,6 +2303,12 @@ function holoPoints() {
 
 // Iso-depth contours of the relief, by marching squares. Static geometry in
 // face space; the pose is applied per frame.
+function holoDenseContours() {
+  var lv = []
+  for (var i = 0; i < 14; i++) lv.push(0.05 + i * 0.047)
+  return reliefContours("holoTD", 22, 30, lv, true)
+}
+
 function holoContours() {
   return reliefContours("holoT", 20, 28, [0.12, 0.22, 0.32, 0.41, 0.49, 0.56, 0.62, 0.67], false)
 }
@@ -2736,16 +2754,16 @@ function paintHolo(ctx, size, spec) {
       cpts.push({ x: PX.x + chX, y: PX.y + chY })
       rpts.push({ x: PX.x - chX, y: PX.y - chY })
       var da = clamp01((Q.z + 0.12) / 0.62)
-      var shadeK = L[sj].length > 3 ? 0.45 + 0.9 * L[sj][3] : 1
-      var a = baseA * (0.1 + 0.9 * Math.pow(da, 1.2)) * shadeK * flick + bandBoost(y0) * boot
+      var shadeK = L[sj].length > 3 ? 0.2 + 1.1 * L[sj][3] : 1
+      var a = baseA * 0.62 * (0.1 + 0.9 * Math.pow(da, 1.2)) * shadeK * flick + bandBoost(y0) * boot
       if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
       al.push(a)
       cal.push(a * 0.32)
       ral.push(a * 0.24)
     }
-    // The offset copy rides every other slice; that is enough to read as
+    // The offset copy rides every third slice; that is enough to read as
     // colour fringing at a fraction of the cost.
-    if (!compact && chroma > 0.02 && ln < HOLO_SLICES && ln % 2 === 0) {
+    if (!compact && chroma > 0.02 && ln < HOLO_SLICES && ln % 3 === 0) {
       strip(crisp, ROLE_FG, fine, cpts, cal)
       // The opposite fringe in the error colour, which is what makes the
       // split read as chromatic. A miss keeps only the foreground fringe.
@@ -2757,18 +2775,19 @@ function paintHolo(ctx, size, spec) {
 
   // Iso-depth contours: the relief as a topographic map on the mask.
   if (!compact) {
-    var topo = holoContours()
+    var topo = holoDenseContours()
     for (var ts = 0; ts < topo.segs.length; ts++) {
       var S = topo.segs[ts]
       var A0 = project([S[0], S[1], S[4]]), B0 = project([S[2], S[3], S[4]])
       var casc = ok ? bump(rt, 250 + (topo.levels - S[5]) * 45, 600 + (topo.levels - S[5]) * 45) : 0
-      var ca = (0.32 + 0.6 * casc + 0.18 * solid) * flick * clamp01((A0.z + 0.1) / 0.5) + bandBoost(A0.y) * 0.5
+      var ca = (0.42 + 0.5 * casc + 0.3 * solid) * flick * clamp01((A0.z + 0.1) / 0.5) + bandBoost(A0.y) * 0.5
       if (bad && hash(ts * 3 + 1) < frag) continue
       var ax = A0.x + glitchX(A0.x, A0.y), bx = B0.x + glitchX(B0.x, B0.y)
       var AP = toPx(ax, A0.y), BP = toPx(bx, B0.y)
-      crisp.line(tint, ca, fine, AP.x, AP.y, BP.x, BP.y)
+      crisp.line(tint, ca, fine * 1.3, AP.x, AP.y, BP.x, BP.y)
+      if (ts % 3 === 0) halo.line(tint, ca * 0.16, hair * 3, AP.x, AP.y, BP.x, BP.y)
     }
-    crisp.flush()
+    flush()
   }
 
   // Vertex cloud: flares as the lock starts, then fuses into the mesh.
@@ -2808,7 +2827,7 @@ function paintHolo(ctx, size, spec) {
     outline.push([OP.x, OP.y])
     choutline.push([OP.x + chX * 1.5, OP.y + chY * 1.5])
   }
-  var outA = (0.5 + 0.35 * solid + 0.15 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
+  var outA = (0.3 + 0.2 * solid + 0.15 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
   if (!compact && chroma > 0.02) crisp.poly(ROLE_FG, outA * 0.3, fine, choutline)
   if (bad && frag > 0.05) {
     for (var od = 0; od < 48; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
