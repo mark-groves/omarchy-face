@@ -150,7 +150,7 @@ check('scanning is a dot cloud', () => {
 })
 
 check('a settled recognised face has no dots left on it', () => {
-  for (const elapsed of [1200, 1500, 1800]) {
+  for (const elapsed of [1500, 1900, 2200]) {
     assert.strictEqual(dots(ops('recognized', elapsed)), 0, 'dots still painted at ' + elapsed + ' ms')
   }
 })
@@ -176,7 +176,7 @@ check('a result eases out of the pose it was entered from', () => {
 })
 
 check('a miss stays a broken cloud rather than resolving', () => {
-  assert.ok(dots(ops('notRecognized', 820)) > 50, 'the miss should not resolve into a clean face')
+  assert.ok(dots(ops('notRecognized', holdMs('notRecognized'))) > 50, 'the miss should not resolve into a clean face')
 })
 
 check('the card degrades to a vector glyph below 48 px', () => {
@@ -211,8 +211,8 @@ check('a frame stays inside the host op budget', () => {
 // --- the timing contract the host reads ------------------------------------
 
 check('the host is told how long to hold each state', () => {
-  assert.strictEqual(holdMs('recognized'), 1500)
-  assert.strictEqual(holdMs('notRecognized'), 1200)
+  assert.strictEqual(holdMs('recognized'), 1900)
+  assert.strictEqual(holdMs('notRecognized'), 1800)
   assert.strictEqual(holdMs('scanning'), 0)
   assert.strictEqual(holdMs('anything else'), 0)
 })
@@ -349,16 +349,16 @@ for (const style of exported.STYLES) {
   })
 
   check(style + ': a settled recognised face is strokes only, no dots', () => {
-    for (const elapsed of [1200, 1500, 1800]) {
+    for (const elapsed of [1500, 1900, 2200]) {
       const list = styled(style, 'recognized', elapsed)
       assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
       assert.ok(strokes(list) > 3, 'expected a drawn face at ' + elapsed)
     }
   })
 
-  check(style + ': a miss opens with a fault strobe, then paints in the error role only', () => {
-    assert.ok(styled(style, 'notRecognized', 0).some(o => o[1] === 0), 'expected the strobe to open in the accent')
-    for (const elapsed of [300, 700, 1200]) {
+  check(style + ': a miss attempts the lock in the accent, then paints in the error role only', () => {
+    assert.ok(styled(style, 'notRecognized', 200).some(o => o[1] === 0), 'expected the attempt in the accent')
+    for (const elapsed of [800, 1200, 1800]) {
       const accent = styled(style, 'notRecognized', elapsed).filter(o => o[1] === 0)
       assert.strictEqual(accent.length, 0, 'accent ops in a miss at ' + elapsed)
     }
@@ -375,6 +375,15 @@ for (const style of exported.STYLES) {
       for (const state of STATES) {
         const drawn = styled(style, state, 400, size).reduce((n, o) => n + (o[0] === 0 ? o[4].length : 1), 0)
         assert.ok(drawn > 3, style + ' ' + state + ' at ' + size + ' px painted nothing')
+      }
+    }
+  })
+
+  check(style + ': every frame at the 116 px slot stays inside the replay budget', () => {
+    for (const state of STATES) {
+      for (let elapsed = 0; elapsed <= 2600; elapsed += 20) {
+        const c = replayCost(styled(style, state, elapsed, 116, 5000 + elapsed))
+        assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
       }
     }
   })
@@ -396,8 +405,8 @@ for (const style of exported.STYLES) {
   })
 }
 
-check('the HUD also paints a miss in the error role only after its strobe', () => {
-  for (const elapsed of [300, 700, 1200]) {
+check('the HUD also paints a miss in the error role only once the attempt fails', () => {
+  for (const elapsed of [800, 1200, 1800]) {
     assert.strictEqual(styled('hud', 'notRecognized', elapsed).filter(o => o[1] === 0).length, 0)
   }
 })
