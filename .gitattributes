@@ -1,0 +1,2 @@
+# The installed face style is applied through this filter; see bin/omarchy-face-style.
+FaceCardFrame.js filter=omarchy-face-style
