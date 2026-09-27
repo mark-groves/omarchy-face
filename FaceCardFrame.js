@@ -1918,7 +1918,8 @@ function paintRadar(ctx, size, spec) {
     glowLine(halo, crisp, tint, 0.95 * armK, thin, cx, cy, cx + Math.cos(arm) * R * 0.98, cy + Math.sin(arm) * R * 0.98)
     if (!compact) {
       var gate = R * (0.1 + 0.85 * frac(t / 1400))
-      crisp.arc(tint, 0.8 * armK, hair, cx, cy, gate, arm - 0.09 * dir - 0.04, arm + 0.04)
+      var tail = arm - 0.13 * dir, lead = arm + 0.04 * dir
+      crisp.arc(tint, 0.8 * armK, hair, cx, cy, gate, Math.min(tail, lead), Math.max(tail, lead))
     }
     flush()
   }

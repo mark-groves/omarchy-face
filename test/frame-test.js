@@ -411,5 +411,13 @@ check('the HUD also paints a miss in the error role only once the attempt fails'
   }
 })
 
+check('the radar range strobe keeps painting once a miss reverses the sweep', () => {
+  const strobeArc = (c) => c[0] === 3 && Math.abs(c[5] - c[4] - 0.17) < 1e-9
+  for (const elapsed of [800, 1200, 1800]) {
+    const list = styled('radar', 'notRecognized', elapsed, 240, 5000 + elapsed)
+    assert.ok(list.some(o => o[0] === 0 && o[4].some(strobeArc)), 'no range strobe at ' + elapsed)
+  }
+})
+
 console.log(failures === 0 ? '\nall frame tests passed' : '\n' + failures + ' frame test(s) failed')
 process.exit(failures === 0 ? 0 : 1)
