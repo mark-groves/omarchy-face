@@ -468,6 +468,15 @@ for (const style of exported.STYLES) {
     }
   })
 
+  check(style + ' level 2: the fault strobe stays in the accent and error pair', () => {
+    for (let elapsed = 0; elapsed <= 1200; elapsed += 5) {
+      const list = paintOps(lumen(style, 'notRecognized', elapsed))
+      if (!list.some(o => o[1] === 2)) continue
+      const theme = list.filter(o => o[1] >= 3)
+      assert.strictEqual(theme.length, 0, 'theme roles ' + [...new Set(theme.map(o => o[1]))] + ' in a failed miss at ' + elapsed)
+    }
+  })
+
   check(style + ' level 2: a settled recognised face is strokes only, no dots', () => {
     for (const elapsed of [1500, 1900, 2200]) {
       const list = lumen(style, 'recognized', elapsed)

@@ -71,6 +71,9 @@ var LUMEN = false
 // the foreground they have always been. Set per frame in paintInto.
 var FG2 = 1
 var FG3 = 1
+// True once a miss has failed, so the fault strobe's accent frames stay in the
+// accent and error pair. Set per frame in paintInto.
+var MISSING = false
 
 // Path commands, all numeric:
 //   [0, x, y]                 moveTo
@@ -447,12 +450,12 @@ function pen(ctx, gain, halo) {
 
 function haloPen(ctx) { return pen(ctx, GLOW_HALO, true) }
 
-// The white-hot core colour for a stroke in `role`. A miss stays in the
-// error role, and a level-1 host has no hot role at all.
-function hotOf(role) { return role === ROLE_ERROR ? ROLE_ERROR : ROLE_HOT }
+// The white-hot core colour for a stroke in `role`. A failed miss keeps its
+// own role, and a level-1 host has no hot role at all.
+function hotOf(role) { return MISSING || role === ROLE_ERROR ? role : ROLE_HOT }
 // The theme's second and third hues, except in a miss.
-function altOf(role) { return role === ROLE_ERROR ? ROLE_ERROR : ROLE_ALT }
-function alt2Of(role) { return role === ROLE_ERROR ? ROLE_ERROR : ROLE_ALT2 }
+function altOf(role) { return MISSING || role === ROLE_ERROR ? role : ROLE_ALT }
+function alt2Of(role) { return MISSING || role === ROLE_ERROR ? role : ROLE_ALT2 }
 
 // A line with bloom: a wide faint pass under the crisp one. Two pens keep the
 // halo under every crisp stroke of the same layer.
@@ -3311,6 +3314,7 @@ function paintInto(ctx, size, spec) {
     }
   }
   var missing = s.state === "notRecognized"
+  MISSING = missing
   FG2 = LUMEN && !missing ? ROLE_ALT : ROLE_FG
   FG3 = LUMEN && !missing ? ROLE_ALT2 : ROLE_FG
   if (style === "radar") paintRadar(ctx, size, s)
