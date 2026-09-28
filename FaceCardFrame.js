@@ -1725,6 +1725,13 @@ function chevron(p, role, a, w, cx, cy, ang, r, depth, wing) {
   ])
 }
 
+// The mask's ellipsoid, which every style lays its relief on. Declared ahead
+// of the radar, which is the first style to read it.
+var HOLO_A = 0.60
+var HOLO_B = 0.78
+var HOLO_C = 0.55
+var HOLO_CY = -0.06
+
 // --- Phosphor Radar -------------------------------------------------------------
 //
 // A plan-position scope. The sweep arm refreshes a dense topology of returns
@@ -2263,11 +2270,6 @@ function paintRadarReadouts(p, size, state, t, rt, boot, tint, arm, returns, age
 // beams and a volumetric cone, and turns far enough that the brow, nose and
 // jaw show in the slices and the skull behind them shows in the outline.
 
-// The mask's ellipsoid, which the HUD and the radar still lay their relief on.
-var HOLO_A = 0.60
-var HOLO_B = 0.78
-var HOLO_C = 0.55
-var HOLO_CY = -0.06
 // The projected rig is drawn a little under the disc radius so the crown
 // clears the corner readouts.
 var HOLO_K = 0.86
