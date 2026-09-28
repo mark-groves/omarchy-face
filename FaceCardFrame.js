@@ -389,22 +389,24 @@ function pen(ctx, gain, halo) {
   var groups = {}
   var gk = gain === undefined ? GLOW_CRISP : gain
 
+  // Keyed by the quantised steps packed into one integer: this runs for
+  // every mesh edge, and a string key built from floats was most of a frame.
   function group(role, a, w) {
-    var qa = Math.round(clamp01(a) * 32) / 32
-    if (qa <= 0) return null
-    var qg = 0
+    var ia = Math.round(clamp01(a) * 32)
+    if (ia <= 0) return null
+    var ig = 0
     if (LUMEN) {
-      qg = Math.round(clamp01(a * gk) * 16) / 16
+      ig = Math.round(clamp01(a * gk) * 16)
       if (halo) {
-        if (qg <= 0) return null
-        qa = 0
+        if (ig <= 0) return null
+        ia = 0
       }
     }
-    var qw = Math.max(0.25, Math.round(w * 4) / 4)
-    var key = role + ":" + qa + ":" + qw + ":" + qg
+    var iw = Math.max(1, Math.round(w * 4))
+    var key = role + 8 * (ia + 33 * (ig + 17 * iw))
     var g = groups[key]
     if (!g) {
-      g = groups[key] = { role: role, a: qa, w: qw, g: qg, cmds: [] }
+      g = groups[key] = { role: role, a: ia / 32, w: iw / 4, g: ig / 16, cmds: [] }
       order.push(g)
     }
     return g
