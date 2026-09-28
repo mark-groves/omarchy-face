@@ -1,0 +1,39 @@
+name: apply ease fix
+
+on:
+  push:
+    branches:
+      - cursor/face-card-visual-e0e2
+    paths:
+      - .github/workflows/apply-ease-fix.yml
+      - apply-ease.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: cursor/face-card-visual-e0e2
+      - name: apply and test
+        run: |
+          set -euo pipefail
+          if grep -q 'if (k <= 0) return 0' FaceCardFrame.js; then
+            echo already fixed
+            exit 0
+          fi
+          echo "0622f9a73538a8d049eb6364130f066c96cf625084967b2f0382e10ae2117a07  apply-ease.py" | sha256sum -c -
+          python3 apply-ease.py
+          git hash-object FaceCardFrame.js | grep -qx fb46e2d4f625e1d7c17a64710a408d7f2042e04c
+          git hash-object test/frame-test.js | grep -qx 43db674f682cee092605a3e2a7df9ff9f9c41d89
+          node test/frame-test.js
+          git config user.name "Mark Groves"
+          git config user.email "149283429+mark-groves@users.noreply.github.com"
+          git rm -f apply-ease.py
+          git add -- FaceCardFrame.js test/frame-test.js
+          git commit -m "fix: start the lock ease at rest"
+          git push origin HEAD:cursor/face-card-visual-e0e2
