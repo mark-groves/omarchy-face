@@ -61,8 +61,14 @@ check('reads no ambient state', () => {
 
 const body = source.replace(/^\.pragma library\s*$/m, '')
 const exported = {}
-new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLE = STYLE; __out.STYLES = STYLES;')(exported)
-const { frame, holdMs } = exported
+new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLE = STYLE; __out.STYLES = STYLES; __out.easeOutBack = easeOutBack;')(exported)
+const { frame, holdMs, easeOutBack } = exported
+
+check('a lock ease starts at rest and ends seated', () => {
+  assert.strictEqual(easeOutBack(0), 0)
+  assert.strictEqual(easeOutBack(1), 1)
+  assert.ok(easeOutBack(0.7) > 1, 'the back ease still overshoots before it settles')
+})
 
 check('the public API takes no context argument', () => {
   assert.strictEqual(frame.length, 2, 'frame(size, spec) should take exactly two arguments')

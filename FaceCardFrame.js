@@ -125,7 +125,16 @@ function seg(ms, a, b) { return clamp01((ms - a) / (b - a)) }
 
 function easeOutCubic(k) { var f = 1 - k; return 1 - f * f * f }
 function easeInOutCubic(k) { return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2 }
-function easeOutBack(k) { var c = 1.9; var f = k - 1; return 1 + c * f * f * f + 1.2 * f * f }
+function easeOutBack(k) {
+  // c3 is c1 + 1 so the curve is 0 at the start. A smaller cubic coefficient
+  // leaves the gesture already partway seated when the lock begins.
+  if (k <= 0) return 0
+  if (k >= 1) return 1
+  var c1 = 1.2
+  var c3 = c1 + 1
+  var f = k - 1
+  return 1 + c3 * f * f * f + c1 * f * f
+}
 
 // One-shot bump: rises over the first third, falls over the rest.
 function bump(ms, a, b) {
