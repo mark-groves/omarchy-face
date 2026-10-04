@@ -18,7 +18,7 @@ Without `--enable`, or if the plugin is later disabled, the first-party card kee
 
 The card ships three styles. The Depth Lattice HUD is the default.
 
-All three are designed for the large card: 220 px on the lock screen, the polkit prompt and the sudo face overlay. On a host that paints op level 2 (the Omarchy fork with the large card), every style is drawn as light rather than paint: strokes and dots bloom through a GPU blur, crossing strokes add up and run hot, key strokes carry a white-hot core, and secondary instrumentation takes the theme's second and third hues. On an older host the same module draws its original frame, with faked halos in the accent, foreground and error colours.
+All three are designed for the large card: 220 px on the lock screen, the polkit prompt and the sudo face overlay. On a host that paints op level 2 (the Omarchy fork with the large card), every style is drawn as an instrument with three tiers of colour. The live signal (rings, scan plane, sweep arm, lock rim, reticles) is in the accent, and only its edges light the GPU bloom, so the glow sits on the lit strokes instead of hazing the card. Graduations, grids, scales and the cage are engraved in the foreground, as ink. The theme's second and third hues are kept to a few small data channels. A faint plate of the foreground sits under the instrument: a face plate on a light card, a lifted glass on a dark one. Crossing strokes add up and run hot on a dark card, and key strokes carry a white-hot core. On an older host the same module draws its original frame, with faked halos in the accent, foreground and error colours.
 
 | Style | Name | Look |
 | --- | --- | --- |
@@ -52,9 +52,9 @@ What level 2 adds to every style:
 
 | Style | Bloom and additive light | Theme's second and third hues | White-hot core |
 | --- | --- | --- | --- |
-| HUD | About 480 depth dots (twice the level-1 lattice) and every ring bloom; the locking cloud accumulates light | Dashed ring, vernier, spinners, second scanner, low spectrum bars, polar grid, telemetry | Scan plane, data ring, lock rim, shockwaves, dots on the scan crest |
-| Radar | Returns, afterglow wedge, range rings and pings bloom | Returns decay from the accent into the second hue, like a two-colour phosphor; graticule and sector scanner | Fresh returns behind the arm and returns under each ping |
-| Holo | Slices, vertex cloud, cone and emitter bloom | The counter-turning cage, and the chromatic fringe in two hues | The rim light where the head turns away, and shimmering vertices |
+| HUD | About 480 depth dots (twice the level-1 lattice); the data ring, scan plane, lock rim and shockwaves bloom, as do the dots on the scan crest and the locking cloud | The oscilloscope trace and the link indicator in the corner readouts | Scan plane, data ring, lock rim, shockwaves, dots on the scan crest |
+| Radar | The sweep arm, lock ring, pings and fresh returns bloom | The oscilloscope trace and the link indicator in the corner readouts | Fresh returns behind the arm and returns under each ping |
+| Holo | The emitter, the rim light and shimmering vertices bloom | The chromatic fringe in two hues, plus the corner trace and indicator | The rim light where the head turns away, and shimmering vertices |
 
 A miss still paints only in the error colour once the attempt fails.
 

@@ -460,10 +460,15 @@ for (const style of exported.STYLES) {
     }
   })
 
-  check(style + ' level 2: the frame actually glows, adds light and uses the theme roles', () => {
+  // The bloom is laid down as a coloured haze on a light card, so a frame
+  // where most strokes glow smears into a pale disc. Glow is for lit edges.
+  check(style + ' level 2: the frame glows on its lit edges only, adds light and uses the theme roles', () => {
     const list = lumen(style, 'scanning', 3000)
     assert.ok(list.some(o => o[0] === OP_BLEND && o[1] === 1), 'no additive blend')
-    assert.ok(list.filter(o => o[0] !== OP_BLEND && glowOf(o) > 0).length > 20, 'hardly anything glows')
+    const ops = paintOps(list)
+    const glowing = ops.filter(o => glowOf(o) > 0).length
+    assert.ok(glowing >= 4, 'hardly anything glows')
+    assert.ok(glowing < ops.length * 0.5, 'the whole frame glows: ' + glowing + ' of ' + ops.length)
     for (const role of [3, 4, 5]) assert.ok(list.some(o => o[0] !== OP_BLEND && o[1] === role), 'role ' + role + ' unused')
   })
 
