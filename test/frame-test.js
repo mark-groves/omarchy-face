@@ -421,8 +421,8 @@ for (const style of exported.STYLES) {
 // that predates level 2.
 const GLOW_AT = { 0: 5, 1: 7, 2: 10 }
 const OP_BLEND = 3
-function lumen(style, state, elapsed, size, clock) {
-  return frame(size === undefined ? CARD : size, { state, elapsed, clock: clock === undefined ? 5000 + elapsed : clock, style, host: 2 })
+function lumen(style, state, elapsed, size, clock, host) {
+  return frame(size === undefined ? CARD : size, { state, elapsed, clock: clock === undefined ? 5000 + elapsed : clock, style, host: host === undefined ? 2 : host })
 }
 const paintOps = (list) => list.filter(o => o[0] !== OP_BLEND)
 const glowOf = (o) => o.length > GLOW_AT[o[0]] ? o[GLOW_AT[o[0]]] : 0
@@ -441,12 +441,13 @@ check('without spec.host a frame is pure level 1: no blend ops, no glow, no role
   }
 })
 
-for (const style of exported.STYLES) {
-  check(style + ' level 2: numbers only, roles 0..5, alpha and glow in range, blend ops well formed', () => {
+for (const level of [2, 3]) for (const style of exported.STYLES) {
+  const at = (st, state, elapsed, size, clock) => lumen(st, state, elapsed, size, clock, level)
+  check(style + ' level ' + level + ': numbers only, roles 0..5, alpha and glow in range, blend ops well formed', () => {
     for (const state of STATES) {
       for (const elapsed of [0, 300, 700, 1200, 1900]) {
         for (const size of [CARD, 120, 30]) {
-          const list = lumen(style, state, elapsed, size)
+          const list = at(style, state, elapsed, size)
           assertNumeric(list, style + ' ' + state + '@' + elapsed)
           for (const o of list) {
             if (o[0] === OP_BLEND) { assert.ok(o.length === 2 && (o[1] === 0 || o[1] === 1), 'bad blend op'); continue }
@@ -462,8 +463,8 @@ for (const style of exported.STYLES) {
 
   // The bloom is laid down as a coloured haze on a light card, so a frame
   // where most strokes glow smears into a pale disc. Glow is for lit edges.
-  check(style + ' level 2: the frame glows on its lit edges only, adds light and uses the theme roles', () => {
-    const list = lumen(style, 'scanning', 3000)
+  check(style + ' level ' + level + ': the frame glows on its lit edges only, adds light and uses the theme roles', () => {
+    const list = at(style, 'scanning', 3000)
     assert.ok(list.some(o => o[0] === OP_BLEND && o[1] === 1), 'no additive blend')
     const ops = paintOps(list)
     const glowing = ops.filter(o => glowOf(o) > 0).length
@@ -472,46 +473,66 @@ for (const style of exported.STYLES) {
     for (const role of [3, 4, 5]) assert.ok(list.some(o => o[0] !== OP_BLEND && o[1] === role), 'role ' + role + ' unused')
   })
 
-  check(style + ' level 2: a miss paints only in the error colour once the attempt fails', () => {
+  check(style + ' level ' + level + ': a miss paints only in the error colour once the attempt fails', () => {
     for (const elapsed of [800, 1200, 1800]) {
-      const off = paintOps(lumen(style, 'notRecognized', elapsed)).filter(o => o[1] === 0 || o[1] >= 3)
+      const off = paintOps(at(style, 'notRecognized', elapsed)).filter(o => o[1] === 0 || o[1] >= 3)
       assert.strictEqual(off.length, 0, 'accent or theme roles in a miss at ' + elapsed)
     }
   })
 
-  check(style + ' level 2: the fault strobe stays in the accent and error pair', () => {
+  check(style + ' level ' + level + ': the fault strobe stays in the accent and error pair', () => {
     for (let elapsed = 0; elapsed <= 1200; elapsed += 5) {
-      const list = paintOps(lumen(style, 'notRecognized', elapsed))
+      const list = paintOps(at(style, 'notRecognized', elapsed))
       if (!list.some(o => o[1] === 2)) continue
       const theme = list.filter(o => o[1] >= 3)
       assert.strictEqual(theme.length, 0, 'theme roles ' + [...new Set(theme.map(o => o[1]))] + ' in a failed miss at ' + elapsed)
     }
   })
 
-  check(style + ' level 2: a settled recognised face is strokes only, no dots', () => {
+  check(style + ' level ' + level + ': a settled recognised face is strokes only, no dots', () => {
     for (const elapsed of [1500, 1900, 2200]) {
-      const list = lumen(style, 'recognized', elapsed)
+      const list = at(style, 'recognized', elapsed)
       assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
       assert.ok(strokes(list) > 3)
     }
   })
 
-  check(style + ' level 2: deterministic, clock-driven, and eases out of its entry pose', () => {
-    assert.deepStrictEqual(lumen(style, 'recognized', 430), lumen(style, 'recognized', 430))
-    assert.notDeepStrictEqual(lumen(style, 'scanning', 3000, CARD, 3300), lumen(style, 'scanning', 3000, CARD, 4400))
-    assert.notDeepStrictEqual(lumen(style, 'recognized', 200, CARD, 3200), lumen(style, 'recognized', 200, CARD, 4700))
+  check(style + ' level ' + level + ': deterministic, clock-driven, and eases out of its entry pose', () => {
+    assert.deepStrictEqual(at(style, 'recognized', 430), at(style, 'recognized', 430))
+    assert.notDeepStrictEqual(at(style, 'scanning', 3000, CARD, 3300), at(style, 'scanning', 3000, CARD, 4400))
+    assert.notDeepStrictEqual(at(style, 'recognized', 200, CARD, 3200), at(style, 'recognized', 200, CARD, 4700))
   })
 
-  check(style + ' level 2: every frame on the large card stays inside the replay and glow budgets', () => {
+  check(style + ' level ' + level + ': every frame on the large card stays inside the replay and glow budgets', () => {
     for (const state of STATES) {
       for (let elapsed = 0; elapsed <= 2600; elapsed += 20) {
-        const list = lumen(style, state, elapsed)
+        const list = at(style, state, elapsed)
         const c = replayCost(list)
         assert.ok(c.ops < REPLAY_OPS && c.cmds < REPLAY_CMDS, style + ' ' + state + '@' + elapsed + ' replays ' + c.ops + ' ops, ' + c.cmds + ' commands')
         assert.ok(list.filter(o => o[0] !== OP_BLEND && glowOf(o) > 0).length < 1200, 'glow budget blown')
         for (const o of list) if (o[0] === 0) assert.ok(o[4].length < 600, 'path command budget blown')
       }
     }
+  })
+}
+
+
+// Level 3: the host paints the card on its own dark glass. Structure is drawn
+// in the frame's tint there, so the only foreground left is readout ink.
+for (const style of exported.STYLES) {
+  check(style + ' level 3: structure is drawn in the tint, the foreground is left to the numerals', () => {
+    for (const elapsed of [1500, 3000]) {
+      const fg2 = paintOps(lumen(style, 'scanning', elapsed)).filter(o => o[1] === 1).length
+      const fg3 = paintOps(lumen(style, 'scanning', elapsed, CARD, undefined, 3)).filter(o => o[1] === 1).length
+      assert.ok(fg3 > 0, 'no readout ink on glass')
+      assert.ok(fg3 * 3 < fg2, 'foreground structure left on glass: ' + fg3 + ' ops against ' + fg2 + ' on level 2')
+    }
+  })
+
+  check(style + ' level 3 leaves a level-2 frame exactly as it was', () => {
+    const before = JSON.stringify(lumen(style, 'scanning', 1700))
+    lumen(style, 'scanning', 1700, CARD, undefined, 3)
+    assert.strictEqual(JSON.stringify(lumen(style, 'scanning', 1700)), before)
   })
 }
 
