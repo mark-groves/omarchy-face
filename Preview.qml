@@ -248,7 +248,7 @@ ShellRoot {
       blur: 1.0
       blurMax: 48
       blurMultiplier: 0.6
-      opacity: root.dark ? 0.95 : 0.45
+      opacity: root.dark ? 0.95 : 0.85
     }
     MultiEffect {
       anchors.fill: parent
@@ -258,7 +258,7 @@ ShellRoot {
       blurEnabled: true
       blur: 0.55
       blurMax: 12
-      opacity: root.dark ? 1 : 0.5
+      opacity: 1
     }
     Canvas {
       id: sharp
