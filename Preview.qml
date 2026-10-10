@@ -13,9 +13,10 @@ import "FaceCardFrame.js" as FaceCard
 // chain reaches the password field on a credential surface.
 //
 // `paintOps` below mirrors the host painter (shell/Commons/FaceCardPainter.js
-// in the Omarchy fork) at op level 2: glow on a blurred bloom layer, additive
-// blending, and roles 3..5 derived from the theme. Colours come from the
-// active Omarchy theme's colors.toml when there is one.
+// in the Omarchy fork) at op level 3: the card on a dark glass panel, glow on
+// a blurred bloom layer, additive blending, and all six roles resolved against
+// the glass from the theme. Colours come from the active Omarchy theme's
+// colors.toml when there is one.
 //
 //   quickshell -p Preview.qml
 ShellRoot {
@@ -26,7 +27,7 @@ ShellRoot {
   property real enteredAt: 0
   property bool sequence: true
   // Op level the harness paints, as the host would report it in spec.host.
-  property int host: 2
+  property int host: 3
   // The harness passes the style per frame as spec.style. An installed card
   // takes it from the STYLE line instead (bin/omarchy-face-style).
   property string style: Quickshell.env("FACE_STYLE") || "hud"
@@ -58,8 +59,10 @@ ShellRoot {
   readonly property color accent: theme.accent || theme.color4 || "#7aa2f7"
   readonly property color foreground: theme.foreground || theme.color7 || "#c0caf5"
   readonly property color errorColor: theme.red || theme.color1 || "#f7768e"
-  readonly property bool dark: luminance(theme.background) < 0.5
-  readonly property var roles: deriveRoles()
+  readonly property bool glass: root.host >= 3
+  readonly property var glassTheme: deriveGlass()
+  readonly property bool dark: root.glass || luminance(theme.background) < 0.5
+  readonly property var roles: root.glass ? root.glassTheme.roles : deriveRoles()
 
   property real paintMs: 0
   property int opCount: 0
@@ -149,6 +152,48 @@ ShellRoot {
     return [a, f, e, hot, second, third]
   }
 
+  // WCAG contrast, for lifting colours off the glass as FaceTheme.glass does.
+  function relLum(c) {
+    function lin(v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+    return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+  }
+  function contrast(a, b) {
+    var la = root.relLum(a), lb = root.relLum(b)
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+  }
+  function liftOver(c, bg, target) {
+    var out = Qt.color(c)
+    var l = out.hslLightness
+    while (root.contrast(out, bg) < target && l < 0.94) {
+      l = Math.min(0.94, l + 0.02)
+      out = Qt.hsla(out.hslHue, out.hslSaturation, l, 1)
+    }
+    return out
+  }
+
+  // A short copy of the host's FaceTheme.glass: the panel is the theme's
+  // darker base tinted toward the accent and deepened; every role is lifted
+  // until it reads on it.
+  function deriveGlass() {
+    var a = Qt.color(root.accent), f = Qt.color(root.foreground), b = Qt.color(root.theme.background || root.foreground)
+    var darkBase = root.relLum(b) <= root.relLum(f) ? b : f
+    var lightBase = root.relLum(b) <= root.relLum(f) ? f : b
+    var t = Qt.tint(darkBase, Qt.rgba(a.r, a.g, a.b, 0.14))
+    var panel = Qt.hsla(t.hslHue, Math.min(t.hslSaturation, 0.32),
+      Math.min(darkBase.hslLightness, Math.max(0.05, Math.min(0.1, t.hslLightness * 0.8))), 1)
+    var e = Qt.tint(darkBase, Qt.rgba(a.r, a.g, a.b, 0.3))
+    var edge = Qt.hsla(e.hslHue, e.hslSaturation, Math.max(0.16, Math.min(0.24, e.hslLightness)), 1)
+    var base = root.deriveRoles()
+    var lit = root.liftOver(a, panel, 6)
+    var ink = root.liftOver(lightBase, panel, 11)
+    var hot = Qt.tint(lit, Qt.rgba(ink.r, ink.g, ink.b, 0.55))
+    hot = Qt.hsla(hot.hslHue, hot.hslSaturation, Math.min(0.94, hot.hslLightness + (1 - hot.hslLightness) * 0.35), 1)
+    return {
+      panel: panel, edge: edge,
+      roles: [lit, ink, root.liftOver(root.errorColor, panel, 5), hot, root.liftOver(base[4], panel, 5), root.liftOver(base[5], panel, 5)]
+    }
+  }
+
   function roleColor(role, alpha) {
     var c = role >= 1 && role <= 5 && Math.floor(role) === role ? root.roles[role] : root.roles[0]
     return Qt.rgba(c.r, c.g, c.b, Math.max(0, Math.min(1, alpha)))
@@ -219,9 +264,22 @@ ShellRoot {
     width: root.side
     height: root.side
 
+    Rectangle {
+      anchors.fill: parent
+      visible: root.glass
+      radius: Math.round(root.side * 0.045)
+      border.width: 1
+      border.color: root.glassTheme.edge
+      gradient: Gradient {
+        GradientStop { position: 0; color: Qt.tint(root.glassTheme.panel, Qt.alpha(root.glassTheme.edge, 0.55)) }
+        GradientStop { position: 0.45; color: root.glassTheme.panel }
+        GradientStop { position: 1; color: root.glassTheme.panel }
+      }
+    }
+
     function refresh() {
       var began = measure ? Date.now() : 0
-      card.ops = FaceCard.frame(root.side, { state: state_, clock: root.clock, elapsed: elapsed, style: root.style, host: root.host >= 2 ? 2 : undefined })
+      card.ops = FaceCard.frame(root.side, { state: state_, clock: root.clock, elapsed: elapsed, style: root.style, host: root.host >= 2 ? root.host : undefined })
       sharp.requestPaint()
       if (root.host >= 2) glow.requestPaint()
       if (measure) {
@@ -341,9 +399,9 @@ ShellRoot {
           }
         }
         Chip {
-          label: root.host >= 2 ? "host level 2: glow" : "host level 1: no glow"
+          label: root.host >= 3 ? "host level 3: glass" : (root.host === 2 ? "host level 2: glow" : "host level 1: no glow")
           on: root.host >= 2
-          onPicked: root.host = root.host >= 2 ? 1 : 2
+          onPicked: root.host = root.host >= 3 ? 1 : root.host + 1
         }
       }
 

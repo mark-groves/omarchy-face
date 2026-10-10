@@ -18,7 +18,11 @@ Without `--enable`, or if the plugin is later disabled, the first-party card kee
 
 The card ships three styles. The Depth Lattice HUD is the default.
 
-All three are designed for the large card: 220 px on the lock screen, the polkit prompt and the sudo face overlay. On a host that paints op level 2 (the Omarchy fork with the large card), every style is drawn as an instrument with three tiers of colour. The live signal (rings, scan plane, sweep arm, lock rim, reticles) is in the accent, and only its edges light the GPU bloom, so the glow sits on the lit strokes instead of hazing the card. Graduations, grids, scales and the cage are engraved in the foreground, as ink. The theme's second and third hues are kept to a few small data channels. A faint plate of the foreground sits under the instrument: a face plate on a light card, a lifted glass on a dark one. Crossing strokes add up and run hot on a dark card, and key strokes carry a white-hot core. On an older host the same module draws its original frame, with faked halos in the accent, foreground and error colours.
+All three are designed for the large card: 220 px on the lock screen, the polkit prompt and the sudo face overlay.
+
+On a host that paints op level 3, the card is an instrument display: the host puts it on a dark glass panel derived from the theme, on light and dark themes alike, and resolves every colour against that glass. The instrument is one lit system in the accent. Structure (graduations, grids, scales, the cage) is the dim tier, the live signal (rings, scan plane, sweep arm, lock rim, reticles) is the bright tier with its edges in the bloom, and key strokes carry a white-hot core. Numerals are in ink. The theme's second and third hues are kept to a few small data channels. Once a miss fails, the whole instrument, structure included, turns to the error colour. Crossing strokes add up and run hot on the glass.
+
+On a host that paints op level 2 (the Omarchy fork with the large card), every style is drawn as an instrument with three tiers of colour. The live signal (rings, scan plane, sweep arm, lock rim, reticles) is in the accent, and only its edges light the GPU bloom, so the glow sits on the lit strokes instead of hazing the card. Graduations, grids, scales and the cage are engraved in the foreground, as ink. The theme's second and third hues are kept to a few small data channels. A faint plate of the foreground sits under the instrument: a face plate on a light card, a lifted glass on a dark one. Crossing strokes add up and run hot on a dark card, and key strokes carry a white-hot core. On an older host the same module draws its original frame, with faked halos in the accent, foreground and error colours.
 
 | Style | Name | Look |
 | --- | --- | --- |
@@ -126,7 +130,7 @@ holdMs(state)     -> ms      // how long the host should hold that state
 | `clock` | free-running milliseconds, drives every ambient motion |
 | `elapsed` | milliseconds since `state` was entered |
 | `style` | optional, `"hud"`, `"radar"` or `"holo"`. It overrides the installed style, and unknown values are ignored. Today's host does not send it; the preview does. |
-| `host` | optional, the op level the host paints. `2` unlocks glow, additive blending and roles 3 to 5. Absent means level 1, and the frame is exactly the level-1 frame. |
+| `host` | optional, the op level the host paints. `2` unlocks glow, additive blending and roles 3 to 5. `3` means the host paints the card on its own dark glass and resolves every role against it, so the frame draws its structure in the tint instead of the text colour. Absent means level 1, and the frame is exactly the level-1 frame. |
 
 There are no colours in the spec. Each op carries a role index and the host resolves it against the live theme, so the card follows whatever theme is set and the plugin never chooses a colour:
 
@@ -140,6 +144,8 @@ There are no colours in the spec. Each op carries a role index and the host reso
 | 5 | the next most distinct palette colour | 2 |
 
 The host derives roles 3 to 5 from the theme's `colors.toml` (for example `cyan`, `magenta`, `yellow` or the ANSI colours), never from a hardcoded colour, and never reuses the error colour. A theme without a usable palette gets hues rotated off its accent. Switching themes recolours all six.
+
+At level 3 the host also derives the glass: the theme's darker base (its background on a dark theme, its text colour on a light one), tinted toward the accent and deepened. Role 1 becomes the theme's lighter base as ink, and the accent, error and palette roles are lifted until they read on the glass. Nothing is hardcoded; the glass and all six roles move with the theme.
 
 ### Why it is not a QML Item
 
@@ -176,13 +182,13 @@ cmds entries:
 ## Develop
 
 ```bash
-quickshell -p Preview.qml       # scripted scan / lock / rescan / miss, style chips, host level 1 or 2, the 220 px card
+quickshell -p Preview.qml       # scripted scan / lock / rescan / miss, style chips, host level 1, 2 or 3, the 220 px card
 node test/frame-test.js         # boundary, visual and per-style tests
 bash test/style-switch-test.sh  # the style switch against a real plugin checkout and update
 ```
 
 `Preview.qml` owns its own Canvas and palette and replays the ops itself, mirroring the host painter. It is the reference for how the host drives this plugin.
 
-The tests are the thing to keep green. The boundary checks are why this plugin is allowed to draw on a credential surface at all. The dot-count check is the approved visual: a settled recognised face paints zero dots. The replay-budget checks, run on every 20 ms of every state on the 220 px card at both op levels, keep the dense styles affordable on a software canvas. The level-1 purity check is what keeps the module safe on an older host: without `spec.host` it emits no blend op, no glow value and no role past the error colour.
+The tests are the thing to keep green. The boundary checks are why this plugin is allowed to draw on a credential surface at all. The dot-count check is the approved visual: a settled recognised face paints zero dots. The replay-budget checks, run on every 20 ms of every state on the 220 px card at op levels 2 and 3, keep the dense styles affordable on a software canvas. The level-1 purity check is what keeps the module safe on an older host: without `spec.host` it emits no blend op, no glow value and no role past the error colour.
 
 `Preview.qml` takes its colours from the active Omarchy theme (`~/.local/state/omarchy/current/theme/colors.toml`) when there is one, and falls back to Tokyo Night.

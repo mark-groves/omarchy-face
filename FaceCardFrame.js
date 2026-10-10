@@ -54,6 +54,9 @@ var ROLE_ERROR = 2
 var ROLE_HOT = 3    // the accent pushed toward white: the core of a lit stroke
 var ROLE_ALT = 4    // the theme's most distinct second hue
 var ROLE_ALT2 = 5   // its next most distinct hue
+// Readout numerals. It leaves the module as the foreground: on glass the
+// foreground role is the instrument's structure, so ink needs its own name.
+var ROLE_INK = 6
 
 var OP_PATH = 0   // [OP_PATH, role, alpha, lineWidth, cmds, glow?]
 var OP_RECT = 1   // [OP_RECT, role, alpha, x, y, w, h, glow?]
@@ -64,6 +67,14 @@ var OP_BLEND = 3  // [OP_BLEND, mode], level 2 only: 0 normal, 1 additive
 // on the host's blurred bloom layer), additive blending and roles 3..5, and
 // drops the stacked-stroke halos a level-1 host needs to fake a glow.
 var LUMEN = false
+// Set per frame from spec.host >= 3: the host paints the card on its own dark
+// glass and resolves every role against it. Structure is drawn in the
+// frame's tint there instead of in the foreground, so the instrument is one
+// lit system with numerals in ink, not grey linework over colour.
+var GLASS = false
+// The tint of the frame being painted: the accent, or the error colour once
+// a miss has failed. Set by each style as it starts.
+var TINT = 0
 
 // Structural roles for secondary instrumentation: the foreground, as ink.
 // Graduations, grids and scales read as the instrument's engraving, and the
@@ -471,7 +482,7 @@ function haloPen(ctx) { return pen(ctx, GLOW_HALO, true) }
 // plate on a light card and as a lifted glass on a dark one. One stroke,
 // as wide as the radius, fills the disc.
 function plate(p, cx, cy, R, boot, rim) {
-  if (!LUMEN) return
+  if (!LUMEN || GLASS) return
   p.arc(ROLE_FG, 0.045 * boot, R, cx, cy, R * 0.5, 0, TAU)
   p.arc(ROLE_FG, 0.05 * boot, R * 0.04, cx, cy, R * 0.98, 0, TAU)
   if (rim > 0) p.arc(ROLE_FG, 0.5 * boot, Math.max(0.5, R * 0.006), cx, cy, R * rim, 0, TAU)
@@ -583,6 +594,7 @@ function paintHud(ctx, size, spec) {
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
   var tint = bad ? missTint(rt) : ROLE_ACCENT
+  TINT = tint
 
   // Base stroke weights. Everything scales with the card; the floor keeps
   // hairlines on the pixel grid at the real 116 px slot.
@@ -646,7 +658,7 @@ function paintHud(ctx, size, spec) {
   // --- backplate: scanlines and a faint graticule ----------------------------
   if (!compact) {
     plate(crisp, cx, cy, R, boot, 1.0)
-    var lines = 30
+    var lines = GLASS ? 0 : 30
     for (var li = 0; li < lines; li++) {
       var ly = ((li + 0.5) / lines) * 2 - 1
       var half = Math.sqrt(Math.max(0, 1 - ly * ly)) * 1.0
@@ -1245,7 +1257,7 @@ function readConfidence(p, g, size, state, t, rt, tint) {
   var str = g.boot < 0.6 ? "---" : pad3(conf * 10)
   if (str !== "---") str = str.slice(0, 2) + "." + str.slice(2)
   var blinkOff = bad && rt > 460 && Math.floor(rt / 120) % 2 === 1
-  var role = bad ? ROLE_ERROR : (ok ? tint : ROLE_FG)
+  var role = bad ? ROLE_ERROR : (ok ? tint : ROLE_INK)
   var a = blinkOff ? 0.18 : (ok ? 0.95 : g.fgA)
   seg7(p, role, a, g.ghost, g.w, size - g.m, g.m, g.cw, g.ch, g.pitch, str, 1)
   var cells = 10
@@ -1270,7 +1282,7 @@ function readStatus(p, g, size, state, t, rt, tint) {
   var wordOff = bad && rt > 150 && Math.floor(rt / 110) % 2 === 1
   var scanBlink = !ok && !bad && Math.floor(t / 530) % 2 === 1
   var a = wordOff ? 0.2 : (ok && rt >= REC_PASS ? 1 : (scanBlink ? g.fgA * 0.55 : g.fgA))
-  var role = bad ? ROLE_ERROR : (ok && rt >= REC_PASS ? tint : ROLE_FG)
+  var role = bad ? ROLE_ERROR : (ok && rt >= REC_PASS ? tint : ROLE_INK)
   seg7(p, role, a, g.ghost, g.w, size - g.m, g.base - g.ch, g.cw, g.ch, g.pitch, word, 1)
   // A decided result burns in the segments' cores, so PASS and FAIL read at
   // a glance against the busy instrument.
@@ -1299,7 +1311,7 @@ function paintHudReadouts(p, size, state, t, rt, boot, tint) {
   var frameNo = t / 16.667
   if (ok) frameNo = seg(rt, 0, REC_PASS) < 1 ? frameNo : (t0 + REC_PASS) / 16.667
   if (bad) frameNo = rt < 300 ? hash(Math.floor(rt / 40)) * 65535 : (t0 + 300) / 16.667
-  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_FG, hex4(frameNo))
+  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_INK, hex4(frameNo))
 
   readConfidence(p, g, size, state, t, rt, tint)
 
@@ -1858,6 +1870,7 @@ function paintRadar(ctx, size, spec) {
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
   var tint = bad ? missTint(rt) : ROLE_ACCENT
+  TINT = tint
   var t0 = t - rt
 
   var hair = Math.max(1, size * 0.0065)
@@ -2249,7 +2262,7 @@ function paintRadarReadouts(p, size, state, t, rt, boot, tint, arm, returns, age
   // on a miss.
   var deg = frac((arm + Math.PI / 2) / TAU) * 360
   if (bad && rt < 300) deg = hash(Math.floor(rt / 40)) * 359
-  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_FG, " " + pad3(deg))
+  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_INK, " " + pad3(deg))
 
   readConfidence(p, g, size, state, t, rt, tint)
 
@@ -2605,6 +2618,7 @@ function paintHolo(ctx, size, spec) {
   var bad = state === "notRecognized"
   var scanning = !ok && !bad
   var tint = bad ? missTint(rt) : ROLE_ACCENT
+  TINT = tint
   var t0 = t - rt
 
   var hair = Math.max(1, size * 0.0065)
@@ -3287,7 +3301,7 @@ function paintHoloReadouts(p, size, state, t, rt, boot, tint, yaw, pitch, flick)
   var tenths = Math.round(mag * 10)
   var digits = String(Math.floor(tenths / 10))
   while (digits.length < 2) digits = "0" + digits
-  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_FG, (deg < -0.05 ? "-" : " ") + digits + "." + (tenths % 10))
+  readTopLeft(p, g, size, t, bad ? ROLE_ERROR : ROLE_INK, (deg < -0.05 ? "-" : " ") + digits + "." + (tenths % 10))
 
   readConfidence(p, g, size, state, t, rt, tint)
 
@@ -3377,7 +3391,11 @@ function recorder() {
   var st = { stroke: [ROLE_ACCENT, 1], fill: [ROLE_ACCENT, 1], width: 1, glow: 0 }
 
   // Roles past the error role only exist on a level-2 host.
-  function role(r) { return LUMEN || r <= ROLE_ERROR ? r : ROLE_FG }
+  function role(r) {
+    if (r === ROLE_INK) return ROLE_FG
+    if (GLASS && r === ROLE_FG) return TINT
+    return LUMEN || r <= ROLE_ERROR ? r : ROLE_FG
+  }
   function lit(op) {
     if (LUMEN && st.glow > 0) op.push(clamp01(st.glow))
     ops.push(op)
@@ -3440,6 +3458,8 @@ function recorder() {
 // One frame as data. Numbers and small arrays of numbers, nothing else.
 function frame(size, spec) {
   LUMEN = !!spec && Number(spec.host) >= 2
+  GLASS = !!spec && Number(spec.host) >= 3
+  TINT = ROLE_ACCENT
   var rec = recorder()
   paintInto(rec, size, spec)
   return rec.ops
