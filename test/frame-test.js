@@ -156,9 +156,9 @@ check('scanning is a dot cloud', () => {
   assert.ok(dots(ops('scanning', 0)) > 100, 'expected a cloud, got ' + dots(ops('scanning', 0)))
 })
 
-check('a settled recognised face has no dots left on it', () => {
+check('a settled recognised face keeps its depth lattice, a scanned head rather than a drawn one', () => {
   for (const elapsed of [1500, 1900, 2200]) {
-    assert.strictEqual(dots(ops('recognized', elapsed)), 0, 'dots still painted at ' + elapsed + ' ms')
+    assert.ok(dots(ops('recognized', elapsed)) > 100, 'the head lost its point density at ' + elapsed + ' ms')
   }
 })
 
@@ -357,10 +357,12 @@ for (const style of exported.STYLES) {
     assert.notDeepStrictEqual(styled(style, 'recognized', 200, 120, 3200), styled(style, 'recognized', 200, 120, 4700))
   })
 
-  check(style + ': a settled recognised face is strokes only, no dots', () => {
+  check(style + ': a settled recognised face is a depth volume: dots only on the HUD lattice', () => {
     for (const elapsed of [1500, 1900, 2200]) {
       const list = styled(style, 'recognized', elapsed)
-      assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
+      const n = list.filter(o => o[0] === OP_RECT).length
+      if (style === 'hud') assert.ok(n > 100, 'the HUD lattice is gone at ' + elapsed)
+      else assert.strictEqual(n, 0, 'dots at ' + elapsed)
       assert.ok(strokes(list) > 3, 'expected a drawn face at ' + elapsed)
     }
   })
@@ -493,10 +495,12 @@ for (const level of [2, 3]) for (const style of exported.STYLES) {
     }
   })
 
-  check(style + ' level ' + level + ': a settled recognised face is strokes only, no dots', () => {
+  check(style + ' level ' + level + ': a settled recognised face is a depth volume: dots only on the HUD lattice', () => {
     for (const elapsed of [1500, 1900, 2200]) {
       const list = at(style, 'recognized', elapsed)
-      assert.strictEqual(list.filter(o => o[0] === OP_RECT).length, 0, 'dots at ' + elapsed)
+      const n = list.filter(o => o[0] === OP_RECT).length
+      if (style === 'hud') assert.ok(n > 100, 'the HUD lattice is gone at ' + elapsed)
+      else assert.strictEqual(n, 0, 'dots at ' + elapsed)
       assert.ok(strokes(list) > 3)
     }
   })
