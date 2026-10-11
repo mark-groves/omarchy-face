@@ -3159,7 +3159,7 @@ function paintHolo(ctx, size, spec) {
         // Vertices detach and drift outward under drag.
         var sid = ln * 31 + sj
         var nl = Math.hypot(x0, y0 - HOLO_CY) || 0.001
-        var sp2 = 0.55 * (0.4 + hash(sid))
+        var sp2 = 0.2 * (0.4 + hash(sid))
         x0 += dragOffset(sp2 * x0 / nl, fragTau, 3.5)
         y0 += dragOffset(sp2 * (y0 - HOLO_CY) / nl, fragTau, 3.5) + dragOffset(0.1, fragTau, 2)
       }
@@ -3248,6 +3248,7 @@ function paintHolo(ctx, size, spec) {
   if (!compact && chroma > 0.02) crisp.poly(LUMEN ? altOf(tint) : ROLE_FG, outA * 0.3, fine, choutline)
   if (bad && frag > 0.05) {
     for (var od = 0; od + 1 < outline.length; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
+    crisp.poly(tint, outA * 0.35, thin, outline)
   } else {
     halo.poly(tint, outA * 0.16, thin * 3.6, outline)
     crisp.poly(tint, outA, thin, outline)
