@@ -1324,7 +1324,7 @@ function chase(rt) {
 
 // Below roughly 48 px the cloud is a smudge, so the same geometry is rendered
 // as vector strokes instead: a segmented ring that closes on a lock and
-// breaks on a miss, two eye marks, a measured mouth line, and the scan line.
+// breaks on a miss, three structured-light stripes, and the scan line.
 function paintHudMicro(p, size, state, t, rt, cx, cy, R, tint) {
   var ok = state === "recognized"
   var bad = state === "notRecognized"
@@ -1939,8 +1939,8 @@ var HOLO_CY = -0.06
 // --- Phosphor Radar -------------------------------------------------------------
 //
 // A plan-position scope. The sweep arm refreshes a dense topology of returns
-// laid on the face: the rim, depth contours, two iris rings, the nose column,
-// a level mouth row and a speckle of skin. Returns decay behind the arm but
+// laid on the face: the silhouette, iso-depth contours of the relief, and a
+// speckle of skin. Returns decay behind the arm but
 // never below a floor, so the whole face stays legible at 116 px between
 // sweeps; the first revolution after entry paints it in. Returns are range
 // cells, short arcs about the scope centre, never smooth outlines, so the
@@ -2480,15 +2480,14 @@ var HOLO_SLICES = 26
 
 // --- the face -------------------------------------------------------------------
 //
-// One face, shared by every style: a human head seen from the front with
-// believable proportions. The eye line sits halfway between the crown and the
-// chin, the eyes are one eye-width apart, the brows sit above the sockets, the
-// nose runs from the brow to its base a third of the way down the lower face,
-// and the mouth sits a third of the way from there to the chin. The styles
-// project it their own way (dots, radar returns, a wireframe head), but the
-// shape, the depth and the features are these.
+// One head, shared by every style: a generic anonymous volume seen from the
+// front. The styles project it their own way (dots, radar returns, a
+// wireframe head). Depth is a broad shallow relief (forehead, brow, nose
+// ridge, cheeks, chin). Nothing here is an eye, nose, mouth, lip or jaw
+// outline.
 //
-// Face units: x to the right, y down, the eye line at EYE_Y.
+// Face units: x to the right, y down. EYE_Y is the vertical centre the depth
+// falloff is measured from, not a drawn eye line.
 
 var FACE_TOP = -0.8
 var FACE_CHIN = 0.685
