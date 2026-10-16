@@ -583,7 +583,8 @@ function paintHud(ctx, size, spec) {
   // The large card on a level-2 host gets a finer lattice: about twice the
   // points, each smaller, so the cloud reads as a dense depth scan.
   var dense = LUMEN && size >= 160
-  var P = buildParticles(1337, dense ? 0.052 : 0.088)
+  var latStep = dense ? 0.052 : 0.088
+  var P = buildParticles(1337, latStep)
   var ps = P.all
   var cx = size / 2
   var cy = size / 2
@@ -869,6 +870,9 @@ function paintHud(ctx, size, spec) {
   var dotBase = Math.max(1, size * (compact ? 0.030 : (dense ? 0.0128 : 0.0168)))
 
   if (!compact) {
+    // Longer than a jittered row neighbour at this step, shorter than a link
+    // that would bridge a gap in the row.
+    var meshCap = Math.max(0.085, latStep * 1.3)
     var meshFade = ok ? 1 - 0.3 * easeInOutCubic(seg(rt, 390, 620)) : 1
     if (meshFade > 0.01) {
       for (var mi = 0; mi < P.face.length; mi++) {
@@ -878,7 +882,7 @@ function paintHud(ctx, size, spec) {
         for (var nb = 0; nb < 2; nb++) {
           var nj = nbs[nb]
           if (nj < 0 || nj < pi || (nb === 1 && (dense || pp.kind === "skin"))) continue
-          if (Math.hypot(pp.hx - ps[nj].hx, pp.hy - ps[nj].hy) > 0.085) continue
+          if (Math.hypot(pp.hx - ps[nj].hx, pp.hy - ps[nj].hy) > meshCap) continue
           var la2 = Math.min(lit[pi], lit[nj])
           // The mesh never fully disappears: it is the standing structure the
           // scan wake lights up, not something the wake draws from nothing.
@@ -1956,8 +1960,11 @@ function radarReturns() {
   if (CACHE.radar4) return CACHE.radar4
   var rnd = mulberry32(4242)
   var rs = []
-  function add(kind, x, y, gain, stage) {
-    var z = holoInside(x, y) > 0 ? classicZAt(x, y) : 0
+  // Takes face coordinates; depth is sampled there and the position is then
+  // scaled out to the scope.
+  function add(kind, fx, fy, gain, stage) {
+    var z = holoInside(fx, fy) > 0 ? classicZAt(fx, fy) : 0
+    var x = fx * RADAR_FACE, y = fy * RADAR_FACE
     rs.push({ kind: kind, x: x, y: y, r: Math.hypot(x, y), a: Math.atan2(y, x), gain: gain * (0.7 + 0.5 * z), j: rnd(), stage: stage === undefined ? -1 : stage })
   }
   var i, a, j
@@ -1969,11 +1976,11 @@ function radarReturns() {
       racc += 0.01
       if (racc < 0.034) continue
       racc = 0
-      add("rim", side * faceHalfW(oy) * RADAR_FACE, oy * RADAR_FACE, 0.8)
+      add("rim", side * faceHalfW(oy), oy, 0.8)
     }
   }
-  add("rim", 0, FACE_TOP * RADAR_FACE, 0.8)
-  add("rim", 0, FACE_CHIN * RADAR_FACE, 0.8)
+  add("rim", 0, FACE_TOP, 0.8)
+  add("rim", 0, FACE_CHIN, 0.8)
   // The face itself is its relief: fine returns laid along dense iso-depth
   // contours, so the cheekbones and the forehead emerge as topography.
   var lv = []
@@ -1981,14 +1988,14 @@ function radarReturns() {
   var topo = reliefContours("radarT", 20, 27, lv, false, classicZAt)
   for (i = 0; i < topo.segs.length; i++) {
     var S = topo.segs[i]
-    add("topo", (S[0] + S[2]) / 2 * RADAR_FACE, (S[1] + S[3]) / 2 * RADAR_FACE, 0.36 + 0.03 * S[5])
+    add("topo", (S[0] + S[2]) / 2, (S[1] + S[3]) / 2, 0.36 + 0.03 * S[5])
   }
   var n = 0
   while (n < 40) {
     var sx = (rnd() * 2 - 1) * 0.6
     var sy2 = (rnd() * 2 - 1) * 0.78
     if (holoInside(sx, sy2) <= 0.05) continue
-    add("skin", sx * RADAR_FACE, sy2 * RADAR_FACE, 0.3)
+    add("skin", sx, sy2, 0.3)
     n++
   }
   CACHE.radar4 = rs
