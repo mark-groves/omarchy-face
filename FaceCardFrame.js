@@ -3847,6 +3847,70 @@ function holoNodes() {
   return CACHE.headN
 }
 
+// --- the projector --------------------------------------------------------------
+//
+// Where the head stands: an emitter plate under the neck, in screen units of
+// the disc radius.
+var HOLO_EY = 0.9
+var HOLO_ERX = 0.46
+var HOLO_ERY = 0.07
+// The crown of the projected head, on screen.
+var HOLO_CROWN = HOLO_CY + (-0.78) * HOLO_K
+// A lock lands over 1.15 s of authored time. The sequence, in ms:
+//   20..430    an energy pulse races up from the emitter to the crown
+//   340..900   a solidify ring sweeps back down, and the head hardens behind it
+//   200..640   the orbits level out into a halo, which snaps shut on PASS
+//   860..1150  a ripple leaves the emitter across the plate
+// After that the head rests: solid, rim lit, slowly scanned.
+var HOLO_WAVE = [860, 1150]
+var HOLO_HALO_Y = 0.34
+
+// A polyline whose segments carry their own alpha and width. A run ends where
+// either changes, so a gradient along a slice costs a few extra subpaths and
+// the front of the head can be drawn heavier than its back.
+function holoStrip(p, role, pts, al, wd) {
+  var run = null
+  var runA = -1
+  var runW = -1
+  for (var i = 1; i < pts.length; i++) {
+    var a = Math.round(clamp01(al[i - 1]) * 16) / 16
+    var w = wd[i - 1]
+    if (a !== runA || w !== runW) {
+      if (run && run.length > 1 && runA > 0) p.poly(role, runA, runW, run)
+      run = [[pts[i - 1].x, pts[i - 1].y]]
+      runA = a
+      runW = w
+    }
+    run.push([pts[i].x, pts[i].y])
+  }
+  if (run && run.length > 1 && runA > 0) p.poly(role, runA, runW, run)
+}
+
+// A closed ellipse as points, for the rings round the emitter and the cone.
+function holoEllipse(x, y, rx, ry, n) {
+  var out = []
+  for (var i = 0; i <= n; i++) {
+    var a = i / n * TAU
+    out.push([x + Math.cos(a) * rx, y + Math.sin(a) * ry])
+  }
+  return out
+}
+
+// The projector's power through a miss: it browns out, sputters between
+// nothing and a flicker, and settles at a low idle that still drops out now
+// and then. Never zero for long: the head must stay legible.
+function holoPower(rt) {
+  var p = mix(1, 0.5, easeOutCubic(seg(rt, 60, 760)))
+  if (rt > 90 && rt < 560) {
+    var h = hash(Math.floor(rt / 46) + 31)
+    if (h > 0.62) p *= 0.2
+    else if (h < 0.1) p = Math.min(1, p * 1.5)
+  } else if (rt >= 560 && hash(Math.floor(rt / 90) + 57) > 0.9) {
+    p *= 0.45
+  }
+  return p
+}
+
 function paintHolo(ctx, size, spec) {
   var state = spec.state || "scanning"
   var t = spec.clock || 0
@@ -3875,17 +3939,38 @@ function paintHolo(ctx, size, spec) {
   var bold = Math.max(1, size * 0.016)
   var fine = Math.max(0.5, size * 0.0038)
 
-  var boot = scanning ? easeOutCubic(seg(rt, 0, BOOT_MS)) : 1
+  // --- the boot: the emitter ignites, the cone rises, and the head is built
+  // slice by slice from the neck up behind a bright front.
+  var bootK = scanning ? seg(rt, 0, BOOT_MS) : 1
+  var boot = easeOutCubic(bootK)
+  var buildK = seg(rt, 130, 600)
+  var buildY = bootK < 1 ? mix(1.08, -0.9, buildK * buildK * (3 - 2 * buildK)) : -9
+  var bootGate = scanning ? clamp01((bootK - 0.35) / 0.65) : 1
+  var ignite = scanning ? seg(rt, 0, 150) : 1
+  var coneUp = scanning ? easeOutCubic(seg(rt, 40, 420)) : 1
 
-  // Pose: slow turn, eased face-on by a lock, jerked by a miss.
+  // --- a lock, in authored milliseconds
+  var restK = ok ? seg(rt, 640, 1000) : 0
+  var pulseT = ok ? easeInOutCubic(seg(rt, 20, 430)) : 0
+  var pulseOn = ok && rt > 20 && rt < 470
+  var pulseY = mix(HOLO_EY - 0.04, HOLO_CROWN, pulseT)
+  var crownK = ok ? bump(rt, 380, 820) : 0
+  var ringT = ok ? easeInOutCubic(seg(rt, 340, 900)) : 0
+  var ringOn = ok && rt > 340 && rt < 960
+  var ringY = mix(HOLO_CROWN, HOLO_EY - 0.08, ringT)
+  var solidFront = ok && rt >= 340 ? ringY : -9
+  var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
+  var passPulse = ok && LUMEN ? bump(rt, REC_PASS - 80, REC_PASS + 420) : 0
+
+  // Pose: slow turn, eased to a three-quarter view by a lock, jerked by a miss.
   var yaw = holoYaw(t)
   var pitch = holoPitch(t)
   if (ok) {
-    // The lock settles in a slight three-quarter pose, which shows the relief
-    // in the silhouette instead of flattening it face-on.
+    // The lock settles in a three-quarter pose, which shows the relief in
+    // the silhouette instead of flattening it face-on, and then breathes.
     var still = easeOutCubic(seg(rt, 0, 450))
-    yaw = mix(holoYaw(t0 + rt * (1 - still)), 0.5, still)
-    pitch = mix(holoPitch(t0 + rt * (1 - still)), HOLO_TILT, still)
+    yaw = mix(holoYaw(t0 + rt * (1 - still)), 0.5, still) + restK * 0.04 * Math.sin(t / 1300)
+    pitch = mix(holoPitch(t0 + rt * (1 - still)), HOLO_TILT, still) + restK * 0.012 * Math.sin(t / 1900 + 1)
   } else if (bad) {
     var jstep = Math.min(6, Math.floor(rt / 55))
     yaw = holoYaw(t0 + rt * 0.2) + (jstep > 0 ? (hash(jstep * 7 + 3) - 0.5) * 0.35 : 0)
@@ -3893,41 +3978,52 @@ function paintHolo(ctx, size, spec) {
   }
   var cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), spp = Math.sin(pitch)
 
-  // Projector flicker. Steady on a lock; failing on a miss.
-  var flick = 0.9 + 0.1 * Math.sin(t / 41) * Math.sin(t / 97)
-  if (hash(Math.floor(t / 140)) > 0.93) flick *= 0.7
-  if (ok) flick = mix(flick, 1, seg(rt, 0, 300))
-  if (bad) {
-    flick *= 1 - 0.35 * easeOutCubic(seg(rt, 150, 700))
-    if (rt > 100 && rt < 600 && hash(Math.floor(rt / 70) + 17) > 0.55) flick *= 0.55
-  }
-  flick *= boot
+  // Projector power and flicker. Steady on a lock; a brownout on a miss.
+  var power = bad ? holoPower(rt) : 1
+  var flickRaw = 0.9 + 0.1 * Math.sin(t / 41) * Math.sin(t / 97)
+  if (hash(Math.floor(t / 140)) > 0.93) flickRaw *= 0.7
+  if (ok) flickRaw = mix(flickRaw, 1, seg(rt, 0, 300))
+  if (bad) flickRaw *= 0.55 + 0.45 * power
+  if (bootK < 1 && hash(Math.floor(rt / 36) + 3) > 0.55) flickRaw *= 1 - 0.5 * (1 - bootK)
+  var flick = flickRaw * boot
 
-  var bandY = mix(-1.1, 1.1, frac(t / HOLO_BAND_MS))
+  // Scan planes. The main one sweeps down through the head; a second, faster
+  // one crosses it the other way. A lock slows the scan to a drift.
+  var bandY = mix(-1.1, 1.1, frac(t / (ok ? 4200 : HOLO_BAND_MS)))
   var band2Y = mix(1.1, -1.1, frac(t / 3100 + 0.3))
-  var bandK = scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1)
-  var ringY = ok ? mix(HOLO_CY - 0.64, HOLO_CY + 0.62, easeInOutCubic(seg(rt, 150, 700))) : -9
-  var ringK = ok ? bump(rt, 150, 760) : 0
-  var ring2Y = ok ? mix(HOLO_CY + 0.62, HOLO_CY - 0.64, easeInOutCubic(seg(rt, 350, 900))) : -9
-  var ring2K = ok ? bump(rt, 350, 940) : 0
-  var solid = ok ? easeOutCubic(seg(rt, 150, 700)) : 0
-  var frag = bad ? easeOutCubic(seg(rt, 120, 700)) : 0
-  var fragTau = bad ? Math.max(0, rt - 120) / 1000 : 0
-  var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
-  var tears = bad ? glitchTears(rt) : []
+  var bandK = scanning ? 1 : (ok ? (1 - seg(rt, 0, 300)) + 0.4 * restK : 0.6 * (1 - seg(rt, 100, 520)))
+  var band2K = scanning ? 1 : (ok ? 0 : bandK)
 
-  // Vertical hold slips: a brief roll every few seconds, forced by a miss.
+  // The failing projection: slices slip sideways as rigid strips, blocks of
+  // the image shear, the vertical hold rolls, and the picture splits into
+  // two colours.
+  var failK = bad ? seg(rt, 0, 90) : 0
+  var slipStep = bad ? (rt < 500 ? Math.floor(rt / 55) : 9 + Math.floor((rt - 500) / 140)) : 0
+  var burst = bad && rt > 600 && frac(t / 760) < 0.16 && hash(Math.floor(t / 760) + 9) > 0.35 ? 1 : 0
+  var slipAmp = bad ? 0.085 * failK * (1 - 0.78 * easeOutCubic(seg(rt, 300, 900))) + 0.05 * burst : 0
+  var nSl = compact ? 9 : HOLO_SLICES
+  var slipY0 = HEAD_TOP + 0.05
+  var slipDy = (HEAD_CHIN - 0.03 - slipY0) / (nSl - 1)
+  function slipVal(k) {
+    var h1 = hash(slipStep * 13 + k * 7 + 1), h2 = hash(slipStep * 5 + k * 3 + 2)
+    return (h1 - 0.5) * 2 * slipAmp * (h2 > 0.28 ? 1 : 0.15)
+  }
+  function slipField(hy) {
+    if (slipAmp <= 0) return 0
+    var k = (hy - slipY0) / slipDy
+    var lo = Math.floor(k)
+    return mix(slipVal(lo), slipVal(lo + 1), k - lo)
+  }
+  var tears = bad ? glitchTears(rt) : []
   var roll = 0
   var rollPh = frac(t / 2600)
-  if (scanning && hash(Math.floor(t / 2600) + 5) > 0.55 && rollPh < 0.05) roll = 0.12 * Math.sin(Math.PI * rollPh / 0.05)
-  if (bad) roll = 0.16 * bump(rt, 100, 260)
-
-  // Block glitches: rectangles of the image slipped sideways.
+  if (scanning && hash(Math.floor(t / 2600) + 5) > 0.55 && rollPh < 0.05) roll = 0.1 * Math.sin(Math.PI * rollPh / 0.05)
+  if (bad && rt > 20) roll = 0.2 * Math.exp(-rt / 190) * Math.cos(rt / 52)
   var blocks = []
-  var blockOn = bad ? rt < 520 : (scanning && hash(Math.floor(t / 200) + 11) > 0.93)
+  var blockOn = bad ? rt < 480 : (scanning && bootK >= 1 && hash(Math.floor(t / 200) + 11) > 0.93)
   if (blockOn) {
     var bs = Math.floor((bad ? rt : t) / 50)
-    for (var bi = 0; bi < (bad ? 7 : 2); bi++) {
+    for (var bi = 0; bi < (bad ? 5 : 2); bi++) {
       blocks.push({
         y: (hash(bs * 7 + bi) * 2 - 1) * 0.9, h: 0.04 + 0.1 * hash(bs * 3 + bi),
         x: (hash(bs * 5 + bi * 2) * 2 - 1) * 0.7, w: 0.2 + 0.4 * hash(bs * 13 + bi),
@@ -3943,11 +4039,15 @@ function paintHolo(ctx, size, spec) {
     }
     return d
   }
+  function glitchX(x, y) {
+    return (bad ? tearShift(tears, y) : 0) + blockShift(x, y)
+  }
 
-  // Chromatic offset: a foreground copy of the mesh off register.
-  var chroma = (scanning ? 1 : (ok ? 1 - seg(rt, 0, 300) : 1 + 4 * bump(rt, 0, 600))) * boot
-  var chX = size * 0.015 * chroma * (bad ? 1 + (hash(Math.floor(rt / 40)) - 0.5) : 1)
-  var chY = -size * 0.004 * chroma
+  // Chromatic offset: copies of the image off register. It closes on a lock
+  // and tears wide on a miss.
+  var chroma = (scanning ? boot : (ok ? 1 - seg(rt, 0, 300) : 1 + 3 * bump(rt, 0, 600) + 0.6 * burst))
+  var chX = size * 0.013 * chroma * (bad ? 1 + (hash(Math.floor(rt / 40)) - 0.5) : 1)
+  var chY = -size * 0.003 * chroma
 
   function project(P) {
     var xr = P[0] * cyw + P[2] * syw
@@ -3976,24 +4076,49 @@ function paintHolo(ctx, size, spec) {
     var W = Math.max(0.05, profileAt(HEAD_Y, HEAD_HALF, fy))
     return { w: HOLO_K * Math.hypot(W * cyw, (F - B) / 2 * syw), c: HOLO_K * (F + B) / 2 * syw }
   }
-  function toPx(x, y) { return { x: cx + x * R, y: cy + y * R } }
-  function glitchX(x, y) {
-    return (bad ? tearShift(tears, y) : 0) + blockShift(x, y)
+  // The same, widened below the neck into the emitter plate.
+  function bodySpan(y) {
+    var baseY = HOLO_CY + NECK_BASE * HOLO_K
+    if (y <= baseY) {
+      var hs = headSpan(y)
+      return { w: Math.max(0.1, hs.w), c: hs.c }
+    }
+    var ns = headSpan(baseY)
+    var k = easeInOutCubic(clamp01((y - baseY) / (HOLO_EY - baseY)))
+    return { w: mix(ns.w, HOLO_ERX, k), c: mix(ns.c, 0, k) }
   }
+  function toPx(x, y) { return { x: cx + x * R, y: cy + y * R } }
+  // A lens that rides each plane: the slices bunch up toward it, which is
+  // what makes it read as light refracted through glass.
+  function lensY(y) {
+    var d1 = y - bandY
+    var out = 0
+    if (bandK > 0 && Math.abs(d1) < 0.2) out -= 0.022 * bandK * Math.sin(Math.PI * d1 / 0.2)
+    var d2 = y - band2Y
+    if (band2K > 0 && Math.abs(d2) < 0.1) out -= 0.012 * band2K * Math.sin(Math.PI * d2 / 0.1)
+    return y + out
+  }
+  function tri(d, w) { var k = 1 - Math.abs(d) / w; return k > 0 ? k * k : 0 }
   function bandBoost(y) {
     var a = 0
-    var d1 = Math.abs(y - bandY)
-    if (d1 < 0.09) a += 0.45 * (1 - d1 / 0.09) * bandK
-    var d2 = Math.abs(y - band2Y)
-    if (d2 < 0.04) a += 0.3 * (1 - d2 / 0.04) * bandK
-    if (ringK > 0) { var r1 = Math.abs(y - ringY); if (r1 < 0.1) a += 0.5 * (1 - r1 / 0.1) * ringK }
-    if (ring2K > 0) { var r2 = Math.abs(y - ring2Y); if (r2 < 0.1) a += 0.4 * (1 - r2 / 0.1) * ring2K }
+    if (bandK > 0) {
+      a += 0.5 * tri(y - bandY, 0.1) * bandK
+      // The wake: the scan leaves the head lit above it, fading out.
+      var wk = bandY - y
+      if (wk > 0 && wk < 1.1) a += 0.13 * Math.exp(-wk / 0.32) * bandK
+    }
+    if (band2K > 0) a += 0.3 * tri(y - band2Y, 0.05) * band2K
+    if (pulseOn) a += 0.8 * tri(y - pulseY, 0.16) * bump(rt, 20, 470)
+    if (ringOn) a += 0.6 * tri(y - ringY, 0.12) * bump(rt, 340, 960)
     return a
   }
+  // 0 before the solidify ring has passed, 1 behind it.
+  function solidAt(y) { return ok ? clamp01((solidFront - y) / 0.08) : 0 }
 
   var halo = haloPen(ctx)
+  var soft = pen(ctx, GLASS ? 3.2 : 1.6, true)
   var crisp = pen(ctx)
-  function flush() { halo.flush(); crisp.flush() }
+  function flush() { halo.flush(); soft.flush(); crisp.flush() }
 
   if (micro) {
     var mw = Math.max(1, size * 0.07)
@@ -4028,19 +4153,24 @@ function paintHolo(ctx, size, spec) {
     return
   }
 
-  var EY = 0.9
-  var erx = 0.46
-  var ery = 0.07
+  var EY = HOLO_EY
+  var erx = HOLO_ERX
+  var ery = HOLO_ERY
 
-  // --- scanlines and a fine backplate grid --------------------------------------
+  // --- backplate: scanlines that drift and beat, and a fine grid ------------------
   if (!compact) {
     plate(crisp, cx, cy, R, boot, 0)
     var lines = 48
+    var wraps = Math.floor(t / 5200)
+    var drift = frac(t / 5200)
     for (var li = 0; li < lines; li++) {
-      var ly = ((li + 0.5) / lines) * 2 - 1
+      var ly = ((li + drift) / lines) * 2 - 1
       var half = Math.sqrt(Math.max(0, 1 - ly * ly))
       if (half <= 0.05) continue
-      crisp.line(ROLE_FG, (li % 4 === 0 ? 0.09 : 0.05) * boot, li % 4 === 0 ? hair : fine, cx - half * R, cy + ly * R, cx + half * R, cy + ly * R)
+      var major = (((li - wraps) % 4) + 4) % 4 === 0
+      // Two slow waves of different pitch run through the lines: interference.
+      var beat = 0.62 + 0.38 * Math.sin(ly * 7.5 + t / 1100) * Math.sin(ly * 3.1 - t / 1700)
+      crisp.line(ROLE_FG, (major ? 0.1 : 0.055) * boot * beat, major ? hair : fine, cx - half * R, cy + ly * R, cx + half * R, cy + ly * R)
     }
     for (var gv = -4; gv <= 4; gv++) {
       var gx = gv * 0.22
@@ -4049,11 +4179,7 @@ function paintHolo(ctx, size, spec) {
     }
     var rollL = mix(-1, 1, frac(t / 900))
     var rh = Math.sqrt(Math.max(0, 1 - rollL * rollL))
-    crisp.line(tint, 0.12 * flick * (1 - solid), hair, cx - rh * R, cy + rollL * R, cx + rh * R, cy + rollL * R)
-    if (roll > 0.005) {
-      var tearY = cy + (0.95 - roll * 4) * R
-      crisp.line(tint, 0.5, hair, cx - R * 0.95, tearY, cx + R * 0.95, tearY)
-    }
+    crisp.line(tint, 0.12 * flick, hair, cx - rh * R, cy + rollL * R, cx + rh * R, cy + rollL * R)
     // Circular frame with a fine graduated scale.
     crisp.arc(ROLE_FG, 0.16 * boot, fine, cx, cy, R * 1.02, 0, TAU)
     for (var gt = 0; gt < 120; gt++) {
@@ -4068,15 +4194,18 @@ function paintHolo(ctx, size, spec) {
     var yi = -Math.PI / 2 + clamp(yaw * 1.4, -0.45, 0.45)
     chevron(crisp, tint, 0.85 * boot, thin, cx, cy, yi, R * 0.97, R * 0.05, 0.08)
     crisp.flush()
+    // Light spill: the projector's glow behind the head, as bloom only.
+    if (GLASS) soft.arc(tint, 0.034 * flick * (bad ? 0.7 * power : 1), R * 0.9, cx, cy + R * 0.12, R * 0.45, 0, TAU)
+    soft.flush()
   }
 
-  // --- the outer cage, turning against the mask -----------------------------------
+  // --- the outer cage, turning against the head ------------------------------------
   if (!compact) {
     var cageRot = t / 9000 * TAU
-    if (ok) cageRot = t0 / 9000 * TAU + TAU * 0.6 * easeInOutCubic(seg(rt, 0, 600))
+    if (ok) cageRot = t0 / 9000 * TAU + TAU * 0.6 * easeInOutCubic(seg(rt, 0, 600)) + Math.max(0, rt - 600) / 26000 * TAU
     if (bad) cageRot = t0 / 9000 * TAU + (hash(Math.floor(rt / 50) + 2) - 0.5) * 0.5 * (1 - seg(rt, 400, 700))
     var cageS = ok ? mix(1, 0.9, easeInOutCubic(seg(rt, 300, 750))) : 1
-    var cageA = (ok ? 1 - 0.65 * easeInOutCubic(seg(rt, 400, 800)) : (bad ? 1 - 0.7 * frag : 1)) * flick
+    var cageA = (ok ? 1 - 0.55 * easeInOutCubic(seg(rt, 400, 800)) : (bad ? 0.45 * (0.4 + 0.6 * power) : 1)) * flick * bootGate
     if (cageA > 0.01) {
       var cr = Math.cos(cageRot), sr = Math.sin(cageRot)
       var CA = 0.8 * cageS, CB = 0.98 * cageS
@@ -4099,7 +4228,7 @@ function paintHolo(ctx, size, spec) {
           var vv = mix(-1.35, 1.35, cv / 18)
           mer.push([CA * Math.cos(vv) * Math.sin(ph), CB * Math.sin(vv), CA * Math.cos(vv) * Math.cos(ph)])
         }
-        cageLine(mer, bad && frag > 0.3)
+        cageLine(mer, bad && power < 0.7)
       }
       for (var cpl = -2; cpl <= 2; cpl++) {
         var pv = cpl * 0.5
@@ -4108,116 +4237,288 @@ function paintHolo(ctx, size, spec) {
           var uu = cu / 36 * TAU
           par.push([CA * Math.cos(pv) * Math.sin(uu), CB * Math.sin(pv), CA * Math.cos(pv) * Math.cos(uu)])
         }
-        cageLine(par, bad && frag > 0.3)
+        cageLine(par, bad && power < 0.7)
       }
       crisp.flush()
     }
   }
 
-  // --- emitter, volumetric cone, projection beams ---------------------------------
+  // --- the emitter ----------------------------------------------------------------------
   var ePulse = 0.5 + 0.5 * Math.sin(t / 420)
-  var eA = (0.55 + 0.25 * passFlash) * boot * (bad ? mix(1, 0.4, frag) : 1)
-  var ring = []
-  for (var ei = 0; ei <= 32; ei++) {
-    var ea = ei / 32 * TAU
-    ring.push([cx + Math.cos(ea) * erx * R, cy + (EY + Math.sin(ea) * ery) * R])
-  }
+  var eFlash = scanning && rt < 360 ? bump(rt, 0, 360) : 0
+  var eA = (0.55 + 0.25 * passFlash + 0.55 * eFlash + 0.12 * restK * ePulse) * ignite * power
+  var ering = holoEllipse(cx, cy + EY * R, erx * R, ery * R, 32)
   if (bad) {
+    // A brownout: the ring loses segments and the rest flicker.
     for (var ed = 0; ed < 32; ed += 2) {
-      if (hash(Math.floor(rt / 60) * 3 + ed) < frag * 0.7) continue
-      crisp.line(tint, eA, thin, ring[ed][0], ring[ed][1], ring[ed + 1][0], ring[ed + 1][1])
+      if (hash(Math.floor(rt / 60) * 3 + ed) > power * 1.1) continue
+      crisp.line(tint, eA, thin, ering[ed][0], ering[ed][1], ering[ed + 1][0], ering[ed + 1][1])
     }
   } else {
-    halo.poly(tint, eA * 0.16, thin * 3.6, ring)
-    crisp.poly(tint, eA, thin, ring)
+    soft.poly(tint, eA * 0.2, thin * 3.4, ering)
+    crisp.poly(tint, eA, thin, ering)
+    if (LUMEN) crisp.poly(hotOf(tint), eA * 0.55, Math.max(0.5, thin * 0.42), ering)
   }
-  for (var ec = 1; ec <= 2; ec++) {
-    var er = erx * (ec === 1 ? 0.72 + 0.04 * ePulse : 0.45)
-    var inner = []
-    for (var ej = 0; ej <= 28; ej++) {
-      var ea2 = ej / 28 * TAU
-      inner.push([cx + Math.cos(ea2) * er * R, cy + (EY + Math.sin(ea2) * ery * er / erx) * R])
-    }
-    crisp.poly(tint, eA * (ec === 1 ? 0.55 : 0.35), fine, inner)
+  for (var ec = 1; ec <= 3; ec++) {
+    var er = erx * (ec === 1 ? 0.76 + 0.04 * ePulse : (ec === 2 ? 0.5 : 0.26))
+    var einner = holoEllipse(cx, cy + EY * R, er * R, ery * er / erx * R, 28)
+    crisp.poly(tint, eA * (ec === 1 ? 0.55 : (ec === 2 ? 0.4 : 0.7)), fine, einner)
+    if (ec === 3 && !bad) soft.poly(tint, eA * 0.25, thin * 2.4, einner)
   }
   if (!compact) {
-    // Emitter ticks turning around the base.
+    // Ticks turning round the plate, and the spokes of an iris in its middle.
     var etr = t / 3000 * TAU
     for (var et = 0; et < 32; et++) {
       var eta = etr + et * TAU / 32
-      var ex0 = cx + Math.cos(eta) * erx * R, ey0 = cy + (EY + Math.sin(eta) * ery) * R
-      var ex1 = cx + Math.cos(eta) * erx * 1.08 * R, ey1 = cy + (EY + Math.sin(eta) * ery * 1.08) * R
       if (Math.sin(eta) < -0.2) continue
-      crisp.line(tint, eA * 0.6, fine, ex0, ey0, ex1, ey1)
+      if (bad && hash(Math.floor(rt / 70) * 5 + et) > power * 1.1) continue
+      crisp.line(tint, eA * 0.6, fine, cx + Math.cos(eta) * erx * R, cy + (EY + Math.sin(eta) * ery) * R,
+        cx + Math.cos(eta) * erx * 1.08 * R, cy + (EY + Math.sin(eta) * ery * 1.08) * R)
     }
-    var coneA = 0.09 * flick * (bad ? 1 - frag : 1)
-    var topY = HOLO_CY + 0.1
-    var tw = headSpan(topY).w * 0.98
-    crisp.line(tint, coneA, hair, cx - erx * R, cy + EY * R, cx - tw * R, cy + topY * R)
-    crisp.line(tint, coneA, hair, cx + erx * R, cy + EY * R, cx + tw * R, cy + topY * R)
-    // Volumetric glow: the cone filled with light that fades as it rises,
-    // cut into slices so its edges follow the cone.
-    var glowA = (ok ? 1 + 1.5 * bump(rt, 520, 900) : (bad ? 1 - frag : 1)) * flick
-    for (var gsl = 0; gsl < 8; gsl++) {
-      var g0 = gsl / 8, g1 = (gsl + 1) / 8
-      var gy0 = mix(EY, topY, g0), gy1 = mix(EY, topY, g1)
-      var gw = mix(erx, tw, (g0 + g1) / 2) * R
-      var gg = ctx.createLinearGradient(0, cy + EY * R, 0, cy + topY * R)
-      gg.addColorStop(0, rgba(tint, 0.07 * glowA))
-      gg.addColorStop(1, rgba(tint, 0))
-      ctx.fillStyle = gg
-      ctx.fillRect(cx - gw, cy + gy1 * R, gw * 2, (gy0 - gy1) * R)
+    for (var ek = 0; ek < 6; ek++) {
+      var eka = -etr * 1.7 + ek * TAU / 6
+      crisp.line(tint, eA * 0.4, fine, cx + Math.cos(eka) * erx * 0.12 * R, cy + (EY + Math.sin(eka) * ery * 0.12) * R,
+        cx + Math.cos(eka) * erx * 0.46 * R, cy + (EY + Math.sin(eka) * ery * 0.46) * R)
     }
-    // Volume slices through the cone.
-    for (var vs = 1; vs <= 5; vs++) {
-      var vk = vs / 6
-      var vy = mix(EY, topY + 0.25, vk)
-      var vr = mix(erx, tw * 0.9, vk)
-      var sl = []
-      for (var vj = 0; vj <= 24; vj++) {
-        var va = vj / 24 * TAU
-        sl.push([cx + Math.cos(va) * vr * R, cy + (vy + Math.sin(va) * ery * 0.7) * R])
-      }
-      crisp.poly(tint, coneA * 0.55, fine, sl)
+    // An anamorphic streak across the plate, brightest at the middle.
+    var streakA = (0.2 + 0.4 * eFlash + 0.25 * passFlash + 0.08 * ePulse) * ignite * power * power
+    for (var sk2 = 0; sk2 < 7; sk2++) {
+      var sx0 = sk2 / 7, sx1 = (sk2 + 1) / 7
+      var sa = streakA * Math.pow(1 - (sx0 + sx1) / 2, 2)
+      crisp.line(tint, sa, hair, cx - sx1 * R * 0.98, cy + EY * R, cx - sx0 * R * 0.98, cy + EY * R)
+      crisp.line(tint, sa, hair, cx + sx0 * R * 0.98, cy + EY * R, cx + sx1 * R * 0.98, cy + EY * R)
     }
-    // Pulse rings travelling up the cone.
-    var pSpeed = ok ? 2.5 : 1
-    for (var pr = 0; pr < 3; pr++) {
-      var pph = frac((ok ? t0 + rt * pSpeed : t) / 1500 + pr / 3)
-      var pry = mix(EY, topY + 0.1, pph)
-      var prr = mix(erx, tw, pph)
-      var pa = 0.3 * Math.sin(Math.PI * pph) * flick * (bad ? 1 - frag : 1) * (ok ? 1 - seg(rt, 600, 900) : 1)
-      if (pa <= 0.02) continue
-      var pp = []
-      for (var pj = 0; pj <= 24; pj++) {
-        var pa2 = pj / 24 * TAU
-        pp.push([cx + Math.cos(pa2) * prr * R, cy + (pry + Math.sin(pa2) * ery * 0.8) * R])
-      }
-      crisp.poly(tint, pa, fine, pp)
+    if (LUMEN) crisp.line(hotOf(tint), streakA * 0.9, Math.max(0.5, hair * 0.5), cx - R * 0.3, cy + EY * R, cx + R * 0.3, cy + EY * R)
+    soft.line(tint, streakA * 0.22, thin * 2, cx - R * 0.5, cy + EY * R, cx + R * 0.5, cy + EY * R)
+
+    // Ripples leaving the plate: at ignition, on the lock, and as a slow idle.
+    var ripples = []
+    if (scanning && rt < 420) ripples.push([seg(rt, 20, 420), 0.5])
+    if (ok) {
+      ripples.push([seg(rt, HOLO_WAVE[0], HOLO_WAVE[1]), 0.8])
+      ripples.push([frac(t / 2600), 0.14 * restK])
     }
-    // Motes rising through the cone.
-    var moteSpeed = ok ? 1 + 3 * seg(rt, 0, 300) : 1
-    var moteA = ok ? 1 - seg(rt, 350, 700) : (bad ? 1 - frag : 1)
-    for (var mo = 0; mo < 40; mo++) {
-      var mph = frac((ok ? t0 + rt * moteSpeed : t) / (1400 + 600 * hash(mo * 5.3)) + hash(mo * 1.7))
-      if (bad) mph = frac(t0 / 1700 + hash(mo * 1.7)) - 0.4 * fragTau
-      var my = EY - mph * 1.55
-      var mx = (hash(mo * 3.1) - 0.5) * mix(erx * 2, 1.1, mph)
-      var ma2 = 0.55 * Math.sin(Math.PI * clamp01(mph)) * moteA * flick
-      if (ma2 <= 0.02) continue
-      crisp.line(tint, ma2, fine, cx + mx * R, cy + my * R, cx + mx * R, cy + (my + 0.03) * R)
+    if (scanning && bootK >= 1) ripples.push([frac(t / 3200), 0.08])
+    for (var rp = 0; rp < ripples.length; rp++) {
+      var rk = ripples[rp][0]
+      if (rk <= 0 || rk >= 1 || ripples[rp][1] <= 0) continue
+      var rka = ripples[rp][1] * Math.pow(1 - rk, 1.5)
+      var rr = mix(erx, rp === 0 && ok ? 1.05 : 0.95, easeOutCubic(rk))
+      var rpts = holoEllipse(cx, cy + EY * R, rr * R, ery * (rr / erx) * 0.8 * R, 40)
+      crisp.poly(tint, rka, thin, rpts)
+      if (ripples[rp][1] > 0.3) soft.poly(tint, rka * 0.3, bold * 2, rpts)
     }
   }
   flush()
 
-  // --- the head ------------------------------------------------------------------
+  // --- the light cone: haze, god rays, volume slices, rising rings, motes ------------
+  if (!compact) {
+    var coneP = power * power
+    var coneA = 0.09 * flickRaw * coneP * coneUp
+    var topY = HOLO_CY + 0.1
+    var tw = headSpan(topY).w * 0.98
+    var coneTop = mix(EY, topY, coneUp)
+    crisp.line(tint, coneA, hair, cx - erx * R, cy + EY * R, cx - mix(erx, tw, coneUp) * R, cy + coneTop * R)
+    crisp.line(tint, coneA, hair, cx + erx * R, cy + EY * R, cx + mix(erx, tw, coneUp) * R, cy + coneTop * R)
+    // Volumetric glow: the cone filled with light that fades as it rises,
+    // cut into slices so its edges follow the cone.
+    var glowA = (ok ? 1 + 1.2 * bump(rt, 400, 900) + 0.35 * restK : 1) * flickRaw * coneP
+    for (var gsl = 0; gsl < 8; gsl++) {
+      var g0 = gsl / 8, g1 = (gsl + 1) / 8
+      var gy0 = mix(EY, coneTop, g0), gy1 = mix(EY, coneTop, g1)
+      var gw = mix(erx, tw, (g0 + g1) / 2) * R
+      var gg = ctx.createLinearGradient(0, cy + EY * R, 0, cy + coneTop * R)
+      gg.addColorStop(0, rgba(tint, 0.085 * glowA))
+      gg.addColorStop(1, rgba(tint, 0))
+      ctx.fillStyle = gg
+      ctx.fillRect(cx - gw, cy + gy1 * R, gw * 2, (gy0 - gy1) * R)
+    }
+    // God rays: columns of light up the cone, each with its own width,
+    // reach and shimmer.
+    var nCol = 12
+    for (var gc = 0; gc < nCol; gc++) {
+      var gcx = (hash(gc * 3.7 + 1) * 2 - 1) * erx * 0.92
+      var gcw = fine * (1.4 + 2.6 * hash(gc * 5.1 + 2))
+      var gch = (0.45 + 0.7 * hash(gc * 7.3 + 3)) * coneUp
+      var gsh = 0.5 + 0.5 * Math.sin(t / (520 + 380 * hash(gc * 2.3)) + gc * 2.4)
+      var gca = (0.05 + 0.08 * hash(gc * 9.1 + 4)) * (gc % 4 === 0 ? 1.8 : 1) * gsh * flickRaw * coneP * (ok ? 1 + 0.9 * bump(rt, 300, 900) : 1)
+      if (gca < 0.01 || gch <= 0.02) continue
+      var gcg = ctx.createLinearGradient(0, cy + EY * R, 0, cy + (EY - gch) * R)
+      gcg.addColorStop(0, rgba(tint, gca))
+      gcg.addColorStop(1, rgba(tint, 0))
+      ctx.fillStyle = gcg
+      ctx.fillRect(cx + gcx * R - gcw / 2, cy + (EY - gch) * R, gcw, gch * R)
+    }
+    // A core of light up the middle, from the plate into the neck.
+    var coreH = (0.55 + 0.1 * Math.sin(t / 700)) * coneUp
+    var corG = ctx.createLinearGradient(0, cy + EY * R, 0, cy + (EY - coreH) * R)
+    corG.addColorStop(0, rgba(tint, 0.2 * flickRaw * coneP))
+    corG.addColorStop(1, rgba(tint, 0))
+    ctx.fillStyle = corG
+    ctx.fillRect(cx - R * 0.045, cy + (EY - coreH) * R, R * 0.09, coreH * R)
+    // Striations: rays fanning out from the plate, with packets of light
+    // running up them. The outer ones are the tallest, so they clear the head.
+    var nRay = 18
+    for (var gi = 0; gi < nRay; gi++) {
+      var gth = (gi + 0.5) / nRay * TAU + 0.25 * hash(gi)
+      var gcs = Math.cos(gth)
+      var gbx = gcs * erx * 0.96, gby = EY + Math.sin(gth) * ery
+      var gflare = 1.1 + 0.3 * hash(gi * 7.7)
+      var gtx = gbx * gflare, gty = EY - 1.25
+      var greach = (0.2 + 0.62 * Math.pow(Math.abs(gcs), 3)) * coneUp
+      var gshim = 0.55 + 0.45 * Math.sin(t / (380 + 260 * hash(gi * 2.9)) + gi * 1.9)
+      var gbase = 0.11 * gshim * flickRaw * coneP * (ok ? 1 + 0.7 * bump(rt, 300, 900) + 0.2 * restK : 1)
+      for (var gs = 0; gs < 5; gs++) {
+        var u0 = gs / 5 * greach, u1 = (gs + 1) / 5 * greach
+        var ra = gbase * Math.pow(1 - gs / 5, 1.4)
+        crisp.line(tint, ra, fine, cx + mix(gbx, gtx, u0) * R, cy + mix(gby, gty, u0) * R, cx + mix(gbx, gtx, u1) * R, cy + mix(gby, gty, u1) * R)
+      }
+      var gpk = frac(t / (1300 + 700 * hash(gi * 4.1)) + hash(gi * 1.3)) * greach
+      if (gpk < greach - 0.05) {
+        var gpa = 0.5 * flickRaw * coneP * (1 - gpk / greach)
+        crisp.line(LUMEN ? hotOf(tint) : tint, gpa, fine * 1.2, cx + mix(gbx, gtx, gpk) * R, cy + mix(gby, gty, gpk) * R,
+          cx + mix(gbx, gtx, gpk + 0.05) * R, cy + mix(gby, gty, gpk + 0.05) * R)
+      }
+    }
+    // Volume slices through the cone.
+    for (var vs = 1; vs <= 3; vs++) {
+      var vk = vs / 4
+      var vy = mix(EY, topY + 0.25, vk)
+      var vr = mix(erx, tw * 0.9, vk)
+      crisp.poly(tint, coneA * 0.7, fine, holoEllipse(cx, cy + vy * R, vr * R, ery * 0.7 * R, 24))
+    }
+    // Rings travelling up the cone.
+    var pSpeed = ok ? 2.5 : 1
+    for (var pr = 0; pr < 2; pr++) {
+      var pph = frac((ok ? t0 + rt * pSpeed : t) / 1700 + pr / 2)
+      var pry = mix(EY, topY + 0.1, pph)
+      var prr = mix(erx, tw, pph)
+      var pa = 0.34 * Math.sin(Math.PI * pph) * flickRaw * coneP * (ok ? 1 - seg(rt, 600, 900) : 1)
+      if (pa <= 0.02) continue
+      crisp.poly(tint, pa, fine, holoEllipse(cx, cy + pry * R, prr * R, ery * 0.8 * R, 24))
+    }
+    // Motes rising through the cone.
+    var moteSpeed = ok ? 1 + 3 * seg(rt, 0, 300) : 1
+    var moteA = (ok ? 0.7 + 0.3 * restK - 0.4 * seg(rt, 350, 700) * (1 - restK) : 1) * coneP * flickRaw
+    for (var mo = 0; mo < 36; mo++) {
+      var mph = frac((ok ? t0 + rt * moteSpeed : (bad ? t0 + rt * 0.3 : t)) / (1400 + 600 * hash(mo * 5.3)) + hash(mo * 1.7))
+      var my = EY - mph * 1.55 * coneUp
+      var mx = (hash(mo * 3.1) - 0.5) * mix(erx * 2, 1.1, mph)
+      var ma2 = 0.6 * Math.sin(Math.PI * clamp01(mph)) * moteA
+      if (ma2 <= 0.02) continue
+      crisp.line(tint, ma2, fine * 1.1, cx + mx * R, cy + my * R, cx + mx * R, cy + (my + 0.03) * R)
+    }
+  }
+  flush()
+
+  // --- scan planes: a ring of light wrapped round the surface, in a plane that
+  // reaches past the head, with an arm sweeping it and a wake behind ------------
+  function surfaceRing(hy) {
+    var out = []
+    var n = 36
+    for (var i = 0; i <= n; i++) {
+      var u = -Math.PI + i / n * TAU
+      var Q = project(hy <= HEAD_CHIN ? headPoint(u, hy) : neckPoint(u, hy))
+      var yq = lensY(Q.y)
+      var P = toPx(Q.x + glitchX(Q.x, yq), yq)
+      P.f = clamp01(0.5 + 0.5 * Math.cos(u + yaw))
+      out.push(P)
+    }
+    return out
+  }
+  function drawPlane(sy, k, trails, trailDir, arm, fringe) {
+    k *= clamp01((0.97 - Math.abs(sy)) / 0.14)
+    if (k <= 0.02 || compact) return
+    var hy = (sy - HOLO_CY) / HOLO_K
+    var rr = Math.max(0.16, bodySpan(sy).w * 1.28 / HOLO_K)
+    var zc = project([0, hy, -0.09]).z
+    var ep = [], eal = [], ewd = []
+    var i, Q
+    for (i = 0; i <= 40; i++) {
+      var ang = i / 40 * TAU
+      Q = project([Math.cos(ang) * rr, hy, -0.09 + Math.sin(ang) * rr])
+      var ey = lensY(Q.y)
+      ep.push(toPx(Q.x + glitchX(Q.x, ey), ey))
+      eal.push(k * (0.1 + 0.3 * clamp01(0.5 + (Q.z - zc) / (1.8 * rr))))
+      ewd.push(thin)
+    }
+    holoStrip(crisp, tint, ep, eal, ewd)
+    var ip = []
+    for (i = 0; i <= 28; i++) {
+      var ang2 = i / 28 * TAU
+      Q = project([Math.cos(ang2) * rr * 0.52, hy, -0.09 + Math.sin(ang2) * rr * 0.52])
+      ip.push([cx + Q.x * R, cy + Q.y * R])
+    }
+    crisp.poly(tint, k * 0.12, fine, ip)
+    if (arm) {
+      var ar = t / 1400 * TAU
+      Q = project([0, hy, -0.09])
+      var ac = toPx(Q.x, Q.y)
+      for (var ak = 0; ak < 3; ak++) {
+        var aa = ar - ak * 0.2
+        var QA = project([Math.cos(aa) * rr, hy, -0.09 + Math.sin(aa) * rr])
+        var AP = toPx(QA.x, QA.y)
+        crisp.line(tint, k * (0.55 - 0.18 * ak), ak === 0 ? hair : fine, ac.x, ac.y, AP.x, AP.y)
+      }
+    }
+    if (hy > HEAD_TOP + 0.02 && hy < NECK_BASE - 0.02) {
+      var ring = surfaceRing(hy)
+      var ral2 = [], rwd = []
+      for (i = 0; i + 1 < ring.length; i++) {
+        var fa = (ring[i].f + ring[i + 1].f) / 2
+        ral2.push(k * (0.08 + 0.92 * fa * fa))
+        rwd.push(fa > 0.5 ? bold : thin)
+      }
+      holoStrip(crisp, tint, ring, ral2, rwd)
+      var rhot = []
+      for (i = 0; i + 1 < ring.length; i++) rhot.push(ral2[i] * 0.8)
+      if (LUMEN) strip(crisp, hotOf(tint), Math.max(0.5, fine), ring, rhot)
+      var rpoly = []
+      for (i = 0; i < ring.length; i++) rpoly.push([ring[i].x, ring[i].y])
+      soft.poly(tint, k * 0.13, bold * 2.2, rpoly)
+      if (fringe && chroma > 0.1) {
+        var fa1 = [], fb1 = [], fl1 = [], fl2 = []
+        for (i = 0; i < ring.length; i++) {
+          fa1.push({ x: ring[i].x + chX * 1.3, y: ring[i].y + chY })
+          fb1.push({ x: ring[i].x - chX * 1.3, y: ring[i].y - chY })
+          if (i + 1 < ring.length) { fl1.push(ral2[i] * 0.4); fl2.push(ral2[i] * 0.34) }
+        }
+        strip(crisp, LUMEN ? altOf(tint) : ROLE_FG, fine, fa1, fl1)
+        if (!bad) strip(crisp, LUMEN ? alt2Of(tint) : ROLE_ERROR, fine, fb1, fl2)
+      }
+      for (var tg = 1; tg <= trails; tg++) {
+        var trail = surfaceRing(clamp(hy - trailDir * 0.055 * tg, HEAD_TOP + 0.02, NECK_BASE - 0.02))
+        var tal = []
+        for (i = 0; i + 1 < trail.length; i++) tal.push(k * 0.34 / tg * (0.1 + 0.9 * Math.pow((trail[i].f + trail[i + 1].f) / 2, 2)))
+        strip(crisp, tint, fine, trail, tal)
+      }
+    }
+  }
+
+  // The vertical-hold bar of a failing picture: a soft band of light.
+  function syncBar(by, h, a) {
+    if (a <= 0.01 || by < -1 || by > 1) return
+    var bhw = Math.sqrt(Math.max(0, 1 - by * by)) * R * 0.97
+    var g1 = ctx.createLinearGradient(0, cy + (by - h) * R, 0, cy + by * R)
+    g1.addColorStop(0, rgba(tint, 0))
+    g1.addColorStop(1, rgba(tint, a))
+    ctx.fillStyle = g1
+    ctx.fillRect(cx - bhw, cy + (by - h) * R, bhw * 2, h * R)
+    var g2 = ctx.createLinearGradient(0, cy + by * R, 0, cy + (by + h * 0.5) * R)
+    g2.addColorStop(0, rgba(tint, a))
+    g2.addColorStop(1, rgba(tint, 0))
+    ctx.fillStyle = g2
+    ctx.fillRect(cx - bhw, cy + by * R, bhw * 2, h * 0.5 * R)
+  }
+
+  // --- the head ---------------------------------------------------------------------
   var mesh = holoMesh(compact)
-  var nSl = compact ? 9 : HOLO_SLICES
+  var solid = ok ? easeOutCubic(seg(rt, 150, 700)) : 0
   var baseA = mix(0.7, 1, solid)
   var mw2 = compact ? Math.max(1, size * 0.018) : fine * 1.3
   // The outline is traced from the slices' extreme points, so it carries the
   // real profile: the skull behind, the nose and chin when the head turns.
-  var silL = [], silR = []
+  var silL = [], silR = [], silHy = [], silOn = []
   function silEdge(ps, i, sgn) {
     var n = ps.length - 1
     var a = ps[(i - 1 + n) % n], b = ps[i % n], c = ps[(i + 1) % n]
@@ -4227,41 +4528,51 @@ function paintHolo(ctx, size, spec) {
     if (sgn * x < sgn * b.x) x = b.x
     return { x: x, y: b.y + (d > 0 ? (c.y - b.y) * d : (b.y - a.y) * d) }
   }
-  // The lock's confirmation: the rim light flares white-hot as PASS lands.
-  var passPulse = ok && LUMEN ? bump(rt, REC_PASS - 80, REC_PASS + 420) : 0
   for (var ln = 0; ln < mesh.length; ln++) {
     var L = mesh[ln]
-    var pts = [], al = [], cpts = [], cal = [], rpts = [], ral = [], hal = []
+    var isSlice = ln < nSl
+    var rank = isSlice && ln % 4 === 0 ? 1.25 : 1
+    var pts = [], al = [], wd = [], hal = [], cpts = [], cal = [], rpts = [], ral = []
+    var sliceOn = bad && isSlice ? (hash(slipStep * 3 + ln * 11) > 0.12 * failK ? 1 : 0.2) : 1
     for (var sj = 0; sj < L.length; sj++) {
-      var Q = project(L[sj])
-      var x0 = Q.x, y0 = Q.y
-      if (bad && frag > 0) {
-        // Vertices detach and drift outward under drag.
-        var sid = ln * 31 + sj
-        var nl = Math.hypot(x0, y0 - HOLO_CY) || 0.001
-        var sp2 = 0.2 * (0.4 + hash(sid))
-        x0 += dragOffset(sp2 * x0 / nl, fragTau, 3.5)
-        y0 += dragOffset(sp2 * (y0 - HOLO_CY) / nl, fragTau, 3.5) + dragOffset(0.1, fragTau, 2)
-      }
-      var dx = glitchX(x0, y0)
-      if (bandK > 0 && Math.abs(y0 - bandY) < 0.09) dx += (hash(Math.floor(t / 60) * 7 + ln) - 0.5) * 0.06 * bandK
-      var PX = toPx(x0 + dx, y0)
+      var V = L[sj]
+      var hy = V[1]
+      var Q = project(V)
+      var y1 = lensY(Q.y)
+      var dx = glitchX(Q.x, y1) + slipField(hy)
+      if (bandK > 0 && Math.abs(y1 - bandY) < 0.09) dx += (hash(Math.floor(t / 60) * 7 + ln) - 0.5) * 0.05 * bandK
+      var PX = toPx(Q.x + dx, y1)
       pts.push(PX)
       cpts.push({ x: PX.x + chX, y: PX.y + chY })
       rpts.push({ x: PX.x - chX, y: PX.y - chY })
       // Faces turned away show faintly through; faces towards the camera are
       // lit from the upper left, and a rim light runs where the surface turns
-      // away, which is what draws the brow, nose and jaw.
+      // away, which is what draws the brow, nose and jaw. Nearer surface is
+      // brighter and heavier than the far side.
       var fr = clamp01((Q.f + 0.04) / 0.22)
       var rim = Math.pow(1 - clamp01(Math.abs(Q.f)), 4) * fr
-      var a = baseA * flick * (0.06 + fr * 0.34 * (0.2 + 1.1 * L[sj][6]) + 0.42 * rim) + bandBoost(y0) * boot * (0.25 + 0.75 * fr)
-      if (bad && frag > 0 && hash(ln * 31 + sj + 5) < frag * 0.35) a = 0
+      var zn = clamp01(Q.z + 0.5)
+      var sol = solidAt(y1)
+      var vis = 1, edge = 0
+      if (buildY > -8) {
+        vis = clamp01((hy - buildY) / 0.12)
+        edge = Math.exp(-Math.pow((hy - buildY) / 0.05, 2))
+      }
+      var lit = fr * 0.34 * (0.2 + 1.1 * V[6]) * (0.75 + 0.5 * zn)
+      var a = baseA * flickRaw * (0.06 * (0.55 + 0.45 * zn) + lit + 0.42 * rim) * mix(0.8, 1.22, sol)
+      a *= 0.86 + 0.14 * Math.sin(hy * 41 - t / 480) * Math.sin(hy * 13 + t / 790)
+      if (vis < 0.999 && hash(Math.floor(rt / 40) * 17 + ln) > 0.45) a *= 0.5
+      a = a * vis * sliceOn + edge * 0.55 * (0.3 + 0.7 * fr) * flickRaw
+      a += bandBoost(y1) * boot * (0.25 + 0.75 * fr) * sliceOn
       al.push(a)
-      hal.push(bad ? 0 : baseA * flick * 0.7 * rim * (1 + 1.8 * passPulse))
+      var wk = fr > 0.7 && zn > 0.55 ? 1.3 : (fr < 0.25 ? 0.75 : 1)
+      wd.push(mw2 * wk * rank * (1 + 0.12 * sol))
+      var hv = bad ? 0 : baseA * flickRaw * 0.7 * rim * vis * (1 + 1.8 * passPulse + 0.5 * sol)
+      hal.push(hv > 0.08 ? hv : 0)
       cal.push(a * 0.45 * fr)
       ral.push(a * 0.38 * fr)
     }
-    if (ln < nSl) {
+    if (isSlice) {
       var mnI = 0, mxI = 0
       for (var se = 1; se < pts.length - 1; se++) {
         if (pts[se].x < pts[mnI].x) mnI = se
@@ -4269,45 +4580,54 @@ function paintHolo(ctx, size, spec) {
       }
       silL.push(silEdge(pts, mnI, -1))
       silR.push(silEdge(pts, mxI, 1))
+      silHy.push(L[0][1])
+      silOn.push(sliceOn)
     }
     // The offset copy rides every third slice; that is enough to read as
     // colour fringing at a fraction of the cost.
-    if (!compact && chroma > 0.02 && ln < nSl && ln % 3 === 0) {
+    if (!compact && chroma > 0.02 && isSlice && ln % 4 === 1) {
       strip(crisp, LUMEN ? altOf(tint) : ROLE_FG, fine, cpts, cal)
       // The opposite fringe in a second colour, which is what makes the
       // split read as chromatic: the error colour on a level-1 host, the
       // theme's third hue on a level-2 one. A miss keeps only one fringe.
       if (!bad) strip(crisp, LUMEN ? alt2Of(tint) : ROLE_ERROR, fine, rpts, ral)
     }
-    if (ok && ln < nSl) {
-      // The lock solidifies the head from the top down behind the scanner ring.
-      var ly0 = L[0][1] * HOLO_K + HOLO_CY
-      var sol = seg(rt, 150, 700) > 0 && ly0 < ringY ? 1.35 : (rt < 700 ? 0.7 : 1)
-      for (var sa = 0; sa < al.length; sa++) al[sa] *= sol
-    }
-    strip(crisp, tint, ln < nSl && ln % 2 === 0 ? mw2 * 1.3 : mw2, pts, al)
+    holoStrip(crisp, tint, pts, al, wd)
     // The rim light burns white-hot where the surface turns away.
     if (LUMEN && !bad) strip(crisp, hotOf(tint), fine, pts, hal)
   }
   crisp.flush()
 
+  // A solid body: the extent of each slice laid in as a faint wide stroke, so
+  // the head reads as glass with volume rather than as wire alone. It
+  // thickens behind a lock.
+  if (!compact) {
+    var fillA = bad ? 0.04 * (0.4 + 0.6 * power) : 0.034 + 0.036 * (ok ? Math.max(0.5 * solid, restK) : 0)
+    var fillW = slipDy * HOLO_K * R * 1.1
+    for (var fi = 0; fi < silL.length; fi++) {
+      var fv = (buildY > -8 ? clamp01((silHy[fi] - buildY) / 0.12) : 1) * silOn[fi] * flickRaw
+      crisp.line(tint, fillA * fv, fillW, silL[fi].x, silL[fi].y, silR[fi].x, silR[fi].y)
+    }
+    crisp.flush()
+  }
+
   // Vertex cloud: flares as the lock starts, then fuses into the mesh.
   if (!compact) {
     var cloud = holoPoints()
-    var cloudA = ok ? (1 + bump(rt, 150, 400)) * (1 - easeInOutCubic(seg(rt, 450, 800))) : (bad ? 1 - 0.5 * frag : 1)
+    var cloudA = ok ? (1 + bump(rt, 150, 400)) * (1 - easeInOutCubic(seg(rt, 450, 800))) : (bad ? 0.6 * (0.4 + 0.6 * power) : 1)
     if (cloudA > 0.01) {
-      var dsz = Math.max(1, size * 0.0075)
+      var dsz = Math.max(1, size * 0.006)
       for (var cpi = 0; cpi < cloud.length; cpi++) {
         var cpt = cloud[cpi]
         var CQ = project(cpt.P)
         if (CQ.f < 0.05) continue
-        var cxq = CQ.x, cyq = CQ.y
-        if (bad) {
-          cxq += dragOffset((cpt.j - 0.5) * 0.9, fragTau, 3) + glitchX(cxq, cyq)
-          cyq += dragOffset((cpt.k - 0.3) * 0.6, fragTau, 3)
-        }
+        var chy = cpt.P[1]
+        var cvis = buildY > -8 ? clamp01((chy - buildY) / 0.12) : 1
+        if (cvis <= 0.02) continue
+        var cyq = lensY(CQ.y)
+        var cxq = CQ.x + glitchX(CQ.x, cyq) + slipField(chy)
         var shimmer = 0.5 + 0.5 * Math.sin(t / 180 + cpt.j * 40)
-        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((CQ.f - 0.05) / 0.3) * cloudA * flick
+        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((CQ.f - 0.05) / 0.3) * cloudA * flickRaw * cvis
         if (pa3 <= 0.02) continue
         var CP = toPx(cxq, cyq)
         if (LUMEN) ctx.glow = shimmer > 0.85 ? pa3 * 0.6 : 0
@@ -4318,69 +4638,169 @@ function paintHolo(ctx, size, spec) {
     }
   }
 
-  // Silhouette, from the chin up one side, over the crown and down the
-  // other. It carries the head at the small slot.
-  var outline = [], choutline = []
-  for (var oi = silL.length - 1; oi >= 0; oi--) outline.push([silL[oi].x, silL[oi].y])
-  for (var oj2 = 0; oj2 < silR.length; oj2++) outline.push([silR[oj2].x, silR[oj2].y])
-  for (var oc = 0; oc < outline.length; oc++) choutline.push([outline[oc][0] + chX * 1.5, outline[oc][1] + chY * 1.5])
-  var outA = (0.4 + 0.2 * solid + 0.2 * passFlash) * flick * (bad ? 1 - 0.6 * frag : 1)
-  if (!compact && chroma > 0.02) crisp.poly(LUMEN ? altOf(tint) : ROLE_FG, outA * 0.3, fine, choutline)
-  if (bad && frag > 0.05) {
-    for (var od = 0; od + 1 < outline.length; od += 2) crisp.line(tint, outA, thin, outline[od][0], outline[od][1], outline[od + 1][0], outline[od + 1][1])
-    crisp.poly(tint, outA * 0.35, thin, outline)
-  } else {
-    halo.poly(tint, outA * 0.16, thin * 3.6, outline)
-    crisp.poly(tint, outA, thin, outline)
+  // Glints: a few vertices catch the light, one after another.
+  if (!compact && !bad) {
+    var gcl = holoPoints()
+    for (var gl = 0; gl < 3; gl++) {
+      var gcyc = t / 820 + gl / 3
+      var gph = frac(gcyc)
+      var gp = gcl[Math.floor(hash(Math.floor(gcyc) * 3 + gl * 17 + 1) * gcl.length)]
+      var GQ = project(gp.P)
+      if (GQ.f < 0.3 || (buildY > -8 && gp.P[1] < buildY)) continue
+      var gla = Math.pow(Math.sin(Math.PI * gph), 2) * flickRaw * boot * (ok ? 0.75 : 1)
+      var GP = toPx(GQ.x, lensY(GQ.y))
+      var glr = R * 0.06 * (0.5 + 0.5 * Math.sin(Math.PI * gph))
+      var glRole = LUMEN ? hotOf(tint) : tint
+      crisp.line(glRole, gla * 0.9, fine * 1.1, GP.x - glr, GP.y, GP.x + glr, GP.y)
+      crisp.line(glRole, gla * 0.9, fine * 1.1, GP.x, GP.y - glr * 0.9, GP.x, GP.y + glr * 0.9)
+      soft.line(tint, gla * 0.25, bold * 1.4, GP.x - 0.2, GP.y, GP.x + 0.2, GP.y)
+    }
   }
 
+  // Silhouette, from the chin up one side, over the crown and down the
+  // other. It carries the head at the small slot. While the head is being
+  // built only the finished slices are in it, and its top edge is the front.
+  var outline = [], choutline = []
+  for (var oi = silL.length - 1; oi >= 0; oi--) if (buildY < -8 || silHy[oi] > buildY) outline.push([silL[oi].x, silL[oi].y])
+  for (var oj2 = 0; oj2 < silR.length; oj2++) if (buildY < -8 || silHy[oj2] > buildY) outline.push([silR[oj2].x, silR[oj2].y])
+  for (var oc = 0; oc < outline.length; oc++) choutline.push([outline[oc][0] + chX * 1.5, outline[oc][1] + chY * 1.5])
+  var outA = (0.4 + 0.2 * solid + 0.2 * passFlash + 0.1 * restK) * flickRaw * (bad ? 0.55 + 0.45 * power : 1)
+  if (!compact && chroma > 0.02) crisp.poly(LUMEN ? altOf(tint) : ROLE_FG, outA * 0.3, fine, choutline)
+  halo.poly(tint, outA * 0.16, thin * 3.6, outline)
+  crisp.poly(tint, outA, thin, outline)
+  if (LUMEN && !bad) crisp.poly(hotOf(tint), outA * (0.25 + 0.5 * passFlash + 0.2 * restK), Math.max(0.5, thin * 0.4), outline)
+  if (!compact && !bad && outline.length > 3) {
+    // The aura: the rim light spilling past the edge, in two fading steps.
+    var acx = 0, acy = 0
+    for (var ai = 0; ai < outline.length; ai++) { acx += outline[ai][0]; acy += outline[ai][1] }
+    acx /= outline.length
+    acy /= outline.length
+    for (var au = 0; au < 2; au++) {
+      var asc = 1.022 + au * 0.026
+      var apts = []
+      for (var aj = 0; aj < outline.length; aj++) apts.push([acx + (outline[aj][0] - acx) * asc, acy + (outline[aj][1] - acy) * asc])
+      crisp.poly(tint, outA * (au ? 0.1 : 0.2) * (1 + 0.5 * restK), fine, apts)
+    }
+  }
+  if (bad && !compact && roll !== 0 && rt < 520) {
+    // The vertical hold slipping: the picture shows twice, one frame apart.
+    var ghostDy = (roll > 0 ? -1 : 1) * R * 0.85
+    var gpoly = []
+    for (var gj = 0; gj < outline.length; gj++) gpoly.push([outline[gj][0], outline[gj][1] + ghostDy])
+    crisp.poly(tint, 0.3 * Math.min(1, Math.abs(roll) * 8), thin, gpoly)
+  }
   flush()
 
-  // --- orbit rings ------------------------------------------------------------------
+  // --- the build front, and the planes of light that scan, pulse and seal the head -------
+  if (!compact) {
+    if (buildY > -8) drawPlane(HOLO_CY + buildY * HOLO_K, 0.9, 2, -1, false, true)
+    if (bandK > 0.02 && bootK >= 1) {
+      drawPlane(bandY, bandK * (ok ? 0.7 : 1), ok ? 1 : 3, 1, true, scanning)
+      if (band2K > 0.02) drawPlane(band2Y, 0.4 * band2K, 0, 1, false, false)
+    }
+    if (pulseOn) {
+      drawPlane(pulseY, bump(rt, 20, 470), 3, -1, false, false)
+      // Streaks of light dragged up behind the pulse.
+      var pb = bodySpan(pulseY)
+      var pk = bump(rt, 20, 470)
+      for (var ps = 0; ps < 9; ps++) {
+        var psx = (ps / 8 * 2 - 1) * 0.9 * pb.w + pb.c
+        var psh = (0.14 + 0.2 * hash(ps * 3.7)) * (1 - 0.4 * Math.abs(ps / 4 - 1))
+        var psg = ctx.createLinearGradient(0, cy + pulseY * R, 0, cy + (pulseY + psh) * R)
+        psg.addColorStop(0, rgba(tint, 0.3 * pk))
+        psg.addColorStop(1, rgba(tint, 0))
+        ctx.fillStyle = psg
+        ctx.fillRect(cx + psx * R - fine, cy + pulseY * R, fine * 2, psh * R)
+      }
+    }
+    if (ringOn) drawPlane(ringY, bump(rt, 340, 960), 3, 1, true, false)
+    flush()
+  }
+
+  // --- orbit rings, levelling into a halo on a lock -----------------------------------
+  var fragK = bad ? easeOutCubic(seg(rt, 120, 700)) : 0
   if (!compact) {
     var orbits = [[0.95, 0.45, t / 5000 * TAU], [0.88, -0.5, -t / 7000 * TAU]]
     for (var ob = 0; ob < orbits.length; ob++) {
       var O = orbits[ob]
       var orad = O[0], tilt = O[1], orot = O[2]
-      var oA = flick * 0.75
+      var oyc = 0.05
+      var oA = flick * 0.75 * bootGate
+      var ok2 = 0
       if (ok) {
-        // Both orbits level out and settle as a halo at eye height.
-        var ok2 = easeInOutCubic(seg(rt, 150, 600))
+        // Both orbits level out and settle as a halo round the head, which
+        // snaps shut on PASS.
+        ok2 = easeInOutCubic(seg(rt, 200, 640))
         tilt = mix(tilt, 0, ok2)
         orad = mix(orad, ob ? 0.7 : 0.76, ok2)
-        oA *= 1 - 0.45 * seg(rt, 550, 850)
+        oyc = mix(0.05, HOLO_HALO_Y, ok2)
+        oA *= 1 - 0.2 * seg(rt, 640, 900) + 0.7 * passFlash
       }
       if (bad) {
-        tilt += (hash(Math.floor(rt / 60) * 5 + ob) - 0.5) * 0.8 * (1 - frag * 0.5)
-        oA *= 1 - frag * 0.8
+        tilt += (hash(Math.floor(rt / 60) * 5 + ob) - 0.5) * 0.8 * (1 - fragK * 0.5)
+        oA *= 1 - fragK * 0.85
       }
       if (oA <= 0.02) continue
       var ct = Math.cos(tilt), stl = Math.sin(tilt)
       var opts = [], oal = []
-      var nodes = []
       for (var oj = 0; oj <= 56; oj++) {
         var oa2 = oj / 56 * TAU + orot
         var X3 = Math.cos(oa2) * orad, Z3 = Math.sin(oa2) * orad
         var Y3 = -Z3 * stl, Zt = Z3 * ct
-        var OQ = project([X3, Y3 + 0.05, Zt])
+        var OQ = project([X3, Y3 + oyc, Zt])
         opts.push(toPx(OQ.x + glitchX(OQ.x, OQ.y), OQ.y))
-        oal.push((oj % 2 ? 0 : 1) * oA * (0.2 + 0.8 * clamp01((Zt + orad) / (2 * orad))))
+        var odash = oj % 2 ? (ob === 0 ? 1 - ok2 : 1) : 1
+        oal.push(odash * oA * (0.2 + 0.8 * clamp01((Zt + orad) / (2 * orad))))
       }
-      strip(crisp, tint, fine * 1.3, opts, oal)
+      strip(crisp, tint, ok && ob === 0 ? mix(fine * 1.3, thin, restK) : fine * 1.3, opts, oal)
+      if (ok && ob === 0 && restK > 0.02) {
+        var hpoly = []
+        for (var hp = 0; hp < opts.length; hp++) hpoly.push([opts[hp].x, opts[hp].y])
+        soft.poly(tint, restK * 0.07, bold * 2, hpoly)
+        if (LUMEN) strip(crisp, hotOf(tint), Math.max(0.5, fine), opts, oal.map(function (v) { return v * 0.6 * restK }))
+      }
+      if (ok && ob === 0 && restK > 0.02) {
+        // Graduations round the settled halo.
+        for (var gk = 0; gk < 48; gk++) {
+          var gka = gk / 48 * TAU + orot
+          var gkr0 = orad * (gk % 4 === 0 ? 0.94 : 0.97), gkr1 = orad * (gk % 4 === 0 ? 1.07 : 1.04)
+          var QA = project([Math.cos(gka) * gkr0, oyc, Math.sin(gka) * gkr0])
+          var QB = project([Math.cos(gka) * gkr1, oyc, Math.sin(gka) * gkr1])
+          var gfr = clamp01((Math.sin(gka) + 1) / 2)
+          crisp.line(tint, restK * oA * (0.15 + 0.5 * gfr * gfr), fine, cx + QA.x * R, cy + QA.y * R, cx + QB.x * R, cy + QB.y * R)
+        }
+      }
       for (var nd = 0; nd < 3; nd++) {
-        if (ok && seg(rt, 150, 600) >= 1 && nd > 0) break
+        if (ok && ok2 >= 1 && nd > 1) break
         var na = t / (1800 + ob * 700) * TAU * (ob ? -1 : 1) + nd * TAU / 3
         var NX = Math.cos(na) * orad, NZ = Math.sin(na) * orad
-        var NQ = project([NX, -NZ * stl + 0.05, NZ * ct])
+        var NQ = project([NX, -NZ * stl + oyc, NZ * ct])
         var NP = toPx(NQ.x, NQ.y)
         var nds = R * 0.024
-        var front = clamp01((NZ * ct + orad) / (2 * orad))
+        var nfront = clamp01((NZ * ct + orad) / (2 * orad))
         var ndia = [[NP.x, NP.y - nds], [NP.x + nds, NP.y], [NP.x, NP.y + nds], [NP.x - nds, NP.y], [NP.x, NP.y - nds]]
-        halo.poly(tint, oA * 0.2 * front, thin * 3, ndia)
-        crisp.poly(tint, oA * (0.3 + 0.7 * front), hair, ndia)
+        halo.poly(tint, oA * 0.2 * nfront, thin * 3, ndia)
+        crisp.poly(tint, oA * (0.3 + 0.7 * nfront), hair, ndia)
+      }
+    }
+    if (ok) {
+      // The halo snapping shut on PASS throws a ring outward.
+      var lrk = seg(rt, REC_PASS - 30, REC_PASS + 360)
+      if (lrk > 0 && lrk < 1) {
+        var lrr = mix(0.76, 1.2, easeOutCubic(lrk))
+        var lrp = []
+        for (var lj = 0; lj <= 40; lj++) {
+          var lja = lj / 40 * TAU
+          var LQ = project([Math.cos(lja) * lrr, HOLO_HALO_Y, Math.sin(lja) * lrr])
+          lrp.push([cx + LQ.x * R, cy + LQ.y * R])
+        }
+        var lra = 0.7 * Math.pow(1 - lrk, 1.5)
+        crisp.poly(LUMEN ? hotOf(tint) : tint, lra, thin, lrp)
+        soft.poly(tint, lra * 0.3, bold * 2, lrp)
       }
     }
     halo.flush()
+    soft.flush()
     crisp.flush()
   }
 
@@ -4388,7 +4808,7 @@ function paintHolo(ctx, size, spec) {
   if (hud) {
     var sx0 = R * 0.7
     var sy0 = HOLO_CY - 0.62, sy1 = HOLO_CY + 0.62
-    var sA = (bad ? 1 - 0.6 * frag : 1) * boot
+    var sA = (bad ? 0.45 + 0.55 * power : 1) * boot
     crisp.line(ROLE_FG, 0.3 * sA, fine, cx + sx0, cy + sy0 * R, cx + sx0, cy + sy1 * R)
     for (var sk = 0; sk <= 12; sk++) {
       var sky = cy + mix(sy0, sy1, sk / 12) * R
@@ -4397,9 +4817,9 @@ function paintHolo(ctx, size, spec) {
     var prof = [], pal = []
     for (var sp = 0; sp <= 30; sp++) {
       var py = mix(-0.6, 0.6, sp / 30)
-      var pz = headPoint(0, py)[2] * (bad ? 1 + (hash(Math.floor(rt / 40) * 31 + sp) - 0.5) * 0.5 * (1 - frag) : 1)
+      var pz = headPoint(0, py)[2] * (bad ? 1 + (hash(Math.floor(rt / 40) * 31 + sp) - 0.5) * 0.5 * (1 - fragK) : 1)
       prof.push({ x: cx + sx0 + pz * R * 0.34, y: cy + (py * HOLO_K + HOLO_CY) * R })
-      pal.push((0.55 + bandBoost(py * HOLO_K + HOLO_CY)) * sA * flick)
+      pal.push((0.55 + bandBoost(py * HOLO_K + HOLO_CY)) * sA * flickRaw)
     }
     strip(crisp, tint, fine * 1.5, prof, pal)
     var mk = scanning ? bandY : (ok ? mix(bandY, HOLO_CY, seg(rt, 0, 300)) : bandY)
@@ -4424,38 +4844,50 @@ function paintHolo(ctx, size, spec) {
       proj: function (X, Y, Z) {
         var V = headFaceVertex(X, Y, 0.03)
         var Q = project(V)
-        var PX = toPx(Q.x, Q.y)
+        var PX = toPx(Q.x, lensY(Q.y))
         return { x: PX.x, y: PX.y, v: clamp01((Q.f - 0.04) / 0.26) }
       },
       pass: function (X, Y, q) { return (bandY - (q.y - cy) / R) * boot - (1 - boot) },
-      post: function (q) { return bad ? { x: q.x + glitchX((q.x - cx) / R, (q.y - cy) / R) * R, y: q.y, v: q.v } : q },
+      post: function (q) {
+        if (!bad) return q
+        var qy = (q.y - cy) / R
+        return { x: q.x + (glitchX((q.x - cx) / R, qy) + slipField((qy - HOLO_CY - roll) / HOLO_K)) * R, y: q.y, v: q.v }
+      },
       tint: tint, U: R * HOLO_K, gain: baseA * flick, labels: size >= 150, clock: t, cx: cx,
       wLine: Math.max(0.6, size * 0.0042), wMark: hair
     })
     flush()
   }
 
-  // --- landmarks, beams, scanner rings and result gestures ------------------------------
+  // --- landmarks, beams and result gestures ---------------------------------------------
   var NS = holoNodes()
   var lmPx = []
   for (var lm = 0; lm < NS.nodes.length; lm++) {
     var LP = project(NS.nodes[lm].P)
-    lmPx.push({ p: toPx(LP.x + glitchX(LP.x, LP.y), LP.y), y: LP.y, f: LP.f })
+    var lly = lensY(LP.y)
+    lmPx.push({ p: toPx(LP.x + glitchX(LP.x, lly) + slipField(NS.nodes[lm].P[1]), lly), y: LP.y, f: LP.f })
   }
   if (!compact) {
-    // Projection beams from the emitter to the landmarks and the limb.
-    var beamA = (ok ? 1 + 2.5 * bump(rt, 520, 780) : (bad ? 1 - frag : 1)) * flick
+    // Projection beams from the emitter to the landmarks and the limb, with
+    // packets of light running along them.
+    var beamA = (ok ? 1 + 2.2 * bump(rt, 520, 780) + 0.3 * restK : (bad ? power * power : 1)) * flickRaw * coneUp
     if (beamA > 0.02) {
-      for (var bm = 0; bm < 24; bm++) {
-        var bea = bm / 24 * Math.PI
+      for (var bm = 0; bm < 16; bm++) {
+        var bea = bm / 16 * Math.PI
         var bx0 = cx + Math.cos(bea) * erx * R * (bm % 2 ? 1 : 0.7), by0 = cy + (EY + Math.sin(bea) * ery) * R
-        var target = lmPx[(bm * 7) % lmPx.length].p
-        if (lmPx[(bm * 7) % lmPx.length].f < 0.1) {
+        var bidx = (bm * 7 + 3) % lmPx.length
+        var target = lmPx[bidx].p
+        if (lmPx[bidx].f < 0.1) {
           var bsp = headSpan(HOLO_CY)
           target = toPx(bsp.c + (bm % 2 ? 1 : -1) * bsp.w * 0.95, HOLO_CY)
         }
         var bfl = 0.6 + 0.4 * hash(Math.floor(t / 90) * 13 + bm)
-        crisp.line(tint, 0.11 * bfl * beamA, fine, bx0, by0, target.x, target.y)
+        crisp.line(tint, 0.1 * bfl * beamA, fine, bx0, by0, target.x, target.y)
+        var bpk = frac(t / (1000 + 600 * hash(bm * 3.3)) + hash(bm * 1.9))
+        if (bpk < 0.93) {
+          var bpa = 0.5 * Math.sin(Math.PI * bpk) * beamA
+          crisp.line(tint, bpa, fine * 1.2, mix(bx0, target.x, bpk), mix(by0, target.y, bpk), mix(bx0, target.x, bpk + 0.07), mix(by0, target.y, bpk + 0.07))
+        }
       }
       crisp.flush()
     }
@@ -4469,53 +4901,29 @@ function paintHolo(ctx, size, spec) {
         crisp.poly(tint, sh * 0.9, hair, [[C0.x, C0.y - ds], [C0.x + ds, C0.y], [C0.x, C0.y + ds], [C0.x - ds, C0.y], [C0.x, C0.y - ds]])
       }
     } else if (ok) {
-      var lockK = []
-      for (var rl = 0; rl < lmPx.length; rl++) {
-        var lockAt = 280 + NS.nodes[rl].order * 55
-        lockK.push(lmPx[rl].f < 0.1 ? 0 : seg(rt, lockAt, lockAt + REC_LOCK_LEN))
-      }
-      // The solver lattice draws out on the surface between locked nodes.
-      for (var ge = 0; ge < NS.edges.length; ge++) {
-        var E = NS.edges[ge]
-        var ek = easeInOutCubic(Math.min(lockK[E[0]], lockK[E[1]]))
-        if (ek <= 0.01) continue
-        var GA = lmPx[E[0]].p, GB = lmPx[E[1]].p
-        var gmx = (GA.x + GB.x) / 2, gmy = (GA.y + GB.y) / 2
-        crisp.line(tint, 0.35 + 0.2 * passFlash, fine * 1.3, gmx, gmy, mix(gmx, GA.x, ek), mix(gmy, GA.y, ek))
-        crisp.line(tint, 0.35 + 0.2 * passFlash, fine * 1.3, gmx, gmy, mix(gmx, GB.x, ek), mix(gmy, GB.y, ek))
-      }
       for (var rl2 = 0; rl2 < lmPx.length; rl2++) {
-        var lk = lockK[rl2]
-        if (lk <= 0) continue
+        var lockAt = 280 + NS.nodes[rl2].order * 55
+        var lk2 = lmPx[rl2].f < 0.1 ? 0 : seg(rt, lockAt, lockAt + REC_LOCK_LEN)
+        if (lk2 <= 0) continue
         var LP2 = lmPx[rl2].p
         var ds2 = R * 0.014
-        crisp.poly(tint, clamp01(lk * 2) * (0.8 + 0.2 * passFlash), fine * 1.5, [[LP2.x, LP2.y - ds2], [LP2.x + ds2, LP2.y], [LP2.x, LP2.y + ds2], [LP2.x - ds2, LP2.y], [LP2.x, LP2.y - ds2]])
-        if (lk < 1) crisp.arc(tint, (1 - lk) * 0.8, fine, LP2.x, LP2.y, R * mix(0.07, 0.016, easeOutCubic(lk)), 0, TAU)
+        crisp.poly(tint, clamp01(lk2 * 2) * (0.8 + 0.2 * passFlash), fine * 1.5, [[LP2.x, LP2.y - ds2], [LP2.x + ds2, LP2.y], [LP2.x, LP2.y + ds2], [LP2.x - ds2, LP2.y], [LP2.x, LP2.y - ds2]])
+        if (lk2 < 1) crisp.arc(tint, (1 - lk2) * 0.8, fine, LP2.x, LP2.y, R * mix(0.07, 0.016, easeOutCubic(lk2)), 0, TAU)
       }
-      var scanRings = [[ringY, ringK, 1.1], [ring2Y, ring2K, 1.04]]
-      for (var sr2 = 0; sr2 < scanRings.length; sr2++) {
-        var SRy = scanRings[sr2][0], SRk = scanRings[sr2][1]
-        if (SRk <= 0.01) continue
-        var SRs = headSpan(SRy)
-        var rw = SRs.w * scanRings[sr2][2]
-        var rp = []
-        for (var ri = 0; ri <= 32; ri++) {
-          var ra = ri / 32 * TAU
-          rp.push([cx + (SRs.c + Math.cos(ra) * rw) * R, cy + (SRy + Math.sin(ra) * 0.07) * R])
+      // The pulse reaching the crown: a flare of rays and a ring of light
+      // spreading out across the top of the head.
+      if (crownK > 0.02) {
+        var cc = bodySpan(HOLO_CROWN + 0.03)
+        var ccx = cx + cc.c * R, ccy = cy + HOLO_CROWN * R
+        for (var rf = 0; rf < 9; rf++) {
+          var rfa = -Math.PI / 2 + (rf - 4) / 4 * 1.15
+          var rf0 = R * 0.05, rf1 = rf0 + R * (0.1 + 0.2 * hash(rf * 3.1)) * crownK
+          crisp.line(LUMEN ? hotOf(tint) : tint, crownK * 0.8, fine * 1.2, ccx + Math.cos(rfa) * rf0, ccy + Math.sin(rfa) * rf0, ccx + Math.cos(rfa) * rf1, ccy + Math.sin(rfa) * rf1)
         }
-        halo.poly(tint, SRk * 0.2, bold * 3, rp)
-        crisp.poly(tint, SRk * 0.9, thin, rp)
-      }
-      var wave = bump(rt, REC_WAVE[0], REC_WAVE[1])
-      if (wave > 0.01) {
-        var wk = easeOutCubic(seg(rt, REC_WAVE[0], REC_WAVE[1]))
-        var wp = []
-        for (var wi = 0; wi <= 32; wi++) {
-          var wa2 = wi / 32 * TAU
-          wp.push([cx + Math.cos(wa2) * mix(erx, 1.05, wk) * R, cy + (EY + Math.sin(wa2) * mix(ery, 0.2, wk)) * R])
-        }
-        halo.poly(tint, wave * 0.12, bold * 3, wp)
-        crisp.poly(tint, wave * 0.6, thin, wp)
+        var ck = easeOutCubic(seg(rt, 400, 820))
+        var cring = holoEllipse(ccx, ccy + R * 0.1, R * mix(0.12, 0.75, ck), R * mix(0.02, 0.13, ck), 36)
+        crisp.poly(tint, crownK * 0.7, thin, cring)
+        soft.poly(tint, crownK * 0.2, bold * 2, cring)
       }
     } else {
       for (var bl = 0; bl < lmPx.length; bl += 4) {
@@ -4528,16 +4936,20 @@ function paintHolo(ctx, size, spec) {
           R, lost, clamp01(bk * 2) * (0.85 - 0.45 * lost), hair, bl)
       }
       var ew = bump(rt, 0, 340)
-      if (ew > 0.01) crisp.arc(ROLE_ERROR, ew * 0.6, Math.max(1, size * 0.018), cx, cy, R * mix(0.1, 1.05, easeOutCubic(seg(rt, 0, 340))), 0, TAU)
+      if (ew > 0.01) crisp.arc(ROLE_ERROR, ew * 0.3, fine * 1.4, cx, cy, R * mix(0.1, 1.05, easeOutCubic(seg(rt, 0, 340))), 0, TAU)
       drawTears(crisp, tears, cx, cy, R)
+      // The vertical-hold bar rolling through the picture, once at the start
+      // and then as a slow hum.
+      syncBar(mix(-1.05, 1.05, easeInOutCubic(seg(rt, 0, 560))), 0.22, 0.2 * (1 - seg(rt, 380, 560)))
+      syncBar(mix(-1.1, 1.1, frac(t / 3400)), 0.16, 0.08 * seg(rt, 500, 800) * (0.4 + 0.6 * power))
       // Static while the projection fails.
       var noiseK = 1 - seg(rt, 350, 800)
       if (noiseK > 0) {
         var nstep = Math.floor(rt / 40)
-        for (var nz = 0; nz < 80; nz++) {
+        for (var nz = 0; nz < 40; nz++) {
           var nr = Math.sqrt(hash(nstep * 131 + nz)) * R
-          var na = hash(nstep * 71 + nz * 3) * TAU
-          var nx = cx + Math.cos(na) * nr, ny = cy + Math.sin(na) * nr
+          var na2 = hash(nstep * 71 + nz * 3) * TAU
+          var nx = cx + Math.cos(na2) * nr, ny = cy + Math.sin(na2) * nr
           var nlen = R * (0.02 + 0.07 * hash(nz * 13 + nstep))
           crisp.line(nz % 3 ? ROLE_ERROR : ROLE_FG, 0.4 * noiseK, fine, nx - nlen, ny, nx + nlen, ny)
         }
@@ -4553,7 +4965,7 @@ function paintHolo(ctx, size, spec) {
     flush()
   }
 
-  if (hud) paintHoloReadouts(crisp, size, state, t, rt, boot, tint, yaw, pitch, flick)
+  if (hud) paintHoloReadouts(crisp, size, state, t, rt, boot, tint, yaw, pitch, flickRaw)
   crisp.flush()
 }
 
