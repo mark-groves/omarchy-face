@@ -26,7 +26,7 @@ On a host that paints op level 2 (the Omarchy fork with the large card), every s
 
 | Style | Name | Look |
 | --- | --- | --- |
-| `hud` | Depth Lattice HUD | Structured-light depth cloud inside dense, counter-rotating instrument rings |
+| `hud` | Depth Lattice HUD | A lit, triangulated depth head under a sweeping scan plane, inside dense, counter-rotating instrument rings |
 | `radar` | Phosphor Radar | A plan-position scope whose sweep paints the face's topography as radar returns |
 | `holo` | Holographic Wireframe | A whole wireframe head and neck projected from an emitter, in structured-light slices |
 
@@ -59,7 +59,7 @@ What level 2 adds to every style:
 
 | Style | Bloom and additive light | Theme's second and third hues | White-hot core |
 | --- | --- | --- | --- |
-| HUD | About 480 depth dots (twice the level-1 lattice); the data ring, scan plane, lock rim and shockwaves bloom, as do the dots on the scan crest and the locking cloud | The oscilloscope trace and the link indicator in the corner readouts | Scan plane, data ring, lock rim, shockwaves, dots on the scan crest |
+| HUD | About 600 lit depth dots (twice the level-1 lattice) and a flickering IR speckle; the data ring, scan plane, lock rim and shockwaves bloom, as do the dots on the scan crest, the rim-lit silhouette and the glints | The oscilloscope trace and the link indicator in the corner readouts | Scan plane, data ring, lock rim, shockwaves, dots on the scan crest |
 | Radar | The sweep arm, lock ring, pings and fresh returns bloom | The oscilloscope trace and the link indicator in the corner readouts | Fresh returns behind the arm and returns under each ping |
 | Holo | The emitter, the rim light and shimmering vertices bloom | The chromatic fringe in two hues, plus the corner trace and indicator | The rim light where the head turns away, and shimmering vertices |
 
@@ -67,13 +67,15 @@ A miss still paints only in the error colour once the attempt fails.
 
 ## Depth Lattice HUD (`hud`)
 
-A biometric instrument: a structured-light depth cloud inside counter-rotating instrument rings, with a lock graph and seven-segment readouts in the corners.
+A biometric instrument: a lit, triangulated depth head inside counter-rotating instrument rings, with a lock graph and seven-segment readouts in the corners.
+
+The head is the shared head model (cranium, jaw, neck flaring into the shoulders), shown only as depth. It sways about 17 degrees each way under a key light from the upper left, so the shading slides over the relief. Each dot is sized and lit by its own surface normal (key light, a fresnel rim that brightens the silhouette, a specular lobe that throws a couple of glints) and falls off with depth. A coarse mesh is stitched into triangles over the surface, tilted structured-light stripes bend over it with a projector parallax, and a flickering IR speckle covers the head and the wall behind it, which slides against the head as it turns.
 
 | State | What the user sees |
 | --- | --- |
-| Scanning | Boots in: the rings draw on and the cloud assembles out of a scatter. The head is a dense, slope-shaded dot lattice on the relief (denser on the large card), linked row to row into a mesh, with a neck and a rim of silhouette dots, under twenty structured-light stripes that bend with the surface. It sways in yaw and pitch with depth parallax. A scan plane sweeps down and back up, lighting the dots and stripes it crosses. A second scanner crosses it at right angles, with a scan head where they meet. Around it, all at unrelated periods: a fine polar sub-grid, a radial spectrum of 96 bars with an orbiting crest, a vernier turning against the bezel, an outer micro-scale, a fast and a creeping spinner, satellites with tails on the dashed ring, landmark markers seating one by one as the scan plane passes them, and the graduated bezel, segmented data ring and dashed ring. |
-| Face recognized | The cloud defocuses and the planes collapse. Face-lock brackets fly in from outside and seat with an overshoot. The rings snap to their detents in a cascade, outermost first, while the spectrum drives to full. The dots lock in a wave from the centre out, and the stripes resolve top to bottom behind a sweep. The landmark markers confirm in a cascade from the brow down, each flashing its confidence label on cards large enough to hold them. The lattice stays as a settled mesh, the rim closes into a graduated dial, a lock burst of rays fires round the rim, and two shockwaves clear the field. The pose settles slightly off-axis. Confidence counts to 99.7 and the status reads `PASS`. |
-| Face not recognized | The attempt starts to lock, then stutters. The disc floods red and drains, a chromatic split slips the cloud off register, and static re-rolls every 40 ms. Bands shear, glitch strips tear, the rings jump out of sync, and the spectrum drains into spikes. The reticles lose track, the anchors release under drag, the stripes break, and the rim breaks into dashes. Confidence collapses and `FAIL` blinks. It stays a broken cloud. |
+| Scanning | Boots in 620 ms: a flash ignites at the reticle, a ring pulse with sparks runs out through the instrument, the rings draw on with a spark at each lead, and the lattice condenses out of a scatter while the head turns into pose. Then a scan plane sweeps down and back up along the head: its lit edge follows the surface, with a phosphor trail of echoes behind it. Dots ahead of it are noise and resolve as it arrives, the dots it has passed fade through white-hot, bright and dim memory, and the mesh and stripes light as it crosses. Landmark markers seat as it passes them. Around it, at unrelated periods: a polar sub-grid, a 96-bar spectrum with an orbiting crest, a vernier, an outer micro-scale, spinners, satellites with tails, hex telemetry, and the graduated bezel, segmented data ring and dashed ring. |
+| Face recognized | The cloud defocuses, then a completion wave runs down the head: behind it the dots lock to their homes with a flash, and the mesh and stripes resolve. The landmark markers confirm in a cascade from the brow down, the cardinal clamps slam in, and a bright lock ring flies in and clamps onto the head. On impact the rim flashes white-hot, rays burst off it, two shockwaves clear the field and the rim writes itself into a graduated dial. The rings snap to detents outermost first, then creep. The head settles slightly off-axis, a comet circles the dial, and glints and the dots breathe. Confidence counts to 99.7 and the status reads `PASS`. |
+| Face not recognized | The attempt scans for 450 ms in the accent, then desyncs: the disc floods red and drains, a chromatic split slips the cloud off register, horizontal slabs of the head slip sideways, glitch strips tear, and static re-rolls every 40 ms. The mesh tears apart point by point along the surface normals, edges snap, and points drop out in bursts. The rings jam, throwing sparks, and freeze out of true, the spectrum drains, the rim breaks into dashes and the reticles lose track. Confidence collapses and `FAIL` blinks. The head stays a lit, broken volume in the error colour. |
 
 Corner readouts are frame counter (top left), match confidence over a ten-cell bar (top right), sample histogram (bottom left), and status word (bottom right). Smaller sizes still paint (a reduced instrument, then a vector glyph below 48 px), but they are no longer a design target.
 
