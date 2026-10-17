@@ -186,23 +186,7 @@ var REC_CLAMP = [540, 720]
 var REC_PASS = 640
 var REC_WAVE = [620, 1040]
 
-// When each dot stops drifting and locks onto its home, and when it shrinks
-// out, handing the face to the wireframe. Both run as a wave from the
-// centre of the face outward.
-function recLock(p) {
-  if (p.kind === "field") return [200, 430]
-  return [150 + p.d * 300, 300 + p.d * 300]
-}
-
-function recDissolve(p) {
-  if (p.kind === "field") return [380, 570]
-  return [400 + p.d * 260, 580 + p.d * 260]
-}
-
 var CACHE = {}
-
-// Spacing of the dots laid along a feature line, in face units.
-var FEAT_DOT_GAP = 0.036
 
 // Seven-segment glyphs, segments a..g. Ghosted unlit segments are drawn under
 // every character, which is what makes a handful of strokes read as an
@@ -215,113 +199,189 @@ var SEG7 = {
   "L": "def", "-": "g", " ": ""
 }
 
-function buildParticles(seed, step) {
-  var key = "p3" + seed + ":" + step
+// --- the HUD head -----------------------------------------------------------
+//
+// The depth cloud lies on the shared head model (headPoint and headVertex,
+// read only): a cranium that runs back behind the face, a jaw, and a neck
+// that flares into the shoulders. Two lattices are laid on its surface once:
+// a fine one for the dots and a coarse one that is stitched into triangles.
+// Everything else (pose, light, scan, lock) is evaluated per frame.
+
+// Head space is the model's own. The head is turned about a vertical axis
+// through HUD_ZC and drawn HUD_YC lower so it sits centred on the instrument.
+var HUD_YC = 0.06
+var HUD_ZC = -0.08
+// Bearings kept on the lattice: a little past the profile, so the side of the
+// head is there when it turns. The far side is never seen.
+var HUD_UMAX = 1.85
+// A mild perspective: nearer points are a little larger.
+var HUD_PERSP = 0.16
+// Key light from the upper left; HUD_HALF is the half vector toward the viewer.
+var HUD_KEY = hudNorm([-0.5, -0.52, 0.69])
+var HUD_HALF = hudNorm([-0.5, -0.52, 1.69])
+// How high the scan plane travels, in head space, and where the neck dies out.
+var HUD_SCAN_Y = [-0.86, 0.95]
+var HUD_NECK_END = 0.84
+// Structured light is projected from beside the camera, so a stripe shifts
+// against the camera by this much per unit of depth.
+var HUD_PARALLAX = 0.15
+// The stripes are tilted, so they cross the mesh rows instead of doubling them.
+var HUD_SLANT = 0.2
+// When the lock ring flies in and seats, in authored milliseconds.
+var HUD_CLAMP = [400, 640]
+
+function hudNorm(v) {
+  var l = Math.hypot(v[0], v[1], v[2]) || 1
+  return [v[0] / l, v[1] / l, v[2] / l]
+}
+
+// The neck: a flared cylinder set back under the jaw, widening into the
+// shoulders as it goes down. The shared neckPoint stops at a plain collar.
+function hudNeckPoint(u, y) {
+  var k = clamp01((y - NECK_TOP) / 0.3)
+  var w = 0.19 + 0.05 * k + 0.2 * k * k
+  var d = 0.17 + 0.05 * k
+  return [Math.sin(u) * w, y, -0.1 + Math.cos(u) * d]
+}
+
+// Rows of vertices over the head and neck, `step` apart along the surface.
+// `mesh` stitches neighbouring rows into triangles and returns the edges; the
+// dot lattice is staggered row to row instead.
+function hudLattice(step, mesh) {
+  var key = "hl3" + step + (mesh ? "m" : "d")
   if (CACHE[key]) return CACHE[key]
+  var rnd = mulberry32(mesh ? 4242 : 1337)
+  var V = [], rows = [], edges = []
+  var dy = step * 0.88
+  var jit = mesh ? 0.06 : 0.14
 
-  var rnd = mulberry32(seed)
-  var ps = []
-
-  var curRow = -1
-  function push(kind, hx, hy, z, shade, stage) {
-    ps.push({
-      kind: kind, hx: hx, hy: hy, z: z, shade: shade, stage: stage, d: Math.hypot(hx, hy / 1.1),
-      sa: rnd(), sb: rnd(), sc: rnd(), n1: -1, n2: -1, n3: -1, row: curRow
-    })
+  function addRow(fn, y, neck) {
+    var N = 40, us = [-HUD_UMAX], acc = [0], prev = fn(-HUD_UMAX, y), j
+    for (j = 1; j <= N; j++) {
+      var u = mix(-HUD_UMAX, HUD_UMAX, j / N)
+      var P = fn(u, y)
+      acc.push(acc[j - 1] + Math.hypot(P[0] - prev[0], P[1] - prev[1], P[2] - prev[2]))
+      us.push(u)
+      prev = P
+    }
+    var L = acc[N]
+    var n = Math.max(3, Math.round(L / step) + 1)
+    var sp = L / (n - 1)
+    var parity = rows.length % 2
+    var idx = []
+    for (var i = 0; i < n; i++) {
+      var tl = (i + (mesh ? 0 : 0.5 * parity)) * sp
+      if (tl > L + 1e-6) break
+      if (i > 0 && i < n - 1) tl += (rnd() - 0.5) * sp * jit * 2
+      tl = clamp(tl, 0, L)
+      j = 0
+      while (j < N - 1 && acc[j + 1] < tl) j++
+      var k = (tl - acc[j]) / Math.max(1e-6, acc[j + 1] - acc[j])
+      var v = headVertex(fn, mix(us[j], us[j + 1], k), y)
+      V.push({
+        x: v[0], y: v[1], z: v[2], nx: v[3], ny: v[4], nz: v[5], f: tl / L, neck: neck,
+        ra: rnd(), rb: rnd(), rc: rnd(), d: Math.hypot(v[0], (v[1] + HUD_YC) / 1.1)
+      })
+      idx.push(V.length - 1)
+    }
+    rows.push({ idx: idx, neck: neck })
   }
 
-  var lx = -0.45, ly = -0.55, lz = 0.7
-  var ll = Math.hypot(lx, ly, lz)
-  function shadeAt(x, y) {
-    var e = 0.01
-    var zx = (holoZAt(x + e, y) - holoZAt(x - e, y)) / (2 * e)
-    var zy = (holoZAt(x, y + e) - holoZAt(x, y - e)) / (2 * e)
-    var nl = Math.hypot(zx, zy, 1)
-    return clamp01(0.5 + 0.5 * ((-zx * lx - zy * ly + lz) / (nl * ll)) * 1.4 - 0.2)
-  }
+  var y
+  for (y = -0.765; y <= 0.655; y += dy) addRow(headPoint, y, false)
+  for (y = 0.7; y <= HUD_NECK_END; y += dy) addRow(hudNeckPoint, y, true)
 
-  // A projected dot grid over the face, like a depth sensor's: near-regular
-  // rows that bend with the relief and the pose, which is what reads as a
-  // surface. No dot belongs to a feature.
-  var x, y, ins, row = 0
-  for (var gy = FACE_TOP + 0.02; gy <= FACE_CHIN; gy += step * 0.866) {
-    row++
-    curRow = row
-    for (var gx = -0.5 + (row % 2) * step * 0.5; gx <= 0.5; gx += step) {
-      x = gx + (rnd() - 0.5) * step * 0.12
-      y = gy + (rnd() - 0.5) * step * 0.12
-      ins = holoInside(x, y)
-      if (ins <= 0.04) continue
-      push(ins < 0.14 ? "edge" : "skin", x, y, holoZAt(x, y), shadeAt(x, y), -1)
+  if (mesh) {
+    var r, i
+    for (r = 0; r < rows.length; r++) {
+      var A = rows[r].idx
+      for (i = 0; i + 1 < A.length; i++) edges.push(A[i], A[i + 1])
+    }
+    // Stitch each pair of neighbouring rows into a strip of triangles: always
+    // advance the row whose next vertex is nearer along the surface.
+    for (r = 0; r + 1 < rows.length; r++) {
+      if (rows[r].neck !== rows[r + 1].neck) continue
+      var a = rows[r].idx, b = rows[r + 1].idx
+      var ia = 0, ib = 0
+      edges.push(a[0], b[0])
+      while (ia < a.length - 1 || ib < b.length - 1) {
+        var fa = ia < a.length - 1 ? V[a[ia + 1]].f : 9
+        var fb = ib < b.length - 1 ? V[b[ib + 1]].f : 9
+        if (fa <= fb) ia++
+        else ib++
+        edges.push(a[ia], b[ib])
+      }
     }
   }
-
-  curRow = -1
-  // The silhouette, as dots.
-  for (var side = -1; side <= 1; side += 2) {
-    var oacc = 0, lastY = FACE_TOP
-    for (var oy = FACE_TOP; oy <= FACE_CHIN - 0.004; oy += 0.01) {
-      oacc += 0.01
-      if (oacc < FEAT_DOT_GAP * 1.5) continue
-      oacc = 0
-      push("edge", side * faceHalfW(oy), oy, 0.02, 0.9, -1)
-    }
-  }
-  // The neck, set back under the jaw and fading toward the base: a head on
-  // a neck reads as a person where a bare mask reads as a print.
-  var neck = step * 0.8
-  for (y = 0.52; y <= 0.96; y += neck) {
-    var nk = clamp01((y - 0.52) / 0.44)
-    var nw = mix(0.19, 0.27, nk)
-    for (x = -nw; x <= nw + 1e-6; x += neck) {
-      var nxx = x + (rnd() - 0.5) * neck * 0.4
-      var nyy = y + (rnd() - 0.5) * neck * 0.4
-      if (faceHalfW(nyy) > Math.abs(nxx) - 0.02 && nyy < FACE_CHIN) continue
-      push("neck", nxx, nyy, -0.06, 0.4 + 0.3 * rnd(), -1)
-    }
-  }
-  push("edge", 0, FACE_TOP, 0.02, 0.9, -1)
-  push("edge", 0, FACE_CHIN, 0.02, 0.9, -1)
-
-  for (var i = 0; i < 44; i++) {
-    var a = rnd() * Math.PI * 2
-    var fr = 0.98 + rnd() * 0.62
-    push("field", Math.cos(a) * fr, Math.sin(a) * fr * 0.82, 0.10 + rnd() * 0.22, 0.5, -1)
-  }
-
-  // Static mesh topology, resolved once. Per-frame nearest-neighbour search
-  // would be quadratic every tick and is not needed: the homes never move.
-  var face = []
-  for (i = 0; i < ps.length; i++) if (ps[i].kind !== "field") face.push(i)
-  for (var fa = 0; fa < face.length; fa++) {
-    var pi = face[fa]
-    var b1 = 9, b2 = 9, b3 = 9, i1 = -1, i2 = -1, i3 = -1
-    for (var fb = 0; fb < face.length; fb++) {
-      if (fb === fa) continue
-      var pj = face[fb]
-      var d = Math.hypot(ps[pi].hx - ps[pj].hx, ps[pi].hy - ps[pj].hy)
-      if (d < b1) { b3 = b2; i3 = i2; b2 = b1; i2 = i1; b1 = d; i1 = pj }
-      else if (d < b2) { b3 = b2; i3 = i2; b2 = d; i2 = pj }
-      else if (d < b3) { b3 = d; i3 = pj }
-    }
-    ps[pi].n1 = i1
-    ps[pi].n2 = i2
-    ps[pi].n3 = i3
-  }
-  // The lattice links along its rows, so the mesh reads as structured light
-  // laid on the surface rather than as a scribble between near neighbours.
-  for (i = 0; i + 1 < ps.length; i++) {
-    if (ps[i].row >= 0) {
-      ps[i].n1 = ps[i + 1].row === ps[i].row ? i + 1 : -1
-      ps[i].n2 = -1
-    }
-  }
-
-  var fieldIdx = []
-  for (i = 0; i < ps.length; i++) if (ps[i].kind === "field") fieldIdx.push(i)
-
-  CACHE[key] = { all: ps, face: face, field: fieldIdx }
+  CACHE[key] = { V: V, rows: rows, edges: edges }
   return CACHE[key]
+}
+
+// Cross sections of the head and neck all the way round, for the silhouette:
+// per frame the outermost sample on each side is the outline.
+function hudSilhouette() {
+  if (CACHE.hudSil) return CACHE.hudSil
+  var rows = []
+  for (var y = -0.77; y <= HUD_NECK_END + 1e-6; y += 0.04) {
+    var s = []
+    for (var f = 0; f < 2; f++) {
+      if (f === 0 && y > HEAD_CHIN) continue
+      if (f === 1 && y < 0.6) continue
+      for (var j = 0; j < 36; j++) {
+        var P = (f ? hudNeckPoint : headPoint)(-Math.PI + j * TAU / 36, y)
+        s.push(P[0], P[2])
+      }
+    }
+    rows.push({ y: y, s: s })
+  }
+  CACHE.hudSil = rows
+  return rows
+}
+
+// Tilted structured-light stripes: the cut of the head with the planes
+// y + SLANT * x = c, found once.
+function hudStripeGeom() {
+  if (CACHE.hudStripes) return CACHE.hudStripes
+  var out = []
+  for (var c = -0.9; c <= 0.78; c += 0.12) {
+    var pts = []
+    for (var j = 0; j <= 38; j++) {
+      var u = mix(-1.5, 1.5, j / 38)
+      var y = c
+      for (var it = 0; it < 3; it++) y = c - HUD_SLANT * headPoint(u, y)[0]
+      if (y < -0.77 || y > HEAD_CHIN - 0.03) { pts.push(null); continue }
+      var sv = headVertex(headPoint, u, y)
+      pts.push({ x: sv[0], y: sv[1], z: sv[2], nx: sv[3], ny: sv[4], nz: sv[5], ra: hash(c * 97 + j * 1.3) })
+    }
+    out.push(pts)
+  }
+  CACHE.hudStripes = out
+  return out
+}
+
+// The projected IR speckle: a pseudo-random dot pattern, some on the head and
+// some on the wall behind it. Points on the wall slide against the head as
+// it turns, which is the parallax.
+function hudSpeckle() {
+  if (CACHE.hudSpeck) return CACHE.hudSpeck
+  var rnd = mulberry32(9001)
+  var out = []
+  var i
+  for (i = 0; i < 150; i++) {
+    var y = mix(-0.74, 0.62, rnd())
+    var v = headVertex(headPoint, mix(-1.35, 1.35, rnd()), y)
+    out.push({ x: v[0], y: v[1], z: v[2], nx: v[3], ny: v[4], nz: v[5], ra: rnd(), rb: rnd(), rc: rnd(), wall: false, d: Math.hypot(v[0], (v[1] + HUD_YC) / 1.1) })
+  }
+  for (i = 0; i < 110; i++) {
+    var a = rnd() * TAU
+    var r = Math.sqrt(0.12 + rnd() * 0.88) * 1.02
+    var wx = Math.cos(a) * r, wy = Math.sin(a) * r * 0.9 - HUD_YC
+    var hw = profileAt(HEAD_Y, HEAD_HALF, wy)
+    if (wy > -0.8 && wy < 0.7 && Math.abs(wx) < hw + 0.04) continue
+    out.push({ x: wx, y: wy, z: -0.55 + rnd() * 0.2, nx: 0, ny: 0, nz: 1, ra: rnd(), rb: rnd(), rc: rnd(), wall: true, d: r })
+  }
+  CACHE.hudSpeck = out
+  return out
 }
 
 // Signed distance from the scan plane, negative ahead of it and positive in its
@@ -332,12 +392,6 @@ function scanPlane(t) {
   var k = down ? ph * 2 : (1 - ph) * 2
   var eased = easeInOutCubic(k)
   return { y: mix(-0.97, 0.97, eased), dir: down ? 1 : -1 }
-}
-
-function acquisition(plane, y) {
-  var d = (plane.y - y) * plane.dir
-  if (d >= 0) return Math.exp(-d / 0.55)
-  return Math.exp(-(-d) / 0.055)
 }
 
 // Idle head pose. Two incommensurate periods, so the sway never visibly loops.
@@ -366,8 +420,10 @@ function ringPose(ring, state, t, rt) {
     // Rings snap in a cascade, outermost first, each with its own spring.
     var lag = ring * 45
     var k = easeOutCubic(seg(rt, REC_SETTLE[0] + lag, REC_SETTLE[1] + lag))
+    // Once seated a ring never quite stops: it creeps off its detent.
+    var creep = Math.max(0, rt - REC_SETTLE[1] - lag) * TAU / 24000 * (ring % 2 ? -1 : 1)
     return mix(ringAt(ring, t0 + rt * (1 - k)), target, k)
-      + spring(rt, REC_SETTLE[1] - 120 + lag, 300, 3.2) * 0.05 * (ring % 2 ? -1 : 1)
+      + spring(rt, REC_SETTLE[1] - 120 + lag, 300, 3.2) * 0.05 * (ring % 2 ? -1 : 1) + creep
   }
   if (state === "notRecognized") {
     // Desync: the rings jump in quantised steps while the lock is lost, then
@@ -572,6 +628,366 @@ function pad3(n) {
   return s
 }
 
+// --- HUD pose, scan and light -------------------------------------------------
+
+// The head sways far enough, about 17 degrees each way, that the relief
+// slides across the surface and the dots at the side of the head swing round
+// the front. Two incommensurate periods, so it never visibly loops.
+function hudYaw(t) { return 0.3 * Math.sin(t / 4600 * TAU) + 0.04 * Math.sin(t / 1650 * TAU + 0.6) }
+function hudPitch(t) { return 0.06 * Math.sin(t / 6700 * TAU + 1.1) - 0.03 }
+
+// The scan plane, as a head-space height and a direction of travel.
+function hudScan(t) {
+  var ph = (t % SWEEP_MS) / SWEEP_MS
+  var down = ph < 0.5
+  var k = down ? ph * 2 : (1 - ph) * 2
+  return { y: mix(HUD_SCAN_Y[0], HUD_SCAN_Y[1], easeInOutCubic(k)), dir: down ? 1 : -1 }
+}
+
+// What the scan has done to head height y: [crest, mid, tail, placed]. The
+// crest is the white-hot leading edge, mid the bright phosphor just behind
+// it, tail the long dim memory, and placed how settled the points are (ahead
+// of the plane they are still noise, and they resolve as it arrives).
+var HUD_ACQ = [0, 0, 0, 0]
+function hudAcq(plane, y) {
+  var d = (plane.y - y) * plane.dir
+  var a = HUD_ACQ
+  if (d >= 0) {
+    a[0] = Math.exp(-d / 0.045)
+    a[1] = Math.exp(-d / 0.2)
+    a[2] = Math.exp(-d / 0.85)
+    a[3] = 0.62 + 0.38 * Math.exp(-d / 1.1)
+  } else {
+    var e = -d
+    a[0] = Math.exp(-e / 0.03)
+    a[1] = 0.22 * Math.exp(-e / 0.08)
+    a[2] = 0.1 * Math.exp(-e / 0.5)
+    a[3] = 0.3 + 0.7 * Math.exp(-e / 0.14)
+  }
+  return a
+}
+
+// The same four numbers for the frame's state. A lock replaces the scan with
+// a completion wave that runs down the head: crest at the wave, mid the flash
+// behind it, tail how locked the point is, placed how settled.
+function hudStateAt(F, y) {
+  var a = HUD_ACQ
+  if (F.ok) {
+    var d = F.waveY - y
+    var lock = clamp01(d / 0.14)
+    a[0] = Math.exp(-Math.abs(d) / 0.05) * F.waveOn
+    a[1] = d > 0 ? Math.exp(-d / 0.24) * F.flashK : 0
+    a[2] = lock
+    a[3] = mix(0.35, 1, lock)
+    return a
+  }
+  hudAcq(F.plane, y)
+  if (F.bad) {
+    var k = easeOutCubic(seg(F.rt, 0, 260))
+    a[0] *= 1 - k
+    a[1] *= 1 - k
+    a[2] = mix(a[2], 0.62, k)
+    a[3] = mix(a[3], 0.55, k)
+  }
+  return a
+}
+
+// Horizontal slabs of the head slip sideways when the lock is lost: the
+// offsets are re-rolled every 55 ms at first and then freeze, and a few slabs
+// never come back.
+function hudSlip(F, y) {
+  var slab = Math.floor((y + 1) / 0.17)
+  var step = Math.min(8, Math.floor(F.rt / 55))
+  var live = (1 - easeOutCubic(seg(F.rt, 120, 520))) * seg(F.rt, 0, 40)
+  var stay = (hash(slab * 29 + 3) - 0.5) * 0.08 * easeOutCubic(seg(F.rt, 100, 400))
+  return (hash(slab * 13 + step * 7) - 0.5) * 0.3 * live + stay
+}
+
+// One model point to the screen through the frame's pose, with its light:
+// {x, y, z, nx, ny, nz (rotated), vis, b, rim, spec, D}. `b` is the surface
+// brightness under the key light, a fresnel rim and a specular lobe.
+function hudVertex(F, v) {
+  var x = v.x, y = v.y
+  if (F.bad) x += hudSlip(F, y)
+  var zc = v.z - HUD_ZC
+  var xr = x * F.cw + zc * F.sw
+  var z1 = -x * F.sw + zc * F.cw
+  var yy = y + HUD_YC
+  var yr = yy * F.cp - z1 * F.sp
+  var zr = yy * F.sp + z1 * F.cp
+  var nxr = v.nx * F.cw + v.nz * F.sw
+  var nz1 = -v.nx * F.sw + v.nz * F.cw
+  var nyr = v.ny * F.cp - nz1 * F.sp
+  var nzr = v.ny * F.sp + nz1 * F.cp
+  var ps = F.scale / (1 - HUD_PERSP * zr)
+  var o = { x: F.cx + xr * ps * F.RF, y: F.cy + yr * ps * F.RF, z: zr, nx: nxr, ny: nyr, nz: nzr, D: 0 }
+  if (F.bad) {
+    // Pulled apart along the surface normal, point by point: the mesh tears
+    // where neighbours part company.
+    o.D = F.tearD * (v.ra - 0.4)
+    o.x += nxr * o.D * F.RF
+    o.y += nyr * o.D * F.RF
+    if (F.tears.length) o.x += tearShift(F.tears, (o.y - F.cy) / F.R) * F.R
+  }
+  var K = HUD_KEY, H = HUD_HALF
+  var diff = nxr * K[0] + nyr * K[1] + nzr * K[2]
+  if (diff < 0) diff = 0
+  var rim = Math.pow(1 - clamp01(nzr), 2.2)
+  var hh = nxr * H[0] + nyr * H[1] + nzr * H[2]
+  var spec = hh > 0 ? Math.pow(hh, 38) : 0
+  o.rim = rim
+  o.spec = spec
+  o.vis = clamp01((nzr + 0.12) / 0.32)
+  o.b = clamp01(0.06 + 0.78 * Math.pow(diff, 1.5) + rim * (0.3 + 0.5 * (nxr < 0 ? 1 : 0.55)) + 0.55 * spec)
+  return o
+}
+
+// The scan plane's cut through the head at height y, as a screen polyline
+// that follows the surface: {x, y, v} per sample, v the visibility.
+function hudSliceLine(F, y, n) {
+  var out = []
+  if (y < HEAD_TOP + 0.02 || y > HUD_NECK_END) return out
+  var fn = y > HEAD_CHIN - 0.04 ? hudNeckPoint : headPoint
+  var yy = y + HUD_YC
+  for (var j = 0; j <= n; j++) {
+    var P = fn(mix(-1.5, 1.5, j / n), y)
+    var zc = P[2] - HUD_ZC
+    var xr = P[0] * F.cw + zc * F.sw
+    var z1 = -P[0] * F.sw + zc * F.cw
+    var yr = yy * F.cp - z1 * F.sp
+    var zr = yy * F.sp + z1 * F.cp
+    var ps = F.scale / (1 - HUD_PERSP * zr)
+    var rr = Math.hypot(P[0], zc) || 1
+    out.push({
+      x: F.cx + xr * ps * F.RF,
+      y: F.cy + (yr - HUD_PARALLAX * zr) * ps * F.RF,
+      v: clamp01(((-P[0] * F.sw + zc * F.cw) / rr + 0.1) / 0.3)
+    })
+  }
+  return out
+}
+
+// A bright dot with a spark's cross: the lead of something being drawn on.
+function hudSpark(halo, crisp, role, x, y, k, r, w) {
+  if (k <= 0.01) return
+  halo.line(role, 0.55 * k, w * 4.5, x, y, x + 0.01, y)
+  crisp.line(LUMEN ? hotOf(role) : role, k, w * 1.9, x, y, x + 0.01, y)
+  crisp.line(role, 0.6 * k, w * 0.7, x - r, y, x + r, y)
+  crisp.line(role, 0.6 * k, w * 0.7, x, y - r, x, y + r)
+}
+
+// The first frames: a flash at the centre of the reticle and a ring pulse out
+// through the instrument, with sparks riding its front. The rings draw on
+// behind it.
+function hudIgnite(halo, crisp, G) {
+  var rt = G.rt, R = G.R, cx = G.cx, cy = G.cy
+  if (!G.scanning || rt > 480) return
+  var tint = G.tint
+  var flash = Math.exp(-rt / 90)
+  var k1 = easeOutCubic(seg(rt, 0, 320))
+  var k2 = easeOutCubic(seg(rt, 0, 460))
+  if (flash > 0.02) {
+    glowArc(halo, crisp, tint, 0.85 * flash, R * 0.07, cx, cy, R * (0.035 + 0.05 * (1 - flash)), 0, TAU)
+  }
+  var armA = (1 - seg(rt, 90, 400)) * 0.95
+  if (armA > 0.02) {
+    var gap = R * 0.045, len = R * (0.06 + 0.46 * k1)
+    for (var q = 0; q < 4; q++) {
+      var ca = q * Math.PI / 2
+      glowLine(halo, crisp, tint, armA, G.thin, cx + Math.cos(ca) * gap, cy + Math.sin(ca) * gap,
+        cx + Math.cos(ca) * (gap + len), cy + Math.sin(ca) * (gap + len))
+    }
+  }
+  var pr = R * (0.08 + 0.96 * k2)
+  var pa = (1 - seg(rt, 0, 460)) * 0.8
+  if (pa > 0.02) {
+    glowArc(halo, crisp, tint, pa, G.thin * (1.5 - k2), cx, cy, pr, 0, TAU)
+    for (var s = 0; s < 8; s++) {
+      var sa = s * Math.PI / 4 + Math.PI / 8 + k2 * 0.5
+      var sx = cx + Math.cos(sa) * pr, sy = cy + Math.sin(sa) * pr
+      hudSpark(halo, crisp, tint, sx, sy, pa, R * 0.035, G.fine)
+    }
+  }
+}
+
+// The instrument rings: graduated bezel with a travelling cursor, segmented
+// data ring, orbiting carets, a fine dashed ring and the lock clamps. They
+// draw on during the boot with a spark at the lead of each, snap to detents
+// on a lock, and jam on a miss.
+function hudRings(halo, crisp, G) {
+  var R = G.R, cx = G.cx, cy = G.cy, boot = G.boot, tint = G.tint, dim = G.dim
+  var state = G.state, t = G.t, rt = G.rt, ok = G.ok, bad = G.bad
+  var hair = G.hair, thin = G.thin, bold = G.bold, fine = G.fine
+  var passFlash = G.passFlash, closeK = G.closeK
+  var t0 = t - rt
+
+  var bez = ringPose(0, state, t, rt)
+  var cur = ringPose(3, state, t, rt)
+  var rIn = R * 0.985
+  var drawn = seg(boot, 0, 0.8)
+  for (var bi = 0; bi < 72; bi++) {
+    if (bi / 72 > drawn) break
+    var ba = bez + bi * TAU / 72 - Math.PI / 2
+    var major = bi % 6 === 0
+    var rel = Math.atan2(Math.sin(ba - cur), Math.cos(ba - cur))
+    var near = Math.exp(-rel * rel / 0.10)
+    var la = (major ? 0.62 : 0.30) + near * 0.55 * (ok ? 1 - closeK : 1) + passFlash * 0.5
+    var len = R * (major ? 0.065 : 0.032) * (1 + near * 0.4)
+    crisp.line(major || near > 0.3 ? tint : ROLE_FG, la * dim, major ? thin : fine,
+      cx + Math.cos(ba) * rIn, cy + Math.sin(ba) * rIn,
+      cx + Math.cos(ba) * (rIn + len), cy + Math.sin(ba) * (rIn + len))
+  }
+  if (drawn > 0.02 && drawn < 0.98) {
+    var lead = bez + Math.floor(drawn * 72) * TAU / 72 - Math.PI / 2
+    hudSpark(halo, crisp, tint, cx + Math.cos(lead) * rIn, cy + Math.sin(lead) * rIn, 1, R * 0.05, fine)
+  }
+
+  // Segmented data ring.
+  var dr = R * 0.915
+  var drot = ringPose(1, state, t, rt)
+  var arcs = [[0.00, 1.55], [2.05, 1.05], [3.60, 2.15]]
+  var dataK = seg(boot, 0.15, 0.95)
+  for (var ai = 0; ai < arcs.length; ai++) {
+    var start = drot + arcs[ai][0]
+    var span = arcs[ai][1] * dataK
+    if (ok) {
+      var next = ai + 1 < arcs.length ? arcs[ai + 1][0] : TAU
+      span = mix(span, next - arcs[ai][0] - 0.02, closeK)
+    }
+    if (bad) span *= mix(1, 0.35, easeOutCubic(seg(rt, 60, 420)))
+    glowArc(halo, crisp, tint, (0.82 + passFlash * 0.18) * dim, bold, cx, cy, dr, start, start + span)
+    var ends = [start, start + span]
+    for (var ei = 0; ei < 2; ei++) {
+      crisp.line(tint, 0.7 * dim * dataK, hair,
+        cx + Math.cos(ends[ei]) * (dr - R * 0.04), cy + Math.sin(ends[ei]) * (dr - R * 0.04),
+        cx + Math.cos(ends[ei]) * (dr + R * 0.04), cy + Math.sin(ends[ei]) * (dr + R * 0.04))
+    }
+    if (dataK > 0.02 && dataK < 0.98) {
+      hudSpark(halo, crisp, tint, cx + Math.cos(ends[1]) * dr, cy + Math.sin(ends[1]) * dr, 1, R * 0.045, fine)
+    }
+  }
+
+  // Orbiting carets riding the data ring at their own rates.
+  if (!ok || closeK < 1) {
+    var carets = [t / 2100 * TAU, -t / 3700 * TAU + 2]
+    if (G.scanning === false) carets = [t0 / 2100 * TAU, -t0 / 3700 * TAU + 2]
+    for (var oc = 0; oc < carets.length; oc++) {
+      var ca = carets[oc]
+      var tipR = dr - R * 0.035
+      var baseR = dr - R * 0.095
+      var wing = 0.055
+      crisp.poly(tint, 0.85 * dataK * dim * (1 - closeK), thin, [
+        [cx + Math.cos(ca - wing) * baseR, cy + Math.sin(ca - wing) * baseR],
+        [cx + Math.cos(ca) * tipR, cy + Math.sin(ca) * tipR],
+        [cx + Math.cos(ca + wing) * baseR, cy + Math.sin(ca + wing) * baseR]
+      ])
+    }
+  }
+
+  // Fine dashed inner ring.
+  var dsh = ringPose(2, state, t, rt)
+  var dashR = R * 0.862
+  var dashK = seg(boot, 0.3, 1)
+  for (var di = 0; di < 48; di++) {
+    if (di / 48 > dashK) break
+    var da = dsh + di * TAU / 48
+    crisp.arc(FG2, (LUMEN ? 0.42 : 0.20) * dim, hair, cx, cy, dashR, da, da + 0.055)
+  }
+
+  // Lock clamps at the cardinals: they idle just outside the data ring and
+  // slam inward just before the lock ring seats.
+  var clampIn = ok ? easeOutBack(seg(rt, HUD_CLAMP[0], HUD_CLAMP[1])) : 0
+  var clampOut = bad ? easeOutCubic(seg(rt, 80, 400)) : 0
+  for (var cq = 0; cq < 4; cq++) {
+    var qa = cq * Math.PI / 2 + (ok ? 0 : Math.sin(t / 1500 + cq) * 0.02)
+    var qr = R * (1.0 - 0.10 * clampIn + 0.06 * clampOut)
+    var qw = 0.07
+    var qd = R * 0.05
+    crisp.poly(tint, (0.55 + 0.45 * clampIn) * dim * boot, thin, [
+      [cx + Math.cos(qa - qw) * (qr + qd), cy + Math.sin(qa - qw) * (qr + qd)],
+      [cx + Math.cos(qa) * qr, cy + Math.sin(qa) * qr],
+      [cx + Math.cos(qa + qw) * (qr + qd), cy + Math.sin(qa + qw) * (qr + qd)]
+    ])
+  }
+}
+
+// The head's outline for this pose: the outermost sample of each cross
+// section on either side, so a turn shows the cranium behind the face.
+function hudOutline(F) {
+  var rows = hudSilhouette(), out = []
+  for (var r = 0; r < rows.length; r++) {
+    var row = rows[r], s = row.s, yy = row.y + HUD_YC
+    var xl = 1e9, xr = -1e9, yl = 0, yrr = 0
+    for (var j = 0; j < s.length; j += 2) {
+      var x = s[j], zc = s[j + 1] - HUD_ZC
+      var xr0 = x * F.cw + zc * F.sw
+      var z1 = -x * F.sw + zc * F.cw
+      var yr = yy * F.cp - z1 * F.sp
+      var zr = yy * F.sp + z1 * F.cp
+      var ps = F.scale / (1 - HUD_PERSP * zr)
+      var X = xr0 * ps
+      if (X < xl) { xl = X; yl = yr * ps }
+      if (X > xr) { xr = X; yrr = yr * ps }
+    }
+    var o = { y: row.y, xl: F.cx + xl * F.RF, yl: F.cy + yl * F.RF, xr: F.cx + xr * F.RF, yr: F.cy + yrr * F.RF }
+    if (F.bad) {
+      var sl = hudSlip(F, row.y) * F.RF
+      o.xl += sl + (F.tears.length ? tearShift(F.tears, (o.yl - F.cy) / F.R) * F.R : 0)
+      o.xr += sl + (F.tears.length ? tearShift(F.tears, (o.yr - F.cy) / F.R) * F.R : 0)
+    }
+    out.push(o)
+  }
+  return out
+}
+
+// The scan plane or the completion wave as a light on the head: a bright
+// leading edge that follows the surface, a phosphor trail of echoes behind
+// it, and the beam running on to the edge of the disc.
+function hudBeam(halo, crisp, G, F, y, dir, k, tint, trail) {
+  var R = G.R, cx = G.cx, cy = G.cy
+  var i, j
+  var hotRole = LUMEN ? hotOf(tint) : tint
+  for (i = trail; i >= 0; i--) {
+    var yy = y - dir * i * 0.052 * (1 + i * 0.35)
+    var line = hudSliceLine(F, yy, 34)
+    if (line.length < 2) continue
+    var fade = i === 0 ? 1 : 0.5 / (i * 1.15)
+    var run = []
+    for (j = 0; j <= line.length; j++) {
+      var p = j < line.length ? line[j] : null
+      if (p && p.v > 0.12) { run.push([p.x, p.y]); continue }
+      if (run.length > 1) {
+        if (i === 0) {
+          halo.poly(tint, 0.32 * k, G.thin * 3.2, run)
+          crisp.poly(tint, 0.95 * k, G.thin, run)
+          if (LUMEN) crisp.poly(hotRole, 0.85 * k, Math.max(0.5, G.thin * 0.45), run)
+        } else {
+          crisp.poly(tint, 0.34 * k * fade, G.hair, run)
+        }
+      }
+      run = []
+    }
+  }
+  // The beam beyond the head, out to the disc, with range ticks.
+  var lead = hudSliceLine(F, y, 34)
+  if (lead.length < 2) return
+  var mid = lead[Math.floor(lead.length / 2)]
+  var yu = (mid.y - cy) / R
+  var chord = R * Math.sqrt(Math.max(0.0001, 1 - yu * yu))
+  var first = null, last = null
+  for (j = 0; j < lead.length; j++) if (lead[j].v > 0.12) { if (!first) first = lead[j]; last = lead[j] }
+  if (!first) first = last = mid
+  crisp.line(tint, 0.55 * k, G.hair, cx - chord, first.y, first.x, first.y)
+  crisp.line(tint, 0.55 * k, G.hair, last.x, last.y, cx + chord, last.y)
+  for (var tk = -9; tk <= 9; tk++) {
+    var tx = cx + tk * chord / 10
+    if (tx > first.x - G.R * 0.02 && tx < last.x + G.R * 0.02) continue
+    var ty = tx < cx ? first.y : last.y
+    crisp.line(tint, 0.5 * k, G.hair, tx, ty, tx, ty + R * (tk % 5 === 0 ? 0.05 : 0.022) * (tk % 2 ? -dir : dir))
+  }
+  return { l: [cx - chord, first.y], r: [cx + chord, last.y] }
+}
+
 function paintHud(ctx, size, spec) {
   var state = spec.state || "scanning"
   var t = spec.clock || 0
@@ -583,13 +999,12 @@ function paintHud(ctx, size, spec) {
   // The large card on a level-2 host gets a finer lattice: about twice the
   // points, each smaller, so the cloud reads as a dense depth scan.
   var dense = LUMEN && size >= 160
-  var latStep = dense ? 0.052 : 0.088
-  var P = buildParticles(1337, latStep)
-  var ps = P.all
+  var dStep = compact ? 0.15 : (dense ? 0.058 : 0.096)
+  var mStep = dense ? 0.112 : 0.17
   var cx = size / 2
   var cy = size / 2
   var R = size * 0.45
-  // The face sits a little inside the instrument, which leaves an annulus for
+  // The head sits a little inside the instrument, which leaves an annulus for
   // the spectrum ring between the rim and the dashed ring.
   var FSC = compact ? 1 : 0.856
   var RF = R * FSC
@@ -615,42 +1030,47 @@ function paintHud(ctx, size, spec) {
   var boot = scanning ? easeOutCubic(seg(rt, 0, BOOT_MS)) : 1
   var t0 = t - rt
 
-  // Pose: idle sway, eased to face-on by a lock and frozen by a miss.
-  var yaw = swayYaw(t)
-  var pitch = swayPitch(t)
-  if (ok) {
-    // The lock settles slightly off-axis, so the relief reads in 3D rather
-    // than as flat nested rings.
-    var still = easeOutCubic(seg(rt, 0, 420))
-    yaw = mix(swayYaw(t0 + rt * (1 - still)), 0.3, still)
-    pitch = mix(swayPitch(t0 + rt * (1 - still)), -0.2, still)
-  } else if (bad) {
-    yaw = swayYaw(t0 + rt * 0.2)
-    pitch = swayPitch(t0 + rt * 0.2)
+  // Pose: idle sway, turning in with the lattice at boot, eased to a slight
+  // three-quarter by a lock and frozen (with a stutter) by a miss.
+  var yaw = hudYaw(t)
+  var pitch = hudPitch(t)
+  if (scanning) {
+    yaw += (1 - boot) * 0.9
+    pitch -= (1 - boot) * 0.1
+  } else if (ok) {
+    var still = easeOutCubic(seg(rt, 0, 520))
+    yaw = mix(hudYaw(t0 + rt * (1 - still)), 0.2, still)
+    pitch = mix(hudPitch(t0 + rt * (1 - still)), -0.07, still)
+  } else {
+    yaw = hudYaw(t0 + rt * 0.2)
+    pitch = hudPitch(t0 + rt * 0.2)
+    var jst = Math.min(7, Math.floor(rt / 55))
+    if (jst > 0) yaw += (hash(jst * 7 + 3) - 0.5) * 0.18 * (1 - seg(rt, 200, 420))
   }
-  var cyaw = Math.cos(yaw), syaw = Math.sin(yaw)
-  var cpit = Math.cos(pitch), spit = Math.sin(pitch)
 
-  var plane = scanPlane(scanning ? t : t0)
+  // Result gestures.
+  var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
+  var closeK = ok ? easeInOutCubic(seg(rt, 470, 760)) : 0
+  var dim = bad ? mix(1, 0.55, easeOutCubic(seg(rt, 200, 700))) : 1
+  var faceScale = 1 + (ok ? spring(rt, REC_PASS, 300, 3) * 0.03 : 0)
+  var rimR = RF * RIM_R
+  var plane = hudScan(scanning ? t : t0)
 
-  // Global result gestures.
-  var lockPulse = ok ? spring(rt, 430, 330, 2.8) * 0.045 : 0
-  var faceScale = 1 + lockPulse
-  var shearK = bad ? (1 - easeOutCubic(seg(rt, 70, 240))) * seg(rt, 0, 60) : 0
-  var scatterTau = bad ? Math.max(0, rt - 150) / 1000 : 0
-  var errWave = bad ? seg(rt, 0, 220) * 2.2 : 0
-
-  // Glitch tears drag the dots inside them sideways.
-  var tears = bad ? glitchTears(rt) : []
-
-  // Face space to screen, through the sway. `d` is depth toward the viewer.
-  function project(x, y, d) {
-    var xr = x * cyaw + d * syaw
-    var zr = -x * syaw + d * cyaw
-    var yr = y * cpit - zr * spit
-    return { x: xr, y: yr }
+  var F = {
+    cw: Math.cos(yaw), sw: Math.sin(yaw), cp: Math.cos(pitch), sp: Math.sin(pitch),
+    cx: cx, cy: cy, R: R, RF: RF, scale: faceScale,
+    ok: ok, bad: bad, rt: rt, t: t, plane: plane,
+    waveY: ok ? mix(-0.92, 1.0, easeInOutCubic(seg(rt, 120, 640))) : 0,
+    waveOn: ok ? 1 : 0,
+    flashK: ok ? 1 - 0.85 * seg(rt, 560, 1000) : 0,
+    tearD: bad ? easeOutCubic(seg(rt, 60, 520)) * 0.16 + seg(rt, 520, 900) * 0.03 : 0,
+    tears: bad ? glitchTears(rt) : []
   }
-  function toPx(x, y) { return { x: cx + x * RF, y: cy + y * RF } }
+  var G = {
+    size: size, R: R, cx: cx, cy: cy, boot: boot, tint: tint, dim: dim, state: state, t: t, rt: rt,
+    ok: ok, bad: bad, scanning: scanning, hair: hair, thin: thin, bold: bold, fine: fine,
+    passFlash: passFlash, closeK: closeK
+  }
 
   var halo = haloPen(ctx)
   var crisp = pen(ctx)
@@ -662,6 +1082,8 @@ function paintHud(ctx, size, spec) {
     crisp.flush()
     return
   }
+
+  var i, j, k, a, o, v
 
   // --- backplate: scanlines and a faint graticule ----------------------------
   if (!compact) {
@@ -677,99 +1099,12 @@ function paintHud(ctx, size, spec) {
     crisp.line(tint, 0.10 * boot, hair, cx + R * 0.90, cy, cx + R * 0.98, cy)
     crisp.line(tint, 0.10 * boot, hair, cx, cy - R * 0.98, cx, cy - R * 0.90)
     crisp.line(tint, 0.10 * boot, hair, cx, cy + R * 0.90, cx, cy + R * 0.98)
-    hudGraticule(crisp, cx, cy, R, fine, hair, boot, tint, t)
+    // The graticule sits behind the head and slides against it a little.
+    hudGraticule(crisp, cx - F.sw * R * 0.035, cy + F.sp * R * 0.03, R, fine, hair, boot, tint, t)
     flush()
-  }
 
-  // --- instrument rings -----------------------------------------------------
-  var dim = bad ? mix(1, 0.55, easeOutCubic(seg(rt, 200, 700))) : 1
-  var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
-  var closeK = ok ? easeInOutCubic(seg(rt, 470, 760)) : 0
-
-  if (!compact) {
-    // Graduated bezel with a travelling bright cursor.
-    var bez = ringPose(0, state, t, rt)
-    var cur = ringPose(3, state, t, rt)
-    var rIn = R * 0.985
-    var drawn = seg(boot, 0, 0.8)
-    for (var bi = 0; bi < 72; bi++) {
-      if (bi / 72 > drawn) break
-      var ba = bez + bi * TAU / 72 - Math.PI / 2
-      var major = bi % 6 === 0
-      var rel = Math.atan2(Math.sin(ba - cur), Math.cos(ba - cur))
-      var near = Math.exp(-rel * rel / 0.10)
-      var la = (major ? 0.62 : 0.30) + near * 0.55 * (ok ? 1 - closeK : 1) + passFlash * 0.5
-      var len = R * (major ? 0.065 : 0.032) * (1 + near * 0.4)
-      crisp.line(major || near > 0.3 ? tint : ROLE_FG, la * dim, major ? thin : fine,
-        cx + Math.cos(ba) * rIn, cy + Math.sin(ba) * rIn,
-        cx + Math.cos(ba) * (rIn + len), cy + Math.sin(ba) * (rIn + len))
-    }
-
-    // Segmented data ring. Three arcs with notched ends; a lock grows them
-    // until the gaps close, a miss shrinks them to fragments.
-    var dr = R * 0.915
-    var drot = ringPose(1, state, t, rt)
-    var arcs = [[0.00, 1.55], [2.05, 1.05], [3.60, 2.15]]
-    var dataK = seg(boot, 0.15, 0.95)
-    for (var ai = 0; ai < arcs.length; ai++) {
-      var start = drot + arcs[ai][0]
-      var span = arcs[ai][1] * dataK
-      if (ok) {
-        var next = ai + 1 < arcs.length ? arcs[ai + 1][0] : TAU
-        span = mix(span, next - arcs[ai][0] - 0.02, closeK)
-      }
-      if (bad) span *= mix(1, 0.35, easeOutCubic(seg(rt, 60, 420)))
-      glowArc(halo, crisp, tint, (0.9 + passFlash * 0.1) * dim, bold, cx, cy, dr, start, start + span)
-      var ends = [start, start + span]
-      for (var ei = 0; ei < 2; ei++) {
-        crisp.line(tint, 0.7 * dim * dataK, hair,
-          cx + Math.cos(ends[ei]) * (dr - R * 0.04), cy + Math.sin(ends[ei]) * (dr - R * 0.04),
-          cx + Math.cos(ends[ei]) * (dr + R * 0.04), cy + Math.sin(ends[ei]) * (dr + R * 0.04))
-      }
-    }
-
-    // Orbiting carets riding the data ring at their own rates.
-    if (!ok || closeK < 1) {
-      var carets = [t / 2100 * TAU, -t / 3700 * TAU + 2]
-      if (!scanning) carets = [t0 / 2100 * TAU, -t0 / 3700 * TAU + 2]
-      for (var oc = 0; oc < carets.length; oc++) {
-        var ca = carets[oc]
-        var tipR = dr - R * 0.035
-        var baseR = dr - R * 0.095
-        var wing = 0.055
-        crisp.poly(tint, 0.85 * dataK * dim * (1 - closeK), thin, [
-          [cx + Math.cos(ca - wing) * baseR, cy + Math.sin(ca - wing) * baseR],
-          [cx + Math.cos(ca) * tipR, cy + Math.sin(ca) * tipR],
-          [cx + Math.cos(ca + wing) * baseR, cy + Math.sin(ca + wing) * baseR]
-        ])
-      }
-    }
-
-    // Fine dashed inner ring.
-    var dsh = ringPose(2, state, t, rt)
-    var dashR = R * 0.862
-    var dashK = seg(boot, 0.3, 1)
-    for (var di = 0; di < 48; di++) {
-      if (di / 48 > dashK) break
-      var da = dsh + di * TAU / 48
-      crisp.arc(FG2, (LUMEN ? 0.42 : 0.20) * dim, hair, cx, cy, dashR, da, da + 0.055)
-    }
-
-    // Lock clamps at the cardinals. They idle just outside the data ring and
-    // slam inward on a lock.
-    var clampIn = ok ? easeOutBack(seg(rt, REC_CLAMP[0], REC_CLAMP[1])) : 0
-    var clampOut = bad ? easeOutCubic(seg(rt, 80, 400)) : 0
-    for (var cq = 0; cq < 4; cq++) {
-      var qa = cq * Math.PI / 2 + (ok ? 0 : Math.sin(t / 1500 + cq) * 0.02)
-      var qr = R * (1.0 - 0.10 * clampIn + 0.06 * clampOut)
-      var qw = 0.07
-      var qd = R * 0.05
-      crisp.poly(tint, (0.55 + 0.45 * clampIn) * dim * boot, thin, [
-        [cx + Math.cos(qa - qw) * (qr + qd), cy + Math.sin(qa - qw) * (qr + qd)],
-        [cx + Math.cos(qa) * qr, cy + Math.sin(qa) * qr],
-        [cx + Math.cos(qa + qw) * (qr + qd), cy + Math.sin(qa + qw) * (qr + qd)]
-      ])
-    }
+    // --- instrument rings -----------------------------------------------------
+    hudRings(halo, crisp, G)
     hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boot, dim, tint, passFlash, closeK)
     if (hud) telemetryColumns(crisp, cx, cy, R, size, state, t, rt, boot, tint, 0.62)
     flush()
@@ -784,237 +1119,299 @@ function paintHud(ctx, size, spec) {
     crisp.flush()
   }
 
-  // --- resolve every particle's on-screen position -------------------------
-  var pos = new Array(ps.length)
-  var lit = new Array(ps.length)
+  // --- the head, as light ---------------------------------------------------------
+  // How bright the surface is, from the key light, the rim and the scan.
+  var hotRole = LUMEN ? hotOf(tint) : tint
+  var breath = ok ? 1 + 0.07 * Math.sin(t / 340) * seg(rt, 700, 900) : 1
+  var dotBase = Math.max(1, size * (compact ? 0.030 : (dense ? 0.0092 : 0.0125)))
 
-  for (var i = 0; i < ps.length; i++) {
-    var p = ps[i]
-    var hx = p.hx
-    var hy = p.hy
-    var a = 0
-
-    // Unacquired dots drift; acquisition pulls them onto the depth surface.
-    var pr = project(hx, hy, p.z * DEPTH)
-
-    if (scanning) {
-      a = acquisition(plane, pr.y * FSC)
-      if (p.kind === "field") a *= 0.35
-    } else if (ok) {
-      var lw = recLock(p)
-      a = p.kind === "field" ? 0.3 : easeOutCubic(seg(rt, lw[0], lw[1]))
-    } else {
-      // The head keeps the level the scan left it at and settles to a dimmer
-      // steady one: a miss loses its lock, not its subject.
-      a = mix(clamp01(acquisition(plane, pr.y * FSC)), 0.5, easeOutCubic(seg(rt, 0, 260)))
-    }
-
-    var wander = bad ? 0.05 : 1 - a
-    var slack = p.kind === "field" ? 0.150 : (p.kind === "edge" ? 0.05 : 0.09)
-    var x = pr.x + Math.sin(t / 1000 * 0.85 + p.sa * 6.283) * slack * wander
-    var y = pr.y + Math.cos(t / 1000 * 0.71 + p.sb * 6.283) * slack * wander
-
-    if (boot < 1) {
-      // Assemble from a scatter as the card comes up.
-      var sc = (1 - boot) * (0.35 + p.sc * 0.5)
-      var ang = p.sa * TAU
-      x += Math.cos(ang) * sc
-      y += Math.sin(ang) * sc
-    }
-
-    if (ok) {
-      // Rack out of focus, then in. This is the "unclear" beat that makes the
-      // lock-on legible as a change rather than as a state that was always true.
-      var defoc = bump(rt, 0, 165) * 0.085 * wander
-      x = x * (1 + defoc) * faceScale
-      y = y * (1 + defoc) * faceScale
-    }
-
-    if (bad) {
-      // Depth lock breaks: horizontal slices shear, then anchors let go.
-      var band = Math.floor((hy + 1.2) / 0.48)
-      x += shearK * (band % 2 === 0 ? 0.16 : -0.16)
-      x += tearShift(tears, y)
-
-      if (scatterTau > 0) {
-        var len2 = Math.hypot(hx, hy) || 0.001
-        var spread = p.kind === "field" ? 2.1 : 0.1
-        var vx = (hx / len2) * spread * (0.45 + p.sa)
-        var vy = (hy / len2) * spread * (0.45 + p.sb) - 0.25
-        x += dragOffset(vx, scatterTau, 4.2)
-        y += dragOffset(vy, scatterTau, 4.2)
-      }
-    }
-
-    pos[i] = toPx(x, y)
-    lit[i] = a * (boot < 1 ? boot : 1)
-  }
-
-  // --- recognition: the ambient field is swept out and leaves nothing ------
-  var waveR = ok ? mix(0.15, 2.0, easeOutCubic(seg(rt, 150, 620))) : 0
-
-  if (ok) {
-    for (var fi2 = 0; fi2 < P.field.length; fi2++) {
-      var idx = P.field[fi2]
-      var fp = ps[idx]
-      var pushed = clamp01((waveR - Math.hypot(fp.hx, fp.hy)) * 1.4)
-      pos[idx] = {
-        x: pos[idx].x + (pos[idx].x - cx) * pushed * 1.25,
-        y: pos[idx].y + (pos[idx].y - cy) * pushed * 1.25
-      }
-      lit[idx] = (1 - pushed) * 0.5
-    }
-  }
-
-  // --- the cloud --------------------------------------------------------------
-  var dotBase = Math.max(1, size * (compact ? 0.030 : (dense ? 0.0128 : 0.0168)))
-
+  var outline = null
   if (!compact) {
-    // Longer than a jittered row neighbour at this step, shorter than a link
-    // that would bridge a gap in the row.
-    var meshCap = Math.max(0.085, latStep * 1.3)
-    var meshFade = ok ? 1 - 0.3 * easeInOutCubic(seg(rt, 390, 620)) : 1
-    if (meshFade > 0.01) {
-      for (var mi = 0; mi < P.face.length; mi++) {
-        var pi = P.face[mi]
-        var pp = ps[pi]
-        var nbs = [pp.n1, pp.n2]
-        for (var nb = 0; nb < 2; nb++) {
-          var nj = nbs[nb]
-          if (nj < 0 || nj < pi || (nb === 1 && (dense || pp.kind === "skin"))) continue
-          if (Math.hypot(pp.hx - ps[nj].hx, pp.hy - ps[nj].hy) > meshCap) continue
-          var la2 = Math.min(lit[pi], lit[nj])
-          // The mesh never fully disappears: it is the standing structure the
-          // scan wake lights up, not something the wake draws from nothing.
-          crisp.line(tint, (0.05 + 0.42 * la2) * meshFade * boot * (nb === 1 ? 0.7 : 1), hair,
-            pos[pi].x, pos[pi].y, pos[nj].x, pos[nj].y)
+    outline = hudOutline(F)
+
+    // The wake behind the plane: a soft light, cut to the disc in slices.
+    var planeK = scanning ? boot : (ok ? 1 - easeOutCubic(seg(rt, 0, 160)) : 1 - easeOutCubic(seg(rt, 0, 240)))
+    if (scanning && planeK > 0.01) {
+      var pyScr = (outline.length ? hudSliceLine(F, plane.y, 4)[2] : null)
+      if (pyScr) {
+        var wakeLen = 0.34 * RF
+        var wy0 = pyScr.y - plane.dir * wakeLen
+        for (var sli = 0; sli < 4; sli++) {
+          var u0 = pyScr.y - plane.dir * wakeLen * sli / 4
+          var u1 = pyScr.y - plane.dir * wakeLen * (sli + 1) / 4
+          var sw = R * Math.sqrt(Math.max(0, 1 - Math.pow(Math.max(Math.abs(u0 - cy), Math.abs(u1 - cy)) / R, 2)))
+          if (sw <= 1) continue
+          var wg = ctx.createLinearGradient(0, wy0, 0, pyScr.y)
+          wg.addColorStop(0, rgba(tint, 0))
+          wg.addColorStop(1, rgba(tint, 0.10 * planeK))
+          ctx.fillStyle = wg
+          ctx.fillRect(cx - sw, Math.min(u0, u1), sw * 2, Math.abs(u1 - u0))
         }
       }
-      crisp.flush()
     }
-    hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, project, toPx, FSC, tears, shearK, faceScale)
-    flush()
-  } else if (scanning) {
-    crisp.arc(tint, 0.28, Math.max(1, size * 0.018), cx, cy, R * RIM_R, 0, TAU)
-    crisp.flush()
   }
 
-  for (var i2 = 0; i2 < ps.length; i2++) {
-    var p2 = ps[i2]
-    if (compact && p2.kind === "field" && !ok) continue
+  // Mesh: triangles stitched over the surface. Standing structure that the
+  // scan lights up rather than something it draws from nothing; it fades in
+  // late in the boot and tears apart in depth on a miss.
+  if (!compact) {
+    var MS = hudLattice(mStep, true)
+    var mo = [], eb = []
+    var meshIn = seg(boot, 0.5, 1)
+    for (i = 0; i < MS.V.length; i++) {
+      v = MS.V[i]
+      o = hudVertex(F, v)
+      a = hudStateAt(F, v.y)
+      mo.push(o)
+      eb.push({
+        e: ((0.05 + 0.42 * o.b) * (0.45 + 0.55 * clamp01(0.16 + 0.5 * a[2] + 0.4 * a[1])) + 0.5 * a[1] * 0.8) * breath,
+        c: a[0]
+      })
+    }
+    var meshHi = crisp
+    var edges = MS.edges
+    var brkE = bad ? easeOutCubic(seg(rt, 100, 700)) : 0
+    for (k = 0; k < edges.length; k += 2) {
+      var ea = mo[edges[k]], eb2 = mo[edges[k + 1]]
+      var vis = Math.min(ea.vis, eb2.vis)
+      if (vis < 0.05) continue
+      var al = 0.5 * (eb[edges[k]].e + eb[edges[k + 1]].e)
+      var cr = 0.5 * (eb[edges[k]].c + eb[edges[k + 1]].c)
+      if (bad) {
+        if (Math.abs(ea.D - eb2.D) * 2.4 > 0.075 * (1.4 - brkE * 0.6)) continue
+        if (hash(k * 0.37 + 5) < brkE * 0.42) continue
+      }
+      al = (al + 0.45 * cr) * vis * meshIn
+      if (ok) al *= 1 - 0.1 * easeInOutCubic(seg(rt, 400, 700))
+      crisp.line(LUMEN && cr > 0.45 ? hotRole : tint, al, hair, ea.x, ea.y, eb2.x, eb2.y)
+    }
 
-    var l = lit[i2]
-    var zf = 0.55 + 1.0 * p2.z
-    var s = dotBase * zf * (p2.kind === "field" ? 0.72 : (p2.kind === "edge" ? 1.2 : (!ok && p2.kind === "skin" ? 0.75 : 1))) * (ok ? 0.62 + 0.18 * l : 0.68 + 0.42 * l)
-    // The rim and the features carry the face; the depth-map interior is
-    // texture behind them. Without this weighting the silhouette dissolves
-    // on a light theme, where accent-on-near-white has little contrast.
-    var kw = p2.kind === "field" ? 0.46
-      : (p2.kind === "edge" ? 1.0 : 0.45 + 0.95 * p2.shade)
-    // Additive light flattens the slope shading, so the dense cloud leans
-    // harder on it to keep the sockets, nose and cheekbones legible.
-    if (dense && p2.kind === "skin") kw = 0.1 + 1.35 * Math.pow(p2.shade, 2.5)
-    if (p2.kind === "neck") kw = 0.62 * (1 - 0.88 * clamp01((p2.hy - 0.55) / 0.4))
-    // Floor keeps the silhouette readable between sweeps; the cubed term is
-    // the bright crest that rides the scan plane itself.
-    var crest = ok ? 0.1 : (p2.kind === "skin" ? 0.12 : 0.34)
-    var alpha = (0.48 + 0.44 * l + crest * l * l * l) * kw * (0.70 + 0.30 * p2.z)
-    if (!ok && p2.kind === "skin") alpha *= 0.42
-    else if (ok && p2.kind === "skin") alpha *= 0.85
-    if (scanning) alpha *= mix(0.2, 1, boot)
+    // Structured light: tilted stripes that bend over the relief and curve
+    // round the head. The scan lights them as it passes; a lock resolves
+    // them behind its wave; a miss breaks them.
+    var SG = hudStripeGeom()
+    var stripeBrk = bad ? 0.5 * easeOutCubic(seg(rt, 150, 650)) : 0
+    for (i = 0; i < SG.length; i++) {
+      var pts = [], als = []
+      for (j = 0; j <= SG[i].length; j++) {
+        var sv = j < SG[i].length ? SG[i][j] : null
+        if (!sv) {
+          if (pts.length > 1) strip(crisp, tint, fine * 1.7, pts, als)
+          pts = []
+          als = []
+          continue
+        }
+        o = hudVertex(F, sv)
+        a = hudStateAt(F, sv.y)
+        var sal = ((0.05 + 0.2 * o.b) * (0.5 + 0.5 * clamp01(0.16 + 0.5 * a[2] + 0.4 * a[1])) + 0.55 * a[1] * 0.7 + 0.5 * a[0]) * o.vis * meshIn * breath
+        if (ok) sal += 0.12 * a[2]
+        if (bad && hash(i * 131 + j) < stripeBrk) sal = 0
+        pts.push({ x: o.x, y: o.y - HUD_PARALLAX * o.z * RF })
+        als.push(sal)
+      }
+    }
+    flush()
+  }
 
-    if (bad && p2.kind !== "field") {
-      var reached = clamp01(errWave - Math.hypot(p2.hx, p2.hy))
-      alpha *= mix(1, 0.62, reached)
+  // Dots: every one placed by its own light.
+  var DS = hudLattice(dStep, false)
+  var nD = DS.V.length
+  var dd = []
+  for (i = 0; i < nD; i++) {
+    v = DS.V[i]
+    o = hudVertex(F, v)
+    if (o.vis < 0.05) continue
+    a = hudStateAt(F, v.y)
+    var crest = a[0], mid = a[1], tail = a[2], placed = a[3]
+
+    var lit = 0.16 + 0.5 * tail + 0.4 * mid
+    var alpha = ((0.07 + 0.68 * o.b) * (0.4 + 0.6 * clamp01(lit)) + 0.3 * crest * (0.35 + 0.65 * o.b)) * breath
+    var dof = 0.72 + 0.4 * clamp01((o.z + 0.45) / 0.9)
+    var s = dotBase * (0.5 + 0.9 * o.b) * dof * (1 + 0.55 * crest) * (0.8 + 0.2 * placed)
+    var px = o.x, py = o.y
+
+    // Not yet placed: the point shimmers in noise and resolves as the light
+    // reaches it.
+    var un = 1 - placed
+    if (un > 0.02) {
+      var js = Math.floor(t / 55)
+      px += (hash(js * 61 + i * 3.1) - 0.5) * un * RF * 0.15
+      py += (hash(js * 47 + i * 2.3 + 7) - 0.5) * un * RF * 0.15
+    }
+
+    if (scanning && boot < 1) {
+      // The lattice condenses out of a scatter, spiralling in from the centre
+      // outward.
+      var cond = easeOutCubic(seg(rt, 30 + v.d * 240, 400 + v.d * 240))
+      var ang = v.ra * TAU + (1 - cond) * 2.4
+      var rad = (0.3 + 0.7 * v.rb) * (1 - cond) * RF
+      px += Math.cos(ang) * rad
+      py += Math.sin(ang) * rad
+      alpha *= 0.18 + 0.82 * cond
+      s *= 0.6 + 0.4 * cond
     }
     if (ok) {
-      var dw = recDissolve(p2)
-      var gone = easeInOutCubic(seg(rt, dw[0], dw[1]))
-      if (p2.kind !== "field") gone *= 0.2
-      if (gone >= 0.998) continue
-      alpha *= 1 - gone
-      s *= 1 - gone * 0.4
+      // Rack out of focus, then in: the unclear beat before the wave.
+      var defoc = bump(rt, 0, 200)
+      s *= 1 + 0.55 * defoc
+      alpha *= 1 - 0.3 * defoc
     }
+    if (bad) {
+      // Signal loss: points drop out in bursts, then settle to a dim, steady
+      // cloud that keeps its lighting.
+      var dropK = 0.22 * easeOutCubic(seg(rt, 80, 300))
+      if (hash(Math.floor(t / 90) * 71 + i * 1.7) < dropK) alpha *= 0.12
+      alpha *= mix(1, 0.85, easeOutCubic(seg(rt, 0, 260)))
+    }
+    if (v.neck) alpha *= 1 - 0.95 * clamp01((v.y - 0.58) / 0.27)
+    if (dense) alpha *= 0.92
+    if (alpha < 0.025) continue
+    dd.push({ x: px, y: py, s: s, a: alpha, crest: crest, mid: mid, o: o, i: i })
+  }
 
-    if (dense) alpha *= ok ? 0.85 : 0.8
-    if (LUMEN) {
-      // Each dot lights the bloom, and the crest riding the scan plane burns
-      // white-hot, so the wake reads as light sweeping across a surface.
-      // Only the crest riding the scan plane, and a lock's cloud, light the
-      // bloom; the rest of the lattice stays sharp.
-      ctx.glow = bad ? 0 : (ok ? alpha * 0.3 : (l > 0.6 ? alpha * (l - 0.6) * 2.2 : 0))
-      ctx.fillStyle = rgba(scanning && l > 0.85 && p2.kind !== "skin" ? hotOf(tint) : tint, alpha)
-    } else {
-      ctx.fillStyle = rgba(tint, alpha)
+  // The silhouette: a rim of light where the surface turns away, brighter on
+  // the key side.
+  if (!compact) {
+    var sideL = [], sideR = [], alL = [], alR = []
+    var rimIn = seg(boot, 0.4, 1)
+    for (i = 0; i < outline.length; i++) {
+      var ol = outline[i]
+      var fadeN = 1 - clamp01((ol.y - 0.55) / 0.3)
+      var oa = hudStateAt(F, ol.y)
+      var rb = (0.30 + 0.5 * oa[2] + 0.5 * oa[1] + 0.5 * oa[0]) * fadeN * rimIn * breath
+      sideL.push({ x: ol.xl, y: ol.yl })
+      sideR.push({ x: ol.xr, y: ol.yr })
+      alL.push(Math.min(1, rb * 0.95))
+      alR.push(Math.min(1, rb * 0.6))
     }
-    ctx.fillRect(pos[i2].x - s / 2, pos[i2].y - s / 2, s, s)
+    // Segment alpha: strip() reads one per segment.
+    alL.pop()
+    alR.pop()
+    if (bad) {
+      var rimBrk = easeOutCubic(seg(rt, 100, 600)) * 0.5
+      for (i = 0; i < alL.length; i++) {
+        if (hash(i * 3.3 + 1) < rimBrk) alL[i] = 0
+        if (hash(i * 5.1 + 2) < rimBrk) alR[i] = 0
+        alL[i] *= 0.7
+        alR[i] *= 0.7
+      }
+    }
+    var haloL = [], haloR = []
+    for (i = 0; i < alL.length; i++) { haloL.push(alL[i] * 0.28); haloR.push(alR[i] * 0.28) }
+    strip(halo, tint, thin * 2.6, sideL, haloL)
+    strip(halo, tint, thin * 2.6, sideR, haloR)
+    strip(crisp, tint, hair, sideL, alL)
+    strip(crisp, tint, hair, sideR, alR)
+    flush()
+  }
+
+  // The projected IR speckle: a flickering pseudo-random pattern, on the head
+  // and on the wall behind it.
+  if (dense) {
+    var SK = hudSpeckle()
+    var spw = Math.max(1, size * 0.0042)
+    for (i = 0; i < SK.length; i++) {
+      var sp = SK[i]
+      o = hudVertex(F, sp)
+      if (!sp.wall && o.vis < 0.1) continue
+      var rr = Math.hypot(o.x - cx, o.y - cy) / R
+      if (rr > 0.9) continue
+      a = hudStateAt(F, sp.y)
+      var flick = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t / (190 + 110 * sp.rb) + sp.ra * TAU))
+      if (hash(Math.floor(t / 80) * 17 + sp.rc * 977) < 0.22) flick *= 0.2
+      var spa = (sp.wall ? 0.15 : 0.2 + 0.4 * o.b) * flick + 0.45 * a[1] + 0.3 * a[0]
+      spa *= clamp01((0.9 - rr) / 0.12) * boot
+      if (sp.wall) {
+        // Hidden behind the head.
+        var rowI = Math.round((sp.y + 0.77) / 0.04)
+        var orow = outline[clamp(rowI, 0, outline.length - 1)]
+        if (rowI >= 0 && rowI < outline.length && o.x > orow.xl && o.x < orow.xr) spa *= 0.15
+      }
+      if (bad) spa *= (1 - easeOutCubic(seg(rt, 100, 500))) * 0.7 + 0.1
+      crisp.line(LUMEN && a[1] > 0.5 ? hotRole : tint, spa, spw, o.x, o.y, o.x + 0.01, o.y)
+    }
+    flush()
+  }
+
+  // Draw the dots.
+  for (i = 0; i < dd.length; i++) {
+    var d = dd[i]
+    var hot = LUMEN && (d.crest > 0.45 || d.mid > 0.7 || (d.o.rim > 0.75 && d.o.b > 0.9) || d.o.spec > 0.6)
+    if (LUMEN) ctx.glow = bad ? 0 : (hudGlow(d))
+    ctx.fillStyle = rgba(hot ? hotRole : tint, d.a)
+    ctx.fillRect(d.x - d.s / 2, d.y - d.s / 2, d.s, d.s)
   }
   ctx.glow = 0
 
-  // Chromatic split on a miss: a foreground ghost of the cloud slips off
-  // register while the lock tears, as a failing sensor would.
+  // A chromatic split on a miss: a ghost of the cloud slips off register
+  // while the lock tears, as a failing sensor would.
   if (bad && !compact) {
-    var split = bump(rt, 0, 520) * size * 0.022
+    var split = bump(rt, 0, 520) * size * 0.024
     if (split > 0.3) {
       var gs = dotBase * 0.8
-      for (var ci = 0; ci < ps.length; ci += 7) {
-        if (ps[ci].kind === "field") continue
-        ctx.fillStyle = rgba(ROLE_FG, 0.22 * bump(rt, 0, 520))
-        ctx.fillRect(pos[ci].x + split - gs / 2, pos[ci].y - split * 0.3 - gs / 2, gs, gs)
+      for (i = 0; i < dd.length; i += 3) {
+        ctx.fillStyle = rgba(ROLE_FG, 0.26 * bump(rt, 0, 520))
+        ctx.fillRect(dd[i].x + split - gs / 2, dd[i].y - split * 0.3 - gs / 2, gs, gs)
       }
     }
+  }
+
+  // Glints where the key light lands on the head: a four-point star on the
+  // brightest points, breathing as the head moves through the light.
+  if (LUMEN && !compact && !bad) {
+    var g0 = null, g1 = null
+    for (i = 0; i < dd.length; i++) if (!g0 || dd[i].o.spec > g0.o.spec) g0 = dd[i]
+    if (g0) {
+      for (i = 0; i < dd.length; i++) {
+        if (Math.hypot(dd[i].x - g0.x, dd[i].y - g0.y) < R * 0.4) continue
+        if (!g1 || dd[i].o.spec > g1.o.spec) g1 = dd[i]
+      }
+    }
+    var glints = [g0, g1]
+    for (i = 0; i < 2; i++) {
+      var gl = glints[i]
+      if (!gl) continue
+      var ga = clamp01((gl.o.spec - 0.2) * 1.4) * (ok ? 0.5 + 0.5 * seg(rt, 700, 1000) : boot) * (i ? 0.6 : 1)
+      if (ga < 0.05) continue
+      var gr = R * (0.018 + 0.036 * ga)
+      halo.line(tint, 0.45 * ga, thin * 4, gl.x, gl.y, gl.x + 0.01, gl.y)
+      crisp.line(hotRole, 0.9 * ga, fine * 1.2, gl.x - gr, gl.y, gl.x + gr, gl.y)
+      crisp.line(hotRole, 0.9 * ga, fine * 1.2, gl.x, gl.y - gr * 1.4, gl.x, gl.y + gr * 1.4)
+      crisp.line(hotRole, 0.9 * ga, fine * 2, gl.x, gl.y, gl.x + 0.01, gl.y)
+    }
+    flush()
+  }
+
+  if (compact) {
+    if (scanning) crisp.arc(tint, 0.28, Math.max(1, size * 0.018), cx, cy, R * RIM_R, 0, TAU)
+    if (ok) {
+      var rimC = easeInOutCubic(seg(rt, 460, 700))
+      if (rimC > 0.004) {
+        crisp.arc(tint, Math.min(1, rimC * 2.4), Math.max(1, size * 0.036), cx, cy, R * RIM_R * faceScale,
+          -Math.PI / 2, -Math.PI / 2 + TAU * rimC)
+      }
+    }
+    crisp.flush()
   }
 
   // --- the analysis markers ------------------------------------------------------
   if (!compact) {
     faceMarkers(halo, crisp, {
       proj: function (X, Y, Z) {
-        var pr = project(X * faceScale, Y * faceScale, Z * DEPTH)
-        var pp = toPx(pr.x, pr.y)
-        return { x: pp.x, y: pp.y, v: 1 }
+        var V = headFaceVertex(X, Y, 0.02)
+        var mo2 = hudVertex(F, { x: V[0], y: V[1], z: V[2], nx: V[3], ny: V[4], nz: V[5], ra: 0.4 })
+        return { x: mo2.x, y: mo2.y, v: mo2.vis }
       },
-      pass: function (X, Y, q) { return ((plane.y - (q.y - cy) / R) * plane.dir) * boot - (1 - boot) },
-      post: function (q) {
-        if (!bad) return q
-        var yu = (q.y - cy) / RF
-        var band = Math.floor((yu + 1.2) / 0.48)
-        return { x: q.x + (shearK * (band % 2 === 0 ? 0.16 : -0.16) + tearShift(tears, yu)) * RF, y: q.y, v: q.v }
-      },
+      pass: function (X, Y, q) { return ((plane.y - Y) * plane.dir) * boot - (1 - boot) },
       tint: tint, U: RF, gain: boot, labels: size >= 150, clock: t, cx: cx,
       wLine: Math.max(0.6, size * 0.0042), wMark: Math.max(0.8, size * 0.0055)
     })
     flush()
-    if (ok) {
-      // The rim closes out of the dissolving cloud.
-      var rimK = easeInOutCubic(seg(rt, 460, 700))
-      if (rimK > 0.004) {
-        glowArc(halo, crisp, tint, Math.min(1, rimK * 2.4), bold * 0.85, cx, cy, RF * RIM_R * faceScale,
-          -Math.PI / 2 - Math.PI * rimK, -Math.PI / 2 + Math.PI * rimK)
-        // The closed rim becomes a graduated dial.
-        var rr0 = RF * RIM_R * faceScale + R * 0.018
-        for (var dt = 0; dt < 120; dt++) {
-          var dta = -Math.PI / 2 + dt * TAU / 120
-          var drel = Math.abs(Math.atan2(Math.sin(dta + Math.PI / 2), Math.cos(dta + Math.PI / 2)))
-          if (drel > Math.PI * rimK) continue
-          var dl = R * (dt % 10 === 0 ? 0.04 : (dt % 5 === 0 ? 0.026 : 0.014))
-          crisp.line(tint, (dt % 10 === 0 ? 0.8 : 0.45), fine,
-            cx + Math.cos(dta) * rr0, cy + Math.sin(dta) * rr0, cx + Math.cos(dta) * (rr0 + dl), cy + Math.sin(dta) * (rr0 + dl))
-        }
-      }
-    }
-    flush()
-  } else if (ok) {
-    var rimC = easeInOutCubic(seg(rt, 460, 700))
-    if (rimC > 0.004) {
-      crisp.arc(tint, Math.min(1, rimC * 2.4), Math.max(1, size * 0.036), cx, cy, R * RIM_R * faceScale,
-        -Math.PI / 2, -Math.PI / 2 + TAU * rimC)
-    }
-    crisp.flush()
   }
 
   // --- face-lock brackets ------------------------------------------------------
   // Faint and hunting while scanning; on a lock they fly in from outside and
-  // seat on the face with an overshoot; on a miss they spring apart.
+  // seat on the head with an overshoot; on a miss they spring apart.
   if (!compact) {
     var fbx = RF * 0.66, fby = RF * 0.84
     var fk = ok ? easeOutBack(seg(rt, 80, 380)) : 0
@@ -1040,122 +1437,102 @@ function paintHud(ctx, size, spec) {
     flush()
   }
 
-  // --- scan plane ----------------------------------------------------------
-  // The plane is clipped to the instrument disc, so it reads as light
-  // projected onto the face rather than a bar across the card.
-  function chord(yu) { return Math.sqrt(Math.max(0, PLANE_R * PLANE_R - yu * yu)) }
-  var planeK = scanning ? boot : (1 - easeOutCubic(seg(rt, 0, 240)))
-  if (planeK > 0.01) {
-    var py = cy + plane.y * R
-    var pw = R * Math.max(0.12, chord(plane.y)) * (scanning ? 1 : mix(1, 0.05, easeInOutCubic(seg(rt, 0, 240))))
-    var trail = 0.30
-    if (scanning) {
-      // The wake is four gradient slices, each cut to the disc at its own
-      // depth, which rounds off what would otherwise be a hard rectangle.
-      var slices = 4
-      for (var sli = 0; sli < slices; sli++) {
-        var u0 = plane.y - plane.dir * trail * sli / slices
-        var u1 = plane.y - plane.dir * trail * (sli + 1) / slices
-        var sw = R * chord(Math.abs(u0) > Math.abs(u1) ? u0 : u1)
-        if (sw <= 1) continue
-        var y0 = cy + u0 * R, y1 = cy + u1 * R
-        var grad = ctx.createLinearGradient(0, cy + (plane.y - plane.dir * trail) * R, 0, py)
-        grad.addColorStop(0, rgba(tint, 0))
-        grad.addColorStop(1, rgba(tint, 0.13 * planeK))
-        ctx.fillStyle = grad
-        ctx.fillRect(cx - sw, Math.min(y0, y1), sw * 2, Math.abs(y1 - y0))
-      }
-    }
-
-    if (scanning && !compact) {
-      // The beam rides the relief: it bows over the brow, the nose and the
-      // cheeks instead of cutting straight across the face.
-      var beam = []
-      var bu = RF * faceScale
-      var byf = (py - cy) / bu
-      for (var bi2 = 0; bi2 <= 48; bi2++) {
-        var bpx = cx - pw + (2 * pw) * bi2 / 48
-        var bxf = (bpx - cx) / bu
-        var bz = holoInside(bxf, byf) > 0 ? holoZAt(bxf, byf) : 0
-        beam.push([bpx, py - bz * R * 0.12])
-      }
-      halo.poly(tint, 0.3 * planeK, thin * 3.2, beam)
-      crisp.poly(tint, 0.95 * planeK, thin, beam)
-    } else {
-      glowLine(halo, crisp, tint, 0.92 * planeK, thin, cx - pw, py, cx + pw, py)
-    }
-    if (!compact) {
-      // Range ticks along the plane, alternating sides.
-      for (var rtk = -9; rtk <= 9; rtk++) {
-        var tx = cx + rtk * pw / 10
-        var tl = R * (rtk % 5 === 0 ? 0.05 : 0.022)
-        crisp.line(tint, 0.55 * planeK, hair, tx, py, tx, py + tl * (rtk % 2 ? -plane.dir : plane.dir))
-      }
-    }
-    flush()
-
-    if (scanning) {
-      ctx.fillStyle = rgba(tint, planeK)
+  // --- the scan plane, and the lock's completion wave ---------------------------
+  if (!compact) {
+    var beamK = scanning ? boot : (ok ? 1 - easeOutCubic(seg(rt, 0, 140)) : 1 - easeOutCubic(seg(rt, 0, 240)))
+    var ends = null
+    if (beamK > 0.01) ends = hudBeam(halo, crisp, G, F, plane.y, plane.dir, beamK, tint, scanning ? 4 : 0)
+    if (ends && beamK > 0.05) {
       var nub = Math.max(2, size * 0.024)
-      ctx.fillRect(cx - pw - nub / 2, py - nub / 2, nub, nub)
-      ctx.fillRect(cx + pw - nub / 2, py - nub / 2, nub, nub)
+      ctx.fillStyle = rgba(tint, beamK)
+      ctx.fillRect(ends.l[0] - nub / 2, ends.l[1] - nub / 2, nub, nub)
+      ctx.fillRect(ends.r[0] - nub / 2, ends.r[1] - nub / 2, nub, nub)
     }
-  }
-
-  // A second scanner crossing the plane at right angles. Where they meet, a
-  // scan head rides with both.
-  if (!compact && planeK > 0.01) {
-    var vph = frac(t / 3100)
-    var vtri = vph < 0.5 ? vph * 2 : (1 - vph) * 2
-    var vxu = mix(-0.9, 0.9, easeInOutCubic(vtri))
-    if (!scanning) vxu = mix(vxu, 0, easeInOutCubic(seg(rt, 0, 240)))
-    var vh = Math.sqrt(Math.max(0, 1 - vxu * vxu)) * R
-    var vx = cx + vxu * R
-    crisp.line(FG2, (LUMEN ? 0.5 : 0.3) * planeK, fine, vx, cy - vh, vx, cy + vh)
-    for (var vt = -8; vt <= 8; vt++) {
-      var vty = cy + vt * vh / 9
-      crisp.line(FG2, 0.35 * planeK, fine, vx, vty, vx + R * (vt % 4 === 0 ? 0.035 : 0.016), vty)
-    }
-    var hy0 = cy + plane.y * R
-    if (Math.abs(hy0 - cy) < vh) {
-      var hr = R * 0.045
-      glowArc(halo, crisp, tint, 0.9 * planeK, hair, vx, hy0, hr, 0, TAU)
-      crisp.line(tint, 0.9 * planeK, fine, vx - hr * 1.8, hy0, vx - hr * 0.6, hy0)
-      crisp.line(tint, 0.9 * planeK, fine, vx + hr * 0.6, hy0, vx + hr * 1.8, hy0)
-      crisp.line(tint, 0.9 * planeK, fine, vx, hy0 - hr * 1.8, vx, hy0 - hr * 0.6)
-      crisp.line(tint, 0.9 * planeK, fine, vx, hy0 + hr * 0.6, vx, hy0 + hr * 1.8)
+    if (ok && rt > 100 && rt < 760) {
+      var wvK = clamp01(seg(rt, 100, 170)) * (1 - seg(rt, 620, 760))
+      if (wvK > 0.01) {
+        var wends = hudBeam(halo, crisp, G, F, F.waveY, 1, wvK, tint, 5)
+        if (wends) {
+          var wn = Math.max(2, size * 0.024)
+          ctx.fillStyle = rgba(tint, wvK)
+          ctx.fillRect(wends.l[0] - wn / 2, wends.l[1] - wn / 2, wn, wn)
+          ctx.fillRect(wends.r[0] - wn / 2, wends.r[1] - wn / 2, wn, wn)
+        }
+      }
     }
     flush()
   }
 
-  // --- result flourishes ---------------------------------------------------
-  if (ok) {
-    var waves = [REC_WAVE, [760, 1120]]
+  // --- the lock: the ring clamps onto the head, then bursts ----------------------
+  if (ok && !compact) {
+    var ck2 = seg(rt, HUD_CLAMP[0], HUD_CLAMP[1])
+    var crad = mix(R * 1.04, rimR, Math.pow(ck2, 2.2)) + spring(rt, HUD_CLAMP[1], 240, 3.2) * R * 0.02
+    if (ck2 > 0) {
+      var cal = Math.min(1, 0.25 + ck2 * 1.2) * (1 - 0.12 * seg(rt, 1000, 1150))
+      var cwid = bold * (1 + 1.2 * (1 - ck2)) * (rt > HUD_CLAMP[1] ? 0.85 : 1)
+      glowArc(halo, crisp, tint, cal, cwid, cx, cy, crad * faceScale, 0, TAU)
+      if (ck2 < 1) {
+        for (var tr = 1; tr <= 3; tr++) {
+          crisp.arc(tint, 0.3 * (1 - ck2) / tr, thin, cx, cy, crad + R * 0.05 * tr * (1 - ck2), 0, TAU)
+        }
+      }
+    }
+    // The impact: the rim flashes white-hot, rays fire off it and two shock
+    // waves clear the field.
+    var impact = bump(rt, HUD_CLAMP[1] - 30, HUD_CLAMP[1] + 320)
+    if (LUMEN && impact > 0.01) glowArc(halo, crisp, hotOf(tint), impact, bold * 1.5, cx, cy, rimR * faceScale, 0, TAU)
+    var waves = [[640, 1040], [740, 1130]]
     for (var wv = 0; wv < waves.length; wv++) {
       var wave = bump(rt, waves[wv][0], waves[wv][1])
       if (wave <= 0.01) continue
       var wk = easeOutCubic(seg(rt, waves[wv][0], waves[wv][1]))
-      glowArc(halo, crisp, tint, wave * (wv ? 0.35 : 0.6), Math.max(1, size * 0.014 * (1 - wk * 0.7)), cx, cy, R * mix(0.74, 1.08, wk), 0, TAU)
+      glowArc(halo, crisp, tint, wave * (wv ? 0.3 : 0.55), Math.max(1, size * 0.013 * (1 - wk * 0.7)), cx, cy, mix(rimR, R * 1.1, wk), 0, TAU)
     }
-    // PASS: the rim flashes white-hot for a beat.
-    var passHot = LUMEN ? bump(rt, REC_PASS - 30, REC_PASS + 300) : 0
-    if (passHot > 0.01) glowArc(halo, crisp, hotOf(tint), passHot, bold * 1.4, cx, cy, RF * RIM_R * faceScale, 0, TAU)
-    // Lock burst: rays fire off the rim in a sweep that runs once round.
-    if (!compact) {
-      for (var ry = 0; ry < 60; ry++) {
-        var rya = -Math.PI / 2 + ry * TAU / 60
-        var rk = bump(rt, 580 + ry * 4, 820 + ry * 4)
-        if (rk <= 0.02) continue
-        var r0 = RF * RIM_R * 1.02, r1 = r0 + R * (0.05 + 0.1 * rk) * (ry % 3 === 0 ? 1.4 : 1)
-        crisp.line(tint, rk * 0.7, ry % 3 === 0 ? hair : fine,
-          cx + Math.cos(rya) * r0, cy + Math.sin(rya) * r0, cx + Math.cos(rya) * r1, cy + Math.sin(rya) * r1)
+    for (var ry = 0; ry < 60; ry++) {
+      var rya = -Math.PI / 2 + ry * TAU / 60
+      var rk = bump(rt, 640 + ry * 3, 880 + ry * 3)
+      if (rk <= 0.02) continue
+      var r0 = rimR * 1.02, r1 = r0 + R * (0.05 + 0.1 * rk) * (ry % 3 === 0 ? 1.4 : 1)
+      crisp.line(tint, rk * 0.7, ry % 3 === 0 ? hair : fine,
+        cx + Math.cos(rya) * r0, cy + Math.sin(rya) * r0, cx + Math.cos(rya) * r1, cy + Math.sin(rya) * r1)
+    }
+    // The rim becomes a graduated dial, written round from the top.
+    var dialK = easeInOutCubic(seg(rt, 640, 860))
+    if (dialK > 0.004) {
+      var rr0 = rimR * faceScale + R * 0.018
+      for (var dt = 0; dt < 120; dt++) {
+        var dta = -Math.PI / 2 + dt * TAU / 120
+        if (dt / 120 > dialK) break
+        var dl = R * (dt % 10 === 0 ? 0.04 : (dt % 5 === 0 ? 0.026 : 0.014))
+        crisp.line(tint, (dt % 10 === 0 ? 0.8 : 0.45), fine,
+          cx + Math.cos(dta) * rr0, cy + Math.sin(dta) * rr0, cx + Math.cos(dta) * (rr0 + dl), cy + Math.sin(dta) * (rr0 + dl))
       }
+    }
+    // Settled, it stays alive: a comet circles the dial, slowly.
+    var comet = seg(rt, 760, 950)
+    if (comet > 0.01) {
+      var ca0 = -Math.PI / 2 + t / 620 * TAU
+      for (var cs2 = 0; cs2 < 9; cs2++) {
+        var cwid2 = 0.075 * (1 - cs2 / 10)
+        var cA = ca0 - cs2 * 0.075
+        crisp.arc(tint, comet * 0.8 * (1 - cs2 / 9), thin * (1 - cs2 * 0.05), cx, cy, rimR * faceScale, cA - 0.075, cA)
+      }
+      hudSpark(halo, crisp, tint, cx + Math.cos(ca0) * rimR * faceScale, cy + Math.sin(ca0) * rimR * faceScale, comet, R * 0.035, fine)
+      var cb = ca0 + Math.PI
+      crisp.arc(tint, comet * 0.35, fine * 1.4, cx, cy, rimR * faceScale, cb - 0.2, cb)
     }
     flush()
   }
 
+  // --- the boot: reticle ignition and the rings drawing on -------------------------
+  if (scanning && !compact) {
+    hudIgnite(halo, crisp, G)
+    flush()
+  }
+
+  // --- a miss: desync, jam and static -----------------------------------------------
   if (bad && !compact) {
-    // Error flash: the whole disc floods red and drains top to bottom.
+    // Error flash: the whole disc floods and drains top to bottom.
     var flash = bump(rt, 0, 300)
     if (flash > 0.02) {
       for (var fs = 0; fs < 8; fs++) {
@@ -1180,10 +1557,22 @@ function paintHud(ctx, size, spec) {
         crisp.line(nz % 3 ? ROLE_ERROR : ROLE_FG, 0.35 * noiseK, fine, nx - nlen, ny, nx + nlen, ny)
       }
     }
-  }
+    drawTears(crisp, F.tears, cx, cy, R)
 
-  if (bad) {
-    drawTears(crisp, tears, cx, cy, R)
+    // The rings jam: sparks fly off the data ring as it stutters, then it
+    // locks solid out of true.
+    var jam = bump(rt, 40, 520)
+    if (jam > 0.02) {
+      var jstep = Math.floor(rt / 45)
+      for (var js2 = 0; js2 < 7; js2++) {
+        var ja = hash(jstep * 9 + js2 * 5) * TAU
+        var jr = R * (0.915 + (hash(jstep * 3 + js2) - 0.5) * 0.05)
+        var jl = R * (0.03 + 0.07 * hash(jstep * 13 + js2 * 2))
+        var jd = hash(jstep * 7 + js2) > 0.5 ? 1 : -1
+        crisp.line(ROLE_ERROR, 0.8 * jam, js2 % 2 ? hair : fine,
+          cx + Math.cos(ja) * jr, cy + Math.sin(ja) * jr, cx + Math.cos(ja) * (jr + jd * jl), cy + Math.sin(ja) * (jr + jd * jl))
+      }
+    }
 
     // Error wave: a ring that races out as the anchors let go.
     var ew = bump(rt, 0, 340)
@@ -1206,6 +1595,13 @@ function paintHud(ctx, size, spec) {
   // --- corner readouts ---------------------------------------------------------
   if (hud) paintHudReadouts(crisp, size, state, t, rt, boot, tint)
   crisp.flush()
+}
+
+// How much of a dot's alpha lights the bloom: the crest riding the plane, the
+// flash behind a lock's wave, and the rim where the surface turns away.
+function hudGlow(d) {
+  var g = d.a * (1.7 * d.crest + 0.5 * d.mid + 0.25 * d.o.rim * d.o.b)
+  return g > 0.06 ? clamp01(g) : 0
 }
 
 // --- corner readouts, shared by every style ---------------------------------
@@ -1605,54 +2001,6 @@ function hudSubRings(halo, crisp, state, t, rt, cx, cy, R, fine, hair, thin, boo
   }
 }
 
-
-// HUD structured light: horizontal stripes projected onto the face and seen
-// from the camera, each displaced by the depth under it, so the brow, nose,
-// cheekbones and chin appear as bends in parallel lines. Stripes never close
-// into loops, which is what keeps them from drawing a face of their own. The
-// scan plane lights them as it passes; a lock resolves them top to bottom
-// behind a sweep; a miss shears and breaks them.
-var HUD_STRIPES = 20
-var HUD_STRIPE_K = 0.22
-
-function hudTopology(halo, crisp, state, t, rt, boot, tint, fine, hair, plane, project, toPx, FSC, tears, shearK, faceScale) {
-  var ok = state === "recognized"
-  var bad = state === "notRecognized"
-  var scanning = !ok && !bad
-  var brk = bad ? 0.45 * easeOutCubic(seg(rt, 150, 600)) : 0
-  var resolved = ok ? easeOutCubic(seg(rt, 450, 900)) : 0
-  for (var si = 0; si < HUD_STRIPES; si++) {
-    var y = mix(-0.76, 0.76, si / (HUD_STRIPES - 1))
-    var sweepAt = 220 + (y + 0.82) * 380
-    var cas = ok ? bump(rt, sweepAt, sweepAt + 260) : 0
-    // Faint while scanning, so the dot cloud stays the subject.
-    var base = (scanning ? 0.2 : 0.3) + 0.55 * cas + 0.4 * resolved
-    var pts = [], al = []
-    for (var k = 0; k <= 30; k++) {
-      var x = mix(-0.66, 0.66, k / 30)
-      if (holoInside(x, y) <= 0.005) {
-        if (pts.length > 1) strip(crisp, tint, fine * 1.8, pts, al)
-        pts = []
-        al = []
-        continue
-      }
-      var z = holoZAt(x, y)
-      var pr = project(x * faceScale, y * faceScale, z * DEPTH)
-      var X = pr.x
-      var Y = pr.y - z * HUD_STRIPE_K
-      if (bad) {
-        var band = Math.floor((y + 1.2) / 0.48)
-        X += shearK * (band % 2 === 0 ? 0.16 : -0.16) + tearShift(tears, Y)
-      }
-      pts.push(toPx(X, Y))
-      var a = base
-      if (scanning) a += 0.6 * acquisition(plane, Y * FSC)
-      if (bad && hash(si * 131 + k) < brk) a = 0
-      al.push(a * boot * (0.55 + 0.45 * z / 0.8))
-    }
-    if (pts.length > 1) strip(crisp, tint, fine * 1.8, pts, al)
-  }
-}
 
 // --- the analysis markers -------------------------------------------------------
 //
