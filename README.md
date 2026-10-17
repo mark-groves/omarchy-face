@@ -59,7 +59,7 @@ What level 2 adds to every style:
 | --- | --- | --- | --- |
 | HUD | About 480 depth dots (twice the level-1 lattice); the data ring, scan plane, lock rim and shockwaves bloom, as do the dots on the scan crest and the locking cloud | The oscilloscope trace and the link indicator in the corner readouts | Scan plane, data ring, lock rim, shockwaves, dots on the scan crest |
 | Radar | The sweep arm, lock ring, pings and fresh returns bloom | The oscilloscope trace and the link indicator in the corner readouts | Fresh returns behind the arm and returns under each ping |
-| Holo | The emitter, the rim light and shimmering vertices bloom | The chromatic fringe in two hues, plus the corner trace and indicator | The rim light where the head turns away, and shimmering vertices |
+| Holo | The emitter, the scan planes, the rim light, the glints and shimmering vertices bloom; on dark glass a soft light spill sits behind the head | The chromatic fringe in two hues, plus the corner trace and indicator | The rim light where the head turns away, and shimmering vertices |
 
 A miss still paints only in the error colour once the attempt fails.
 
@@ -90,21 +90,21 @@ The top-left readout is the arm bearing in degrees.
 ## Holographic Wireframe (`holo`)
 
 A projected head: a whole head, lofted between side and front profiles, with a cranium behind the face, ears, a jaw and a neck down to an emitter. The face is a broad, shallow relief on its front, shown only as depth in the wireframe, with the same landmark markers as the other styles over it. Its layers are:
-- 26 structured-light slices round the whole head, lit from the upper left, with a rim light where the surface turns away and a two-colour chromatic fringe; the back of the head shows faintly through
-- an outline traced from the slices, so a turn shows the head in profile
-- a vertex point cloud
-- a cage turning the other way outside it
-- two tilted orbit rings with nodes
-- projection beams, a volumetric light cone with volume slices, and pulse rings
-- side scopes for the depth profile and the scan height
+- 26 structured-light slices round the whole head, lit from the upper left. Nearer surface is brighter and heavier than the far side, the back of the head shows faintly through, every fourth slice is a major, and a slow interference runs along them. A rim light burns where the surface turns away, with a two-colour chromatic fringe. A faint wide stroke between the slice edges gives the head a glass body
+- an outline traced from the slices, with an aura spilling past it, so a turn shows the head in profile
+- scan planes: a ring of light that wraps the surface, in a plane that reaches past the head, with a sweeping arm, a wake behind it and a lens that bunches the slices toward it
+- a vertex point cloud, with a few glints that catch the light
+- a cage turning the other way outside it, and two tilted orbit rings with nodes
+- an emitter with an iris, turning ticks, an anamorphic streak and ripples; a light cone with haze, a bright core, god rays with packets of light running up them, volume slices, rising rings and motes
+- projection beams to the landmarks, with packets of light on them, and side scopes for the depth profile and the scan height
 
 The camera sits a little above the head, and the head turns up to about 45 degrees, so the slices bend over the relief.
 
 | State | What the user sees |
 | --- | --- |
-| Scanning | The head turns slowly while the cage and the orbits turn at their own rates. Two interference bands roll at different speeds, brightening and jittering what they cross, and tracking points shimmer as they pass. Scanlines, an occasional vertical-hold roll and rare block glitches play over the projector flicker. Motes and pulse rings rise through the lit cone. |
-| Face recognized | The flicker steadies and the chromatic fringe closes. The cage spins up, then collapses onto the head and dims, and the orbits level out into a halo at eye height. Two scanner rings pass, down then up, and the head solidifies from the top down behind the first. The point cloud flares, then fuses into the mesh. The landmark markers lock in a wave from the brow downward. The beams and cone flare, the emitter throws a ring, and the head settles in a three-quarter pose. Confidence reaches 99.7 and the status reads `PASS`. |
-| Face not recognized | The attempt starts, stutters, then the projection fails. The chromatic split widens and jitters, blocks of the image slip sideways, the vertical hold rolls, and static fills the disc. The slices, point cloud and neck fragment and drift under drag. The cage breaks into dashes, and the orbits wobble and drop. The beams cut out, the emitter sputters, and the tracking points lose track. `FAIL` blinks. |
+| Scanning | A 0.6 s boot: the emitter ignites with a flash and a ripple, the cone rises, and the head is built from the neck up behind a bright ring, its slices flickering in. Then the head turns slowly while the cage and the orbits turn at their own rates. A scan plane sweeps down through the head with its wake, and a faster one crosses it the other way; the markers seat as the plane passes them. Scanlines drift and beat, an occasional vertical-hold roll and rare block glitches play over the projector flicker, and glints, motes and packets of light run through the cone. |
+| Face recognized | The flicker steadies and the chromatic fringe closes. An energy pulse races up the neck from the emitter, dragging streaks of light, and flares at the crown with rays and a spreading ring. A solidify ring sweeps back down, and the head hardens behind it: brighter, heavier, filled. The point cloud flares, then fuses into the mesh. The cage spins up, then collapses onto the head and dims. The landmark markers lock in a wave from the brow downward. The orbits level out into a halo below the face that closes from dashes to a graduated ring and throws a ripple as PASS lands, and a ripple leaves the emitter across the plate. Confidence reaches 99.7 and the status reads `PASS`. The head then rests in a three-quarter pose, strokes only, breathing slightly: rim lit with its aura, a slow scan plane drifting through it, glints, the halo turning, the emitter idling with a slow ripple. |
+| Face not recognized | The attempt scans in the accent, then the projection fails and everything turns to the error colour. The chromatic split tears wide, slices slip sideways as rigid strips, blocks of the image shear, the picture rolls and shows twice while a vertical-hold bar crosses it, and the emitter browns out and sputters, taking the cone and the beams with it. The head volume stays legible throughout. It settles to a dim idle that still slips and drops out now and then, with the emitter ring broken and a faint hum bar rolling. The markers lose track and `FAIL` blinks. |
 
 The top-left readout is head yaw in degrees, and the bottom-left gauges show yaw, pitch and projector sync.
 
