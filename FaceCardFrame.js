@@ -208,8 +208,13 @@ var SEG7 = {
 // Everything else (pose, light, scan, lock) is evaluated per frame.
 
 // Head space is the model's own. The head is turned about a vertical axis
-// through HUD_ZC and drawn HUD_YC lower so it sits centred on the instrument.
-var HUD_YC = 0.06
+// through HUD_ZC and drawn HUD_YC lower so it sits centred on the instrument:
+// crown at -0.78, the closed chin at HUD_BOT, centre between them.
+var HUD_YC = 0.04
+// The head alone, with no neck, ends under the chin at HUD_BOT. It is drawn a
+// little larger than the shared scale so it fills the lock ring.
+var HUD_BOT = 0.7
+var HUD_FIT = 1.0
 var HUD_ZC = -0.08
 // Bearings kept on the lattice: a little past the profile, so the side of the
 // head is there when it turns. The far side is never seen.
@@ -219,9 +224,11 @@ var HUD_PERSP = 0.16
 // Key light from the upper left; HUD_HALF is the half vector toward the viewer.
 var HUD_KEY = hudNorm([-0.5, -0.52, 0.69])
 var HUD_HALF = hudNorm([-0.5, -0.52, 1.69])
+// A cool fill from the lower right keeps the far half of the head readable:
+// it lifts the shadow side without competing with the key.
+var HUD_FILL = hudNorm([0.7, 0.25, 0.66])
 // How high the scan plane travels, in head space, and where the neck dies out.
-var HUD_SCAN_Y = [-0.86, 0.95]
-var HUD_NECK_END = 0.84
+var HUD_SCAN_Y = [-0.86, 0.8]
 // Structured light is projected from beside the camera, so a stripe shifts
 // against the camera by this much per unit of depth.
 var HUD_PARALLAX = 0.15
@@ -235,16 +242,26 @@ function hudNorm(v) {
   return [v[0] / l, v[1] / l, v[2] / l]
 }
 
-// The neck: a flared cylinder set back under the jaw, widening into the
-// shoulders as it goes down. The shared neckPoint stops at a plain collar.
-function hudNeckPoint(u, y) {
-  var k = clamp01((y - NECK_TOP) / 0.3)
-  var w = 0.19 + 0.05 * k + 0.2 * k * k
-  var d = 0.17 + 0.05 * k
-  return [Math.sin(u) * w, y, -0.1 + Math.cos(u) * d]
+// The shared head stops at a flat underside. Here the jaw is closed into a
+// rounded chin: from HUD_TAPER down to HUD_BOT every cross section shrinks
+// toward the head's own axis along an elliptical profile, so the silhouette
+// closes under the chin and nothing hangs below it.
+var HUD_TAPER = 0.62
+// The jaw is also filled out a little below the cheek, so the chin is round
+// where the shared profile narrows to a wedge.
+function hudHead(u, y) {
+  var yy = Math.min(y, HUD_TAPER)
+  var P = headPoint(u, yy)
+  var j = clamp01((yy - 0.3) / 0.32)
+  var fullness = 1 + 0.2 * j * j * (3 - 2 * j)
+  if (y <= HUD_TAPER) return [P[0] * fullness, y, P[2]]
+  var k = clamp01((y - HUD_TAPER) / (HUD_BOT - HUD_TAPER))
+  var s = Math.sqrt(Math.max(0, 1 - k * k))
+  var zc = (profileAt(HEAD_Y, HEAD_FRONT, HUD_TAPER) + profileAt(HEAD_Y, HEAD_BACK, HUD_TAPER)) / 2
+  return [P[0] * fullness * s, y, zc + (P[2] - zc) * s]
 }
 
-// Rows of vertices over the head and neck, `step` apart along the surface.
+// Rows of vertices over the head, `step` apart along the surface.
 // `mesh` stitches neighbouring rows into triangles and returns the edges; the
 // dot lattice is staggered row to row instead.
 function hudLattice(step, mesh) {
@@ -255,7 +272,7 @@ function hudLattice(step, mesh) {
   var dy = step * 0.88
   var jit = mesh ? 0.06 : 0.14
 
-  function addRow(fn, y, neck) {
+  function addRow(fn, y) {
     var N = 40, us = [-HUD_UMAX], acc = [0], prev = fn(-HUD_UMAX, y), j
     for (j = 1; j <= N; j++) {
       var u = mix(-HUD_UMAX, HUD_UMAX, j / N)
@@ -279,17 +296,16 @@ function hudLattice(step, mesh) {
       var k = (tl - acc[j]) / Math.max(1e-6, acc[j + 1] - acc[j])
       var v = headVertex(fn, mix(us[j], us[j + 1], k), y)
       V.push({
-        x: v[0], y: v[1], z: v[2], nx: v[3], ny: v[4], nz: v[5], f: tl / L, neck: neck,
+        x: v[0], y: v[1], z: v[2], nx: v[3], ny: v[4], nz: v[5], f: tl / L,
         ra: rnd(), rb: rnd(), rc: rnd(), d: Math.hypot(v[0], (v[1] + HUD_YC) / 1.1)
       })
       idx.push(V.length - 1)
     }
-    rows.push({ idx: idx, neck: neck })
+    rows.push({ idx: idx })
   }
 
   var y
-  for (y = -0.765; y <= 0.655; y += dy) addRow(headPoint, y, false)
-  for (y = 0.7; y <= HUD_NECK_END; y += dy) addRow(hudNeckPoint, y, true)
+  for (y = -0.765; y <= HUD_BOT - 0.012; y += dy) addRow(hudHead, y)
 
   if (mesh) {
     var r, i
@@ -300,7 +316,6 @@ function hudLattice(step, mesh) {
     // Stitch each pair of neighbouring rows into a strip of triangles: always
     // advance the row whose next vertex is nearer along the surface.
     for (r = 0; r + 1 < rows.length; r++) {
-      if (rows[r].neck !== rows[r + 1].neck) continue
       var a = rows[r].idx, b = rows[r + 1].idx
       var ia = 0, ib = 0
       edges.push(a[0], b[0])
@@ -317,20 +332,19 @@ function hudLattice(step, mesh) {
   return CACHE[key]
 }
 
-// Cross sections of the head and neck all the way round, for the silhouette:
-// per frame the outermost sample on each side is the outline.
+// Cross sections of the head all the way round, for the silhouette: per
+// frame the outermost sample on each side is the outline. The last row sits
+// on the closed chin, so the two sides meet.
 function hudSilhouette() {
   if (CACHE.hudSil) return CACHE.hudSil
   var rows = []
-  for (var y = -0.77; y <= HUD_NECK_END + 1e-6; y += 0.04) {
+  var n = Math.round((HUD_BOT + 0.77) / 0.04)
+  for (var r = 0; r <= n; r++) {
+    var y = mix(-0.77, HUD_BOT, r / n)
     var s = []
-    for (var f = 0; f < 2; f++) {
-      if (f === 0 && y > HEAD_CHIN) continue
-      if (f === 1 && y < 0.6) continue
-      for (var j = 0; j < 36; j++) {
-        var P = (f ? hudNeckPoint : headPoint)(-Math.PI + j * TAU / 36, y)
-        s.push(P[0], P[2])
-      }
+    for (var j = 0; j < 36; j++) {
+      var P = hudHead(-Math.PI + j * TAU / 36, Math.min(y, HUD_BOT - 0.004))
+      s.push(P[0], P[2])
     }
     rows.push({ y: y, s: s })
   }
@@ -348,9 +362,9 @@ function hudStripeGeom() {
     for (var j = 0; j <= 38; j++) {
       var u = mix(-1.5, 1.5, j / 38)
       var y = c
-      for (var it = 0; it < 3; it++) y = c - HUD_SLANT * headPoint(u, y)[0]
-      if (y < -0.77 || y > HEAD_CHIN - 0.03) { pts.push(null); continue }
-      var sv = headVertex(headPoint, u, y)
+      for (var it = 0; it < 3; it++) y = c - HUD_SLANT * hudHead(u, y)[0]
+      if (y < -0.77 || y > HUD_BOT - 0.05) { pts.push(null); continue }
+      var sv = headVertex(hudHead, u, y)
       pts.push({ x: sv[0], y: sv[1], z: sv[2], nx: sv[3], ny: sv[4], nz: sv[5], ra: hash(c * 97 + j * 1.3) })
     }
     out.push(pts)
@@ -369,7 +383,7 @@ function hudSpeckle() {
   var i
   for (i = 0; i < 150; i++) {
     var y = mix(-0.74, 0.62, rnd())
-    var v = headVertex(headPoint, mix(-1.35, 1.35, rnd()), y)
+    var v = headVertex(hudHead, mix(-1.35, 1.35, rnd()), y)
     out.push({ x: v[0], y: v[1], z: v[2], nx: v[3], ny: v[4], nz: v[5], ra: rnd(), rb: rnd(), rc: rnd(), wall: false, d: Math.hypot(v[0], (v[1] + HUD_YC) / 1.1) })
   }
   for (i = 0; i < 110; i++) {
@@ -774,7 +788,11 @@ function hudVertex(F, v) {
   o.rim = rim
   o.spec = spec
   o.vis = clamp01((nzr + 0.12) / 0.32)
-  o.b = clamp01(0.06 + 0.78 * Math.pow(diff, 1.5) + rim * (0.3 + 0.5 * (nxr < 0 ? 1 : 0.55)) + 0.55 * spec)
+  var Fl = HUD_FILL
+  var fill = nxr * Fl[0] + nyr * Fl[1] + nzr * Fl[2]
+  if (fill < 0) fill = 0
+  // Key, fill and a flat ambient floor under both, then the rim and the lobe.
+  o.b = clamp01(0.15 + 0.7 * Math.pow(diff, 1.5) + 0.3 * fill + rim * (0.3 + 0.5 * (nxr < 0 ? 1 : 0.7)) + 0.55 * spec)
   return o
 }
 
@@ -782,25 +800,42 @@ function hudVertex(F, v) {
 // that follows the surface: {x, y, v} per sample, v the visibility.
 function hudSliceLine(F, y, n) {
   var out = []
-  if (y < HEAD_TOP + 0.02 || y > HUD_NECK_END) return out
-  var fn = y > HEAD_CHIN - 0.04 ? hudNeckPoint : headPoint
+  // Past the crown or under the chin the cut shrinks to a point on the pole
+  // and goes on, so the beam does not vanish at the ends of its travel.
+  var lo = HEAD_TOP + 0.03, hi = HUD_BOT - 0.03
+  var yc = clamp(y, lo, hi)
+  var shrink = clamp01(1 - Math.abs(y - yc) / 0.1)
   var yy = y + HUD_YC
   for (var j = 0; j <= n; j++) {
-    var P = fn(mix(-1.5, 1.5, j / n), y)
+    var P = hudHead(mix(-1.5, 1.5, j / n), yc)
+    var px = P[0] * shrink
     var zc = P[2] - HUD_ZC
-    var xr = P[0] * F.cw + zc * F.sw
-    var z1 = -P[0] * F.sw + zc * F.cw
+    var xr = px * F.cw + zc * F.sw
+    var z1 = -px * F.sw + zc * F.cw
     var yr = yy * F.cp - z1 * F.sp
     var zr = yy * F.sp + z1 * F.cp
     var ps = F.scale / (1 - HUD_PERSP * zr)
-    var rr = Math.hypot(P[0], zc) || 1
+    var rr = Math.hypot(px, zc) || 1
     out.push({
       x: F.cx + xr * ps * F.RF,
       y: F.cy + (yr - HUD_PARALLAX * zr) * ps * F.RF,
-      v: clamp01(((-P[0] * F.sw + zc * F.cw) / rr + 0.1) / 0.3)
+      v: clamp01(((-px * F.sw + zc * F.cw) / rr + 0.1) / 0.3)
     })
   }
   return out
+}
+
+// How much bloom the HUD asks for. A light or merely dark card (level 2)
+// shows the bloom as a haze over the card instead of light on glass, so there
+// the halos are kept to a fraction. The dark glass of level 3 takes it all.
+var HUD_HK = 1
+
+// glowArc with the HUD's bloom scale on its halo, and a hot core that keeps
+// its own edge. `core` scales the white-hot core, for flashes.
+function hudGlowArc(halo, crisp, role, a, w, x, y, r, a0, a1) {
+  halo.arc(role, a * 0.16 * HUD_HK, w * (LUMEN ? 2.2 : 3.6), x, y, r, a0, a1)
+  crisp.arc(role, a, w, x, y, r, a0, a1)
+  if (LUMEN) crisp.arc(hotOf(role), a * 0.85, Math.max(0.5, w * 0.42), x, y, r, a0, a1)
 }
 
 // A bright dot with a spark's cross: the lead of something being drawn on.
@@ -820,10 +855,16 @@ function hudIgnite(halo, crisp, G) {
   if (!G.scanning || rt > 480) return
   var tint = G.tint
   var flash = Math.exp(-rt / 90)
+  // A rescan follows a lock: the seated ring lets go and fades as the boot
+  // starts, so the card does not cut from full to empty.
+  var relA = 0.55 * (1 - easeOutCubic(seg(rt, 0, 240)))
+  if (relA > 0.02) {
+    crisp.arc(tint, relA, G.thin, cx, cy, G.RF * RIM_R * (1 + 0.05 * easeOutCubic(seg(rt, 0, 240))), 0, TAU)
+  }
   var k1 = easeOutCubic(seg(rt, 0, 320))
   var k2 = easeOutCubic(seg(rt, 0, 460))
   if (flash > 0.02) {
-    glowArc(halo, crisp, tint, 0.85 * flash, R * 0.07, cx, cy, R * (0.035 + 0.05 * (1 - flash)), 0, TAU)
+    hudGlowArc(halo, crisp, tint, 0.85 * flash, R * 0.07, cx, cy, R * (0.035 + 0.05 * (1 - flash)), 0, TAU)
   }
   var armA = (1 - seg(rt, 90, 400)) * 0.95
   if (armA > 0.02) {
@@ -837,7 +878,7 @@ function hudIgnite(halo, crisp, G) {
   var pr = R * (0.08 + 0.96 * k2)
   var pa = (1 - seg(rt, 0, 460)) * 0.8
   if (pa > 0.02) {
-    glowArc(halo, crisp, tint, pa, G.thin * (1.5 - k2), cx, cy, pr, 0, TAU)
+    hudGlowArc(halo, crisp, tint, pa, G.thin * (1.5 - k2), cx, cy, pr, 0, TAU)
     for (var s = 0; s < 8; s++) {
       var sa = s * Math.PI / 4 + Math.PI / 8 + k2 * 0.5
       var sx = cx + Math.cos(sa) * pr, sy = cy + Math.sin(sa) * pr
@@ -891,7 +932,7 @@ function hudRings(halo, crisp, G) {
       span = mix(span, next - arcs[ai][0] - 0.02, closeK)
     }
     if (bad) span *= mix(1, 0.35, easeOutCubic(seg(rt, 60, 420)))
-    glowArc(halo, crisp, tint, (0.82 + passFlash * 0.18) * dim, bold, cx, cy, dr, start, start + span)
+    hudGlowArc(halo, crisp, tint, (0.82 + passFlash * 0.18) * dim, bold, cx, cy, dr, start, start + span)
     var ends = [start, start + span]
     for (var ei = 0; ei < 2; ei++) {
       crisp.line(tint, 0.7 * dim * dataK, hair,
@@ -1054,6 +1095,7 @@ function paintHud(ctx, size, spec) {
   var scanning = !ok && !bad
   var tint = bad ? missTint(rt) : ROLE_ACCENT
   TINT = tint
+  HUD_HK = LUMEN && !GLASS ? 0.3 : 1
 
   // Base stroke weights. Everything scales with the card; the floor keeps
   // hairlines on the pixel grid at the real 116 px slot.
@@ -1094,7 +1136,7 @@ function paintHud(ctx, size, spec) {
 
   var F = {
     cw: Math.cos(yaw), sw: Math.sin(yaw), cp: Math.cos(pitch), sp: Math.sin(pitch),
-    cx: cx, cy: cy, R: R, RF: RF, scale: faceScale,
+    cx: cx, cy: cy, R: R, RF: RF, scale: faceScale * HUD_FIT,
     ok: ok, bad: bad, rt: rt, t: t, plane: plane,
     waveY: ok ? mix(-0.92, 1.0, easeInOutCubic(seg(rt, 120, 640))) : 0,
     waveOn: ok ? 1 : 0,
@@ -1104,7 +1146,7 @@ function paintHud(ctx, size, spec) {
   }
   var G = {
     size: size, R: R, cx: cx, cy: cy, boot: boot, tint: tint, dim: dim, state: state, t: t, rt: rt,
-    ok: ok, bad: bad, scanning: scanning, hair: hair, thin: thin, bold: bold, fine: fine,
+    ok: ok, bad: bad, scanning: scanning, RF: RF, hair: hair, thin: thin, bold: bold, fine: fine,
     passFlash: passFlash, closeK: closeK
   }
 
@@ -1261,9 +1303,9 @@ function paintHud(ctx, size, spec) {
     var crest = a[0], mid = a[1], tail = a[2], placed = a[3]
 
     var lit = 0.16 + 0.5 * tail + 0.4 * mid
-    var alpha = ((0.07 + 0.68 * o.b) * (0.4 + 0.6 * clamp01(lit)) + 0.3 * crest * (0.35 + 0.65 * o.b)) * breath
+    var alpha = ((0.07 + 0.68 * o.b) * (0.4 + 0.6 * clamp01(lit)) + 0.22 * crest * (0.35 + 0.65 * o.b)) * breath
     var dof = 0.72 + 0.4 * clamp01((o.z + 0.45) / 0.9)
-    var s = dotBase * (0.5 + 0.9 * o.b) * dof * (1 + 0.55 * crest) * (0.8 + 0.2 * placed)
+    var s = dotBase * (0.5 + 0.9 * o.b) * dof * (1 + 0.4 * crest) * (0.8 + 0.2 * placed)
     var px = o.x, py = o.y
 
     // Not yet placed: the point shimmers in noise and resolves as the light
@@ -1299,7 +1341,6 @@ function paintHud(ctx, size, spec) {
       if (hash(Math.floor(t / 90) * 71 + i * 1.7) < dropK) alpha *= 0.12
       alpha *= mix(1, 0.85, easeOutCubic(seg(rt, 0, 260)))
     }
-    if (v.neck) alpha *= 1 - 0.95 * clamp01((v.y - 0.58) / 0.27)
     if (dense) alpha *= 0.92
     if (alpha < 0.025) continue
     dd.push({ x: px, y: py, s: s, a: alpha, crest: crest, mid: mid, o: o, i: i })
@@ -1312,9 +1353,8 @@ function paintHud(ctx, size, spec) {
     var rimIn = seg(boot, 0.4, 1)
     for (i = 0; i < outline.length; i++) {
       var ol = outline[i]
-      var fadeN = 1 - clamp01((ol.y - 0.55) / 0.3)
       var oa = hudStateAt(F, ol.y)
-      var rb = (0.30 + 0.5 * oa[2] + 0.5 * oa[1] + 0.5 * oa[0]) * fadeN * rimIn * breath
+      var rb = (0.30 + 0.5 * oa[2] + 0.5 * oa[1] + 0.5 * oa[0]) * rimIn * breath
       sideL.push({ x: ol.xl, y: ol.yl })
       sideR.push({ x: ol.xr, y: ol.yr })
       alL.push(Math.min(1, rb * 0.95))
@@ -1504,9 +1544,9 @@ function paintHud(ctx, size, spec) {
     var ck2 = seg(rt, HUD_CLAMP[0], HUD_CLAMP[1])
     var crad = mix(R * 1.04, rimR, Math.pow(ck2, 2.2)) + spring(rt, HUD_CLAMP[1], 240, 3.2) * R * 0.02
     if (ck2 > 0) {
-      var cal = Math.min(1, 0.25 + ck2 * 1.2) * (1 - 0.12 * seg(rt, 1000, 1150))
+      var cal = Math.min(1, ck2 * 1.5) * (1 - 0.3 * seg(rt, 1000, 1500))
       var cwid = bold * (1 + 1.2 * (1 - ck2)) * (rt > HUD_CLAMP[1] ? 0.85 : 1)
-      glowArc(halo, crisp, tint, cal, cwid, cx, cy, crad * faceScale, 0, TAU)
+      hudGlowArc(halo, crisp, tint, cal, cwid, cx, cy, crad * faceScale, 0, TAU)
       if (ck2 < 1) {
         for (var tr = 1; tr <= 3; tr++) {
           crisp.arc(tint, 0.3 * (1 - ck2) / tr, thin, cx, cy, crad + R * 0.05 * tr * (1 - ck2), 0, TAU)
@@ -1516,13 +1556,16 @@ function paintHud(ctx, size, spec) {
     // The impact: the rim flashes white-hot, rays fire off it and two shock
     // waves clear the field.
     var impact = bump(rt, HUD_CLAMP[1] - 30, HUD_CLAMP[1] + 320)
-    if (LUMEN && impact > 0.01) glowArc(halo, crisp, hotOf(tint), impact, bold * 1.5, cx, cy, rimR * faceScale, 0, TAU)
+    // On glass the flash is a bloom; elsewhere it is a crisp hot ring, since the
+    // bloom there would only wash the card.
+    var impK = GLASS ? 1 : 0.55
+    if (LUMEN && impact > 0.01) hudGlowArc(halo, crisp, hotOf(tint), impact * impK, bold * (GLASS ? 1.5 : 1.15), cx, cy, rimR * faceScale, 0, TAU)
     var waves = [[640, 1040], [740, 1130]]
     for (var wv = 0; wv < waves.length; wv++) {
       var wave = bump(rt, waves[wv][0], waves[wv][1])
       if (wave <= 0.01) continue
       var wk = easeOutCubic(seg(rt, waves[wv][0], waves[wv][1]))
-      glowArc(halo, crisp, tint, wave * (wv ? 0.3 : 0.55), Math.max(1, size * 0.013 * (1 - wk * 0.7)), cx, cy, mix(rimR, R * 1.1, wk), 0, TAU)
+      hudGlowArc(halo, crisp, tint, wave * (wv ? 0.3 : 0.55) * (GLASS ? 1 : 0.5), Math.max(1, size * (GLASS ? 0.011 : 0.009) * (1 - wk * 0.7)), cx, cy, mix(rimR, R * 1.1, wk), 0, TAU)
     }
     for (var ry = 0; ry < 60; ry++) {
       var rya = -Math.PI / 2 + ry * TAU / 60
@@ -1637,6 +1680,7 @@ function paintHud(ctx, size, spec) {
 // flash behind a lock's wave, and the rim where the surface turns away.
 function hudGlow(d) {
   var g = d.a * (1.7 * d.crest + 0.5 * d.mid + 0.25 * d.o.rim * d.o.b)
+  g *= HUD_HK < 1 ? 0.5 : 1
   return g > 0.06 ? clamp01(g) : 0
 }
 
