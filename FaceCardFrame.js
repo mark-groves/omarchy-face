@@ -2597,11 +2597,14 @@ var HOLO_CY = -0.06
 var RADAR_REV_MS = 2400
 var RADAR_CLUTTER = 90
 var RADAR_FLOOR = 0.3
-// The head is laid on the scope a little under its full radius and a touch
-// high, so the neck and a shoulder hint fit below the chin.
-var RADAR_FACE = 1.04
-var RADAR_DY = -0.03
-// The scan converter: the scope is read as 44 range gates by 256 bearing
+// The head is laid on the scope with its vertical centre on the scope centre
+// (RADAR_DY moves it there) and a little stretched across, so it reads as a
+// head and not as a tall egg. There is no neck: the picture ends in a
+// closed silhouette under the chin.
+var RADAR_FX = 1.08
+var RADAR_FY = 1.02
+var RADAR_DY = 0.0587
+// The scan converter: the scope is read as 36 range gates by 256 bearing
 // cells, the same polar grid the sweep paints.
 var RADAR_NR = 36
 var RADAR_NB = 256
@@ -2610,83 +2613,129 @@ var RADAR_DR = 0.0265
 // Gates nearest the centre: every other one is read, and they break into arcs.
 var RADAR_THIN = 20
 var RADAR_BREAK = 26
-// Light for the relief shading, upper left and toward the sensor.
+// Key light for the relief shading, upper left and toward the sensor.
 var RADAR_LX = -0.45
 var RADAR_LY = -0.55
 var RADAR_LZ = 0.7
+// The lens the iso-range contours are measured from: far off, above and to
+// the left of the subject, so a contour is the head cut by a tilted plane. It
+// crosses the head obliquely and bends over its volume instead of nesting
+// round its outline.
+var RADAR_SX = -0.6
+var RADAR_SY = -0.62
+var RADAR_SZ = 0.5
 
-function radarNeckHalf(y) { return mix(0.19, 0.27, clamp01((y - 0.52) / 0.44)) }
+function radarBump(v, c, w) { var d = (v - c) / w; return Math.exp(-d * d) }
+
+// The scope's own silhouette, right half, crown to chin: a domed cranium, a
+// slight pinch at the temple, cheekbones, a firm jaw angle and a flat, squared
+// chin. It is not an ellipse. The shared surface is stretched row by row to
+// fill it, and everything on the scope (returns, contours, outline, markers)
+// goes through the same stretch, so they stay together.
+var RADAR_OY = [-0.80, -0.785, -0.745, -0.68, -0.58, -0.46, -0.34, -0.22, -0.10, 0.02, 0.14, 0.26, 0.38, 0.50, 0.59, 0.65, 0.68, 0.685]
+var RADAR_OX = [0.0, 0.15, 0.26, 0.35, 0.42, 0.47, 0.495, 0.5, 0.5, 0.495, 0.48, 0.44, 0.38, 0.30, 0.22, 0.15, 0.08, 0.0]
+
+function radarHalfW(fy) {
+  if (fy <= FACE_TOP || fy >= FACE_CHIN) return 0
+  return Math.max(0, profileAt(RADAR_OY, RADAR_OX, fy))
+}
+
+function radarMod(fy) {
+  var ws = faceHalfW(fy)
+  if (ws < 0.03) return 1
+  return Math.min(2.4, radarHalfW(fy) / ws)
+}
+
+function radarX(fx, fy) { return fx * radarMod(fy) * RADAR_FX }
+function radarY(fy) { return fy * RADAR_FY + RADAR_DY }
+
+// The shared surface with a little more volume laid on it for the scope:
+// a hollow at the temple, fuller cheeks, a firmer jaw plane. All broad and
+// shallow, none of it a feature.
+function radarZAt(x, y) {
+  var ins = holoInside(x, y)
+  if (ins <= 0) return 0
+  var ax = Math.abs(x)
+  var z = holoZAt(x, y)
+  z -= 0.04 * radarBump(ax, 0.4, 0.09) * radarBump(y, -0.3, 0.15)
+  z += 0.035 * radarBump(ax, 0.32, 0.12) * radarBump(y, 0.18, 0.14)
+  z += 0.03 * radarBump(ax, 0.2, 0.2) * radarBump(y, 0.52, 0.09)
+  return z
+}
 
 // What the sensor gets back from one point of the subject, in face
-// coordinates: a gain 0..1 (0 where nothing returns) and the depth the return
-// came from. The head is lit by the shape of its relief: brightest where the
-// surface turns toward the sensor and the light, a bright edge where it rolls
-// away, and nearer returns stronger than far ones. The neck is a dimmer
-// cylinder and the shoulders only a hint.
+// coordinates: whether anything returns, the depth it came from and the
+// surface normal in scope units. The light is applied per frame (radarTone),
+// so the key light can drift over the head.
 function radarSurface(fx, fy, out) {
   var ins = holoInside(fx, fy)
-  out.g = 0
+  out.c = 0
   out.z = 0
+  out.nx = 0
+  out.ny = 0
+  out.nz = 1
+  out.e = 0
   if (ins > 0.002) {
     var e = 0.014
-    var z = holoZAt(fx, fy)
-    var zx = (holoZAt(fx + e, fy) - holoZAt(fx - e, fy)) / (2 * e)
-    var zy = (holoZAt(fx, fy + e) - holoZAt(fx, fy - e)) / (2 * e)
+    var z = radarZAt(fx, fy)
+    var m = radarMod(fy) * RADAR_FX
+    var zx = (radarZAt(fx + e, fy) - radarZAt(fx - e, fy)) / (2 * e) / m
+    var zy = (radarZAt(fx, fy + e) - radarZAt(fx, fy - e)) / (2 * e) / RADAR_FY
     var nl = Math.hypot(zx, zy, 1)
-    var face = 1 / nl
-    var lam = clamp01((-zx * RADAR_LX - zy * RADAR_LY + RADAR_LZ) / nl)
-    var rim = Math.exp(-ins / 0.07)
-    out.g = clamp01(0.04 + 0.6 * Math.pow(lam, 1.6) + 0.14 * face * face * face + 0.2 * clamp01(z / 0.6) + 0.42 * rim)
+    out.c = 1
     out.z = z
-    return
-  }
-  if (fy > 0.5 && fy < 0.86) {
-    var nw = radarNeckHalf(fy)
-    var ax = Math.abs(fx)
-    if (ax < nw) {
-      var nk = clamp01((fy - 0.52) / 0.34)
-      var cyl = Math.sqrt(1 - (ax / nw) * (ax / nw))
-      out.g = 0.34 * (1 - 0.6 * nk) * (0.35 + 0.65 * cyl)
-      out.z = -0.06
-      return
-    }
-  }
-  if (fy > 0.78) {
-    var sw = 0.3 + (fy - 0.78) * 3.4
-    if (Math.abs(fx) < sw) {
-      out.g = 0.17 * (1 - 0.5 * Math.abs(fx) / sw)
-      out.z = -0.12
-    }
+    out.nx = -zx / nl
+    out.ny = -zy / nl
+    out.nz = 1 / nl
+    // How far the surface has rolled away from the sensor, and how close the
+    // return is to the silhouette.
+    out.e = Math.pow(1 - out.nz, 1.6) * 0.5 + 0.38 * Math.exp(-ins / 0.06)
   }
 }
 
+// Light on one cell for a key light (lx, ly, lz): a lit side, a dark side,
+// and a bright edge where the surface rolls away from the sensor. Facing the
+// sensor is mid grey, so a slope toward the light reads bright and one away
+// from it reads dark.
+function radarTone(nx, ny, nz, e, z, lx, ly, lz) {
+  var lam = nx * lx + ny * ly + nz * lz
+  var d = clamp01((lam - 0.42) / 0.55)
+  return clamp01(0.05 + 0.95 * d * d * (3 - 2 * d) + 0.12 * clamp01(z / 0.6) * d + e)
+}
+
 // Everything static about the subject, in scope units (the scope radius is 1)
-// with each piece's bearing precomputed: the gain table the scan converter
-// reads, the iso-depth contours, and the silhouette with its neck and
-// shoulder hint.
+// with each piece's bearing precomputed: the normals the scan converter
+// shades per frame, the iso-range contours and the silhouette.
 function radarReturns() {
-  if (CACHE.radar7) return CACHE.radar7
+  if (CACHE.radar8) return CACHE.radar8
   var NR = RADAR_NR, NB = RADAR_NB
-  var G = [], Z = []
-  var o = { g: 0, z: 0 }
+  var G = [], Z = [], NX = [], NY = [], NZ = [], E = [], C = []
+  var o = { c: 0, z: 0, nx: 0, ny: 0, nz: 1, e: 0 }
   var k, j
   for (k = 0; k < NR; k++) {
     var r = RADAR_RIN + k * RADAR_DR
     for (j = 0; j < NB; j++) {
       var ph = (j + 0.5) * TAU / NB
-      radarSurface(r * Math.cos(ph) / RADAR_FACE, (r * Math.sin(ph) - RADAR_DY) / RADAR_FACE, o)
-      G.push(o.g)
+      var sy = r * Math.sin(ph)
+      var fy = (sy - RADAR_DY) / RADAR_FY
+      radarSurface(r * Math.cos(ph) / (radarMod(fy) * RADAR_FX), fy, o)
+      G.push(o.c ? radarTone(o.nx, o.ny, o.nz, o.e, o.z, RADAR_LX, RADAR_LY, RADAR_LZ) : 0)
       Z.push(o.z)
+      NX.push(o.nx); NY.push(o.ny); NZ.push(o.nz); E.push(o.e); C.push(o.c)
     }
   }
 
-  function piece(fx0, fy0, fx1, fy1, kind, tone, li) {
-    var x0 = fx0 * RADAR_FACE, y0 = fy0 * RADAR_FACE + RADAR_DY
-    var x1 = fx1 * RADAR_FACE, y1 = fy1 * RADAR_FACE + RADAR_DY
+  function piece(fx0, fy0, fx1, fy1, kind, li) {
+    return scopePiece(radarX(fx0, fy0), radarY(fy0), radarX(fx1, fy1), radarY(fy1), kind, li)
+  }
+  function scopePiece(x0, y0, x1, y1, kind, li) {
     var mx = (x0 + x1) / 2, my = (y0 + y1) / 2
     var a = Math.atan2(my, mx)
     if (a < 0) a += TAU
-    return { x0: x0, y0: y0, x1: x1, y1: y1, my: my, r: Math.hypot(mx, my), a: a, j: Math.min(NB - 1, Math.floor(a / TAU * NB)), kind: kind, tone: tone, li: li }
+    var rr = Math.hypot(mx, my)
+    var pj = Math.min(NB - 1, Math.floor(a / TAU * NB))
+    var pk = clamp(Math.round((rr - RADAR_RIN) / RADAR_DR), 0, NR - 1)
+    return { x0: x0, y0: y0, x1: x1, y1: y1, my: my, r: rr, a: a, j: pj, ci: pk * NB + pj, kind: kind, tone: 1, li: li }
   }
 
   // Joins the marching-squares segments that share an endpoint into polylines,
@@ -2740,56 +2789,91 @@ function radarReturns() {
         chain.unshift(Q)
         head = Q.ka
       }
-      out.push(chain)
+      out.push(merge(chain, 3))
     }
     return out
   }
 
-  var lv = []
-  var nLevels = 8
-  for (var li = 0; li < nLevels; li++) lv.push(0.07 + li * 0.077)
-  var topo = reliefContours("radarT7", 26, 34, lv, false, classicZAt, true)
+  // A chain re-cut into pieces of n segments. The grid is fine enough that
+  // the chord across three segments is within a pixel of the curve, and a
+  // contour costs a third of the path commands.
+  function merge(chain, n) {
+    var m = []
+    for (var a = 0; a < chain.length; a += n) {
+      var f = chain[a], l = chain[Math.min(chain.length - 1, a + n - 1)]
+      var q = scopePiece(f.x0, f.y0, l.x1, l.y1, f.kind, f.li)
+      q.ka = f.ka
+      q.kb = l.kb
+      m.push(q)
+    }
+    return m
+  }
+
+  // Iso-range contours: lines of equal distance from the lens, by marching
+  // squares over the subject. Read against the nearer lens, a bulge draws its
+  // lines close together and a flat spreads them, so the lines carry the
+  // volume. Segments are kept where both ends are inside the silhouette.
+  var gx = 64, gy = 84
+  var gx0 = -0.64, gx1 = 0.64, gy0 = -0.82, gy1 = 0.82
+  function range(x, y) {
+    return x * RADAR_SX + y * RADAR_SY + radarZAt(x, y) * RADAR_SZ
+  }
+  var grid = []
+  var dmin = 9, dmax = 0
+  var gi2, gj2
+  for (gj2 = 0; gj2 <= gy; gj2++) {
+    var row = []
+    for (gi2 = 0; gi2 <= gx; gi2++) {
+      var vx = mix(gx0, gx1, gi2 / gx), vy = mix(gy0, gy1, gj2 / gy)
+      var dv = range(vx, vy)
+      row.push(dv)
+      if (holoInside(vx, vy) > 0.05) { dmin = Math.min(dmin, dv); dmax = Math.max(dmax, dv) }
+    }
+    grid.push(row)
+  }
+  var nLevels = 11
   var segs = []
-  for (var ti = 0; ti < topo.segs.length; ti++) {
-    var S = topo.segs[ti]
-    segs.push(piece(S[0], S[1], S[2], S[3], 0, 0.42 + 0.58 * S[5] / (nLevels - 1), S[5]))
+  function inside(x, y) { return holoInside(x, y) > 0.004 }
+  function lerp(a, b, va, vb, L) { return a + (b - a) * ((L - va) / (vb - va)) }
+  for (var li = 0; li < nLevels; li++) {
+    var L = mix(dmin, dmax, (li + 0.5) / nLevels)
+    for (var cj = 0; cj < gy; cj++) {
+      for (var ci = 0; ci < gx; ci++) {
+        var xa = mix(gx0, gx1, ci / gx), xb = mix(gx0, gx1, (ci + 1) / gx)
+        var ya = mix(gy0, gy1, cj / gy), yb = mix(gy0, gy1, (cj + 1) / gy)
+        var v00 = grid[cj][ci], v10 = grid[cj][ci + 1], v01 = grid[cj + 1][ci], v11 = grid[cj + 1][ci + 1]
+        var pts = []
+        if ((v00 < L) !== (v10 < L)) pts.push([lerp(xa, xb, v00, v10, L), ya])
+        if ((v10 < L) !== (v11 < L)) pts.push([xb, lerp(ya, yb, v10, v11, L)])
+        if ((v01 < L) !== (v11 < L)) pts.push([lerp(xa, xb, v01, v11, L), yb])
+        if ((v00 < L) !== (v01 < L)) pts.push([xa, lerp(ya, yb, v00, v01, L)])
+        for (var pp = 0; pp + 1 < pts.length; pp += 2) {
+          if (inside(pts[pp][0], pts[pp][1]) && inside(pts[pp + 1][0], pts[pp + 1][1])) {
+            segs.push(piece(pts[pp][0], pts[pp][1], pts[pp + 1][0], pts[pp + 1][1], 0, li))
+          }
+        }
+      }
+    }
   }
   var contours = chains(segs)
 
-  // The head's silhouette is one closed stroke from the chin up the left
-  // side, over the crown and down the right. The neck leaves the jaw on each
-  // side and runs down, and the shoulders flare out to the edge of the scope.
+  // The silhouette is one closed stroke: from the chin up the left side, over
+  // the crown and down the right, back to where it started.
   var outline = []
-  var side, y, prev, cur, run
-  run = []
-  for (y = FACE_CHIN - 0.004; y > FACE_TOP; y -= 0.02) run.push([-faceHalfW(y), y])
+  var y, run = []
+  run.push([0, FACE_CHIN])
+  for (y = FACE_CHIN - 0.012; y > FACE_TOP + 0.01; y -= 0.022) run.push([-radarHalfW(y), y])
   run.push([0, FACE_TOP])
-  for (y = FACE_TOP + 0.02; y < FACE_CHIN - 0.004; y += 0.02) run.push([faceHalfW(y), y])
+  for (y = FACE_TOP + 0.034; y < FACE_CHIN - 0.01; y += 0.022) run.push([radarHalfW(y), y])
   run.push([0, FACE_CHIN])
   var rimChain = []
-  for (var ri = 1; ri < run.length; ri++) rimChain.push(piece(run[ri - 1][0], run[ri - 1][1], run[ri][0], run[ri][1], 0, 1, 0))
-  outline.push(rimChain)
-  for (side = -1; side <= 1; side += 2) {
-    var nch = []
-    prev = [side * radarNeckHalf(0.6), 0.6]
-    for (y = 0.65; y <= 0.8 + 1e-6; y += 0.05) {
-      cur = [side * radarNeckHalf(y), y]
-      nch.push(piece(prev[0], prev[1], cur[0], cur[1], 1, 0.62 - (y - 0.6) * 1.2, 0))
-      prev = cur
-    }
-    for (var s = 1; s <= 8; s++) {
-      var su = s / 8
-      cur = [side * (radarNeckHalf(0.8) + 0.5 * Math.pow(su, 1.25)), 0.8 + 0.12 * su * su]
-      var rr = Math.hypot(cur[0] * RADAR_FACE, cur[1] * RADAR_FACE + RADAR_DY)
-      if (rr > 0.97) break
-      nch.push(piece(prev[0], prev[1], cur[0], cur[1], 2, 0.4 * (1 - su * 0.5), 0))
-      prev = cur
-    }
-    outline.push(nch)
+  for (var ri = 1; ri < run.length; ri++) {
+    rimChain.push(scopePiece(run[ri - 1][0] * RADAR_FX, radarY(run[ri - 1][1]), run[ri][0] * RADAR_FX, radarY(run[ri][1]), 0, 0))
   }
+  outline.push(rimChain)
 
-  CACHE.radar7 = { G: G, Z: Z, contours: contours, outline: outline }
-  return CACHE.radar7
+  CACHE.radar8 = { G: G, Z: Z, NX: NX, NY: NY, NZ: NZ, E: E, C: C, contours: contours, outline: outline }
+  return CACHE.radar8
 }
 
 // Distance the sweep has covered while a lock settles, in milliseconds of
@@ -2819,6 +2903,7 @@ function radarSweep(state, t, rt) {
 }
 
 function frac(v) { return v - Math.floor(v) }
+function smooth01(v) { return v * v * (3 - 2 * v) }
 
 // An L-bracket at (x, y) opening toward (dx, dy).
 function bracketCorner(p, role, a, w, x, y, dx, dy, len) {
@@ -2874,7 +2959,11 @@ function paintRadar(ctx, size, spec) {
     : (ok ? mix(1, 0.3, easeOutCubic(seg(rt, 420, 800))) : mix(1, 0.45, seg(rt, 300, 700)))
   var spinGlow = ok ? 1 + 0.8 * bump(rt, 0, 500) : 1
   var smearK = bad ? easeOutCubic(seg(rt, 120, 520)) : 0
-  var jamK = bad ? easeOutCubic(seg(rt, 0, 260)) * (1 - 0.5 * seg(rt, 500, 900)) : 0
+  // The jam hits hard, eases to a low hiss while the head stays legible, and
+  // comes back in a short burst every couple of seconds.
+  var jamP = bad && rt > 1000 ? frac((rt - 1000) / 1300) : 1
+  var jamBurst = Math.min(1, jamP / 0.05) * Math.exp(-jamP * 7)
+  var jamK = bad ? easeOutCubic(seg(rt, 0, 260)) * Math.min(1, 0.2 + 0.8 * (1 - seg(rt, 300, 900)) + 0.8 * jamBurst) : 0
   var calm = ok ? 1 - easeOutCubic(seg(rt, 0, 300)) : 1
   var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
   var settleK = ok ? seg(rt, 500, 920) : 0
@@ -2922,7 +3011,6 @@ function paintRadar(ctx, size, spec) {
   }
 
   var geo = radarReturns()
-  var G = geo.G
   var NB = RADAR_NB, NR = RADAR_NR
   var dPh = TAU / NB
 
@@ -3110,13 +3198,14 @@ function paintRadar(ctx, size, spec) {
   var hJ = new Array(NB)
   var vJ = new Array(NB)
   var secOn = !compact && secK > 0.01
+  var retGain = scanning ? easeOutCubic(seg(rt, 120, 460)) : 1
   var missDim = bad ? 1 - 0.3 * seg(rt, 200, 800) : 1
   for (var bj = 0; bj < NB; bj++) {
     var bph = bj * dPh
     var bu = (arm - bph) * dir / TAU
     var bf = frac(bu)
     var bc = Math.floor(bu)
-    var bv = scanning ? clamp01((swept - bf * TAU) / 0.15) : 1
+    var bv = scanning ? clamp01((swept - bf * TAU) / 0.15) * retGain : 1
     var pers = RADAR_FLOOR + (1 - RADAR_FLOOR) * (0.68 * Math.exp(-bf * 3.6) + 0.32 * Math.exp(-bf * 0.9))
     var bfl = scanning ? 0.86 + 0.14 * hash(bc * 13 + (bj >> 1)) : 1
     var bs = 0
@@ -3128,6 +3217,19 @@ function paintRadar(ctx, size, spec) {
     hJ[bj] = Math.exp(-bf * 14) * bv * bfl * armK
     vJ[bj] = bv
   }
+
+  // Light on every return cell this frame. The key light drifts slowly over
+  // the head, so the shading slides across the relief, and it strobes on a miss.
+  var lAz = t / 10000 * TAU
+  var lgx = RADAR_LX + 0.4 * Math.sin(lAz) * (1 - 0.6 * settleK)
+  var lgy = RADAR_LY + 0.12 * Math.sin(t / 6100 + 1)
+  if (bad && jamK > 0.01) lgx += (hash(Math.floor(rt / 70) * 3 + 2) - 0.5) * 0.3 * jamK * jamK
+  var lgn = 1 / Math.hypot(lgx, lgy, RADAR_LZ)
+  lgx *= lgn; lgy *= lgn
+  var lgz = RADAR_LZ * lgn
+  var TN = new Array(NR * NB)
+  var cov = geo.C, NXa = geo.NX, NYa = geo.NY, NZa = geo.NZ, Ea = geo.E, Za = geo.Z
+  for (var tn = 0; tn < NR * NB; tn++) TN[tn] = cov[tn] ? radarTone(NXa[tn], NYa[tn], NZa[tn], Ea[tn], Za[tn], lgx, lgy, lgz) : 0
 
   var pings = ok ? [[400, 800], [490, 880], [580, 960]] : (bad ? [[0, 340], [150, 500]] : [])
   var pingR = []
@@ -3213,16 +3315,24 @@ function paintRadar(ctx, size, spec) {
         if (hash(slipStep * 11 + band * 7) > 0.6) slip = Math.round((hash(slipStep * 5 + band * 3) - 0.5) * 20 * jamK)
       }
       var runL = 0, runJ = 0, hotL = 0, hotJ = 0
+      var thr = frac(gi * 0.618) * 0.5
+      // The gates round the hub are small circles, and in the middle of the
+      // head they would read as a bullseye, so they are held back.
+      var hubFade = 0.3 + 0.7 * smooth01(clamp01((rrg - 0.06) / 0.2))
       for (var cj = 0; cj <= NB; cj++) {
         var lvB = 0, lvH = 0
         if (cj < NB) {
-          var gg = G[gbase + (cj + slip + NB * 2) % NB]
+          var gci = gbase + (cj + slip + NB * 2) % NB
+          var gg = TN[gci]
           // Near the centre the gates break into short arcs, a different run
           // missing on each ring, so the relief reads as lit cells and not as
           // a spiral.
           if (!compact && gi < RADAR_BREAK && hash(((cj + slip + NB * 2) % NB / 7 | 0) * 31 + gi * 17) < 0.6 * (1 - gi / RADAR_BREAK)) gg = 0
-          if (gg > 0.02) {
-            var gs = Math.pow(gg, 2) * 1.3
+          if (cov[gci] && gg > 0.02) {
+            // Halftone by range gate: a lit cell holds every gate, a shaded
+            // one only some of them, so the dark side of the head is a
+            // sparse engraving and the lit side a dense one.
+            var gs = clamp01((gg * 1.15 + 0.1 - thr) / 0.3) * (0.3 + 0.7 * gg) * 1.2 * hubFade
             lvB = Math.round(clamp01(gs * lightAt(cj, rfr) * hatchGain) * QL)
             if (LUMEN && !bad) lvH = Math.round(clamp01(gs * heatAt(cj, rrg, frn) - 0.1) * QH)
           }
@@ -3231,7 +3341,7 @@ function paintRadar(ctx, size, spec) {
           if (runL > 0) {
             var mj = (runJ + cj) / 2 * dPh
             var oxb = tears.length ? tearShift(tears, rrg * Math.sin(mj)) * R : 0
-            crisp.arc(tint, runL / QL, wRing, cx + oxb, cy, rpx, runJ * dPh, cj * dPh)
+            crisp.arc(tint, runL / QL, wRing * (0.6 + 0.8 * runL / QL), cx + oxb, cy, rpx, runJ * dPh, cj * dPh)
           }
           runL = lvB
           runJ = cj
@@ -3273,10 +3383,10 @@ function paintRadar(ctx, size, spec) {
       lastOx = ox
     }
   }
-  var contourA = function (P) { return P.tone * lightAt(P.j, refreshOf(P.r)) * (ok ? 0.8 : 0.9) }
-  var contourH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * P.tone; return h > 0.14 ? h * 0.65 : 0 }
-  var outlineA = function (P) { return P.tone * vJ[P.j] * (0.4 + 0.6 * clamp01(lightAt(P.j, refreshOf(P.r)))) }
-  var outlineH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * P.tone * vJ[P.j]; return h > 0.12 ? h : 0 }
+  var contourA = function (P) { return (0.2 + 0.8 * TN[P.ci]) * lightAt(P.j, refreshOf(P.r)) * (ok ? 0.8 : 0.9) }
+  var contourH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * (0.3 + 0.7 * TN[P.ci]); return h > 0.14 ? h * 0.65 : 0 }
+  var outlineA = function (P) { return (0.55 + 0.45 * TN[P.ci]) * vJ[P.j] * (0.4 + 0.6 * clamp01(lightAt(P.j, refreshOf(P.r)))) }
+  var outlineH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * (0.55 + 0.45 * TN[P.ci]) * vJ[P.j]; return h > 0.12 ? h : 0 }
 
   // Iso-depth contours of the relief, brighter on the nearer levels: where
   // they crowd the surface is steep, and that is how the head reads in 3D.
@@ -3305,11 +3415,10 @@ function paintRadar(ctx, size, spec) {
   // continuous line on the scope, and it blooms where the arm has just passed.
   var oRim = Math.max(1, size * 0.0085)
   for (var oi = 0; oi < geo.outline.length; oi++) {
-    if (compact && oi > 0) break
     var och = geo.outline[oi]
-    var ow = oi === 0 ? oRim : oRim * 0.7
+    var ow = oRim
     strokeChain(crisp, tint, och, ow, 14, outlineA, 1)
-    if (oi === 0) strokeChain(halo, tint, och, ow * 2, 8, function (P) { return outlineA(P) * 0.14 }, 1)
+    strokeChain(halo, tint, och, ow * 2, 8, function (P) { return outlineA(P) * 0.14 }, 1)
     if (LUMEN && !bad) {
       strokeChain(crisp, hotOf(tint), och, ow * 0.5, 6, function (P) { return outlineH(P) * 0.7 }, 1)
       strokeChain(halo, tint, och, ow * 2.4, 6, function (P) { return outlineH(P) * 0.26 }, 1)
@@ -3402,13 +3511,13 @@ function paintRadar(ctx, size, spec) {
     }
     // Analysis markers: seated by the arm's pass over each region.
     faceMarkers(halo, crisp, {
-      proj: function (X, Y, Z) { return { x: cx + X * RADAR_FACE * R, y: cy + (Y * RADAR_FACE + RADAR_DY) * R, v: 1 } },
+      proj: function (X, Y, Z) { return { x: cx + radarX(X, Y) * R, y: cy + radarY(Y) * R, v: 1 } },
       pass: function (X, Y, q) {
-        var ag2 = ageOf(Math.atan2(Y * RADAR_FACE + RADAR_DY, X * RADAR_FACE))
+        var ag2 = ageOf(Math.atan2(radarY(Y), radarX(X, Y)))
         return visible(ag2.f) * boot > 0.5 ? ag2.f * 1.4 : -0.1
       },
       post: function (q) { return bad ? { x: q.x + tearShift(tears, (q.y - cy) / R) * R, y: q.y, v: q.v } : q },
-      tint: tint, U: R * RADAR_FACE, gain: boot, labels: labels, clock: t, cx: cx,
+      tint: tint, U: R * 1.04, gain: boot, labels: labels, clock: t, cx: cx,
       wLine: fine * 1.4, wMark: fine * 1.4
     })
     // Centre reticle, turning.
@@ -3447,6 +3556,26 @@ function paintRadar(ctx, size, spec) {
     }
     if (LUMEN && seatK > 0.05) crisp.arc(hotOf(tint), 0.8 * seatK, fine * 1.4, cx, cy, lrad, 0, TAU)
     flush()
+  }
+
+  // A miss tries to clamp and cannot: eight arcs close on the head, stall and
+  // stutter against it, then are thrown outward, spinning, and burn out.
+  if (bad && !compact) {
+    var cfa = seg(rt, 60, 300)
+    var cfb = seg(rt, 460, 900)
+    if (cfa > 0 && cfb < 1) {
+      var cfClose = easeOutCubic(cfa)
+      var cfOut = cfb * cfb * cfb
+      var cfStall = cfa >= 1 && cfb <= 0 ? Math.sin(rt / 21) * R * 0.014 : 0
+      for (var cfq = 0; cfq < 8; cfq++) {
+        var cfh = hash(cfq * 7 + 3)
+        var cfang = cfq * TAU / 8 + (1 - cfClose) * 0.8 + cfOut * (cfh - 0.5) * 1.8
+        var cfr = R * mix(1.16, 0.88, cfClose) + cfStall * (cfq % 2 ? 1 : -1) + cfOut * R * (0.05 + 0.1 * cfh)
+        var cfs = mix(0.3, 0.6, cfClose) * (1 - 0.5 * cfOut)
+        glowArc(halo, crisp, tint, clamp01(cfa * 1.6) * (1 - cfb) * 0.9, mix(thin, bold * 0.8, cfClose) * (1 - 0.5 * cfOut), cx, cy, cfr, cfang - cfs / 2, cfang + cfs / 2)
+      }
+      flush()
+    }
   }
 
   if (ok || bad) {
