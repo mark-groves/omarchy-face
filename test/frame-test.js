@@ -563,5 +563,17 @@ check('the radar range strobe keeps painting once a miss reverses the sweep', ()
   }
 })
 
+// A failed miss only gets 900 ms of authored time inside the host's hold, so
+// the radar's jam burst has to land inside it: the scope gets busier again
+// just before the hold ends instead of only decaying.
+check('the radar jam burst plays inside the host hold of a miss', () => {
+  const cmds = (elapsed, clock) => frame(220, { state: 'notRecognized', elapsed: elapsed, clock: clock + elapsed, style: 'radar', host: 3 })
+    .reduce((n, o) => n + (o[0] === 0 ? o[4].length : 0), 0)
+  assert.ok(holdMs('notRecognized') > 1510)
+  for (const clock of [0, 5000, 9200, 20000]) {
+    assert.ok(cmds(1510, clock) > cmds(1400, clock), 'no jam burst before the hold ends at clock ' + clock)
+  }
+})
+
 console.log(failures === 0 ? '\nall frame tests passed' : '\n' + failures + ' frame test(s) failed')
 process.exit(failures === 0 ? 0 : 1)
