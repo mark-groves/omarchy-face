@@ -3004,10 +3004,13 @@ function paintRadar(ctx, size, spec) {
   var spinGlow = ok ? 1 + 0.8 * bump(rt, 0, 500) : 1
   var smearK = bad ? easeOutCubic(seg(rt, 120, 520)) : 0
   // The jam hits hard, eases to a low hiss while the head stays legible, and
-  // comes back in a short burst every couple of seconds.
-  var jamP = bad && rt > 1000 ? frac((rt - 1000) / 1300) : 1
+  // comes back in a short burst every 1.3 s. The failed miss only gets
+  // AUTHORED_MISS of authored time on a real host, so the first burst lands
+  // inside it; a longer hold (the preview) repeats it.
+  var jamAt = AUTHORED_MISS - 260
+  var jamP = bad && rt > jamAt ? frac((rt - jamAt) / 1300) : 1
   var jamBurst = Math.min(1, jamP / 0.05) * Math.exp(-jamP * 7)
-  var jamK = bad ? easeOutCubic(seg(rt, 0, 260)) * Math.min(1, 0.2 + 0.8 * (1 - seg(rt, 300, 900)) + 0.8 * jamBurst) : 0
+  var jamK = bad ? easeOutCubic(seg(rt, 0, 260)) * Math.min(1, 0.2 + 0.8 * (1 - seg(rt, 260, 600)) + 0.8 * jamBurst) : 0
   var calm = ok ? 1 - easeOutCubic(seg(rt, 0, 300)) : 1
   var passFlash = ok ? bump(rt, REC_PASS - 40, REC_PASS + 420) : 0
   var settleK = ok ? seg(rt, 500, 920) : 0
