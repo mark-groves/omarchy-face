@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omarchy-face visual harness</title>
+<!--
+  Visual harness for FaceCardFrame.js. Not shipped, not loaded by the host.
+
+  It fetches the raw module (/FaceCardFrame.js, so serve the repo root; tools/shoot.js
+  does that), evaluates it the way test/frame-test.js does, and paints the ops
+  the way Preview.qml's paintOps does, at host level 1, 2 or 3.
+
+  URL params (all optional):
+    layout   sheet (default) | single | stage
+    style    hud | radar | holo, or a comma list (one section each)
+    state    scanning | recognized | notRecognized, or a comma list
+    elapsed  comma list of ms since the state was entered
+    clock    pin the absolute clock (ms) for every cell; otherwise clock = entered + elapsed
+    entered  clock at which the state was entered (default 0 / 3400 / 9200, the Preview script)
+    timeline rows as  state@e1,e2,e3;state@e1,e2   (overrides state/elapsed)
+    host     1 | 2 | 3 (default 3)
+    theme    tokyo (default) | mocha | latte | gruvbox | nord | dawn
+    themejson  URL-encoded JSON object of colors.toml keys (overrides theme)
+    scale    device pixel ratio the canvases are rendered at (default 2)
+    side     card size in logical px (default 220)
+    bloom    wide,tight blur sigma in card px (default 10,3.2)
+    labels   0 to hide cell labels
+
+  Page API for scripted capture: window.harness (see bottom).
+-->
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; }
+  body { font: 11px/1.3 ui-monospace, "DejaVu Sans Mono", monospace; }
+  #shot { display: inline-block; padding: 16px 16px 12px; box-sizing: border-box; }
+  h2 { margin: 14px 0 6px; font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: flex-start; margin: 0 0 8px; }
+  .rowlabel { width: 92px; flex: none; padding-top: 6px; opacity: .6; }
+  .cell { flex: none; }
+  .cell canvas { display: block; }
+  .cell .lab { padding: 3px 4px 0; opacity: .7; font-size: 10px; white-space: nowrap; }
+  .cell .lab b { font-weight: 600; opacity: 1; }
+  .err { color: #f7768e; padding: 20px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="shot"></div>
+<script>
+'use strict'
+
+// --- params ----------------------------------------------------------------
+
+const Q = new URLSearchParams(location.search)
+const num = (k, d) => { const v = parseFloat(Q.get(k)); return isFinite(v) ? v : d }
+const list = (k, d) => Q.has(k) ? Q.get(k).split(',').map(s => s.trim()).filter(Boolean) : d
+const DPR = num('scale', window.devicePixelRatio || 1)
+const SIDE = num('side', 220)
+const HOST = Math.max(1, Math.min(3, Math.round(num('host', 3))))
+const PAD = 18                     // room round the card so the bloom is not clipped
+const BLOOM = list('bloom', ['10', '3.2']).map(Number)
+const LABELS = Q.get('labels') !== '0'
+
+// --- themes -----------------------------------------------------------------
+
+// Tokyo Night is Preview.qml's default theme, key for key. The rest use the
+// real colors.toml key names, so deriveRoles walks the same palette keys.
+const THEMES = {
+  tokyo: {
+    background: '#1a1b26', foreground: '#a9b1d6', accent: '#7aa2f7', red: '#f7768e',
+    yellow: '#e0af68', green: '#9ece6a', cyan: '#449dab', magenta: '#ad8ee6', orange: '#eb927b'
+  },
+  mocha: {
+    background: '#1e1e2e', foreground: '#cdd6f4', accent: '#89b4fa', red: '#f38ba8',
+    yellow: '#f9e2af', orange: '#fab387', green: '#a6e3a1', cyan: '#94e2d5', blue: '#89b4fa',
+    magenta: '#f5c2e7', bright_cyan: '#94e2d5', bright_magenta: '#f5c2e7'
+  },
+  latte: {
+    background: '#eff1f5', foreground: '#4c4f69', accent: '#1e66f5', red: '#d20f39',
+    yellow: '#df8e1d', orange: '#d84e2b', green: '#40a02b', cyan: '#179299', blue: '#1e66f5',
+    magenta: '#ea76cb', bright_cyan: '#179299', bright_magenta: '#ea76cb'
+  },
+  gruvbox: {
+    background: '#282828', foreground: '#ebdbb2', accent: '#d79921', red: '#fb4934',
+    yellow: '#fabd2f', orange: '#fe8019', green: '#b8bb26', cyan: '#8ec07c', blue: '#83a598',
+    magenta: '#d3869b', bright_cyan: '#8ec07c', bright_magenta: '#d3869b'
+  },
+  nord: {
+    background: '#2e3440', foreground: '#d8dee9', accent: '#88c0d0', red: '#bf616a',
+    yellow: '#ebcb8b', orange: '#d08770', green: '#a3be8c', cyan: '#8fbcbb', blue: '#81a1c1',
+    magenta: '#b48ead', bright_cyan: '#8fbcbb', bright_magenta: '#b48ead'
+  },
+  dawn: {
+    background: '#faf4ed', foreground: '#575279', accent: '#286983', red: '#b4637a',
+    yellow: '#ea9d34', orange: '#d7827e', green: '#56949f', cyan: '#56949f', blue: '#286983',
+    magenta: '#907aa9', bright_cyan: '#56949f', bright_magenta: '#907aa9'
+  }
+}
+
+// --- the Qt colour operations Preview.qml leans on ---------------------------
+
+function mk(r, g, b, a) {
+  r = clamp01(r); g = clamp01(g); b = clamp01(b); a = a === undefined ? 1 : clamp01(a)
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+  const l = (mx + mn) / 2
+  let h = -1, s = 0
+  if (mx !== mn) {
+    const d = mx - mn
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn)
+    if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
+    else if (mx === g) h = ((b - r) / d + 2) / 6
+    else h = ((r - g) / d + 4) / 6
+  }
+  return { r, g, b, a, hslHue: h, hslSaturation: s, hslLightness: l }
+}
+function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v) }
+function color(v) {
+  if (typeof v === 'object') return v
+  const m = /^#([0-9a-f]{6})$/i.exec(v)
+  if (!m) throw new Error('bad colour ' + v)
+  const n = parseInt(m[1], 16)
+  return mk((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255, 1)
+}
+function hsla(h, s, l, a) {
+  if (h < 0 || s === 0) return mk(l, l, l, a)   // achromatic
+  h = ((h % 1) + 1) % 1
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q
+  const f = t => {
+    t = (t + 1) % 1
+    return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p
+  }
+  return mk(f(h + 1 / 3), f(h), f(h - 1 / 3), a === undefined ? 1 : a)
+}
+function rgba(r, g, b, a) { return mk(r, g, b, a) }
+// Qt.tint: the tint colour, at its own alpha, over the base.
+function tint(base, t) {
+  const a = t.a
+  return mk(t.r * a + base.r * (1 - a), t.g * a + base.g * (1 - a), t.b * a + base.b * (1 - a), a + base.a * (1 - a))
+}
+function alpha(c, a) { return mk(c.r, c.g, c.b, a) }
+// Qt.darker(c, f): HSV value divided by f.
+function darker(c, f) {
+  const mx = Math.max(c.r, c.g, c.b)
+  if (mx === 0) return c
+  const k = 1 / f
+  return mk(c.r * k, c.g * k, c.b * k, c.a)
+}
+function css(c, a) {
+  return 'rgba(' + Math.round(c.r * 255) + ',' + Math.round(c.g * 255) + ',' + Math.round(c.b * 255) + ',' + (a === undefined ? c.a : a) + ')'
+}
+
+// --- Preview.qml's theme derivation, ported line for line ----------------------
+
+function luminance(c) { return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b }
+function hueGap(a, b) { const d = Math.abs(a - b) % 1; return d > 0.5 ? 1 - d : d }
+
+function makeTheme(raw) {
+  const theme = raw
+  const accent = color(theme.accent || theme.color4 || '#7aa2f7')
+  const foreground = color(theme.foreground || theme.color7 || '#c0caf5')
+  const errorColor = color(theme.red || theme.color1 || '#f7768e')
+  const background = color(theme.background)
+
+  function deriveRoles() {
+    const a = accent, f = foreground, e = errorColor
+    let hot = tint(a, rgba(f.r, f.g, f.b, 0.55))
+    hot = hsla(hot.hslHue, hot.hslSaturation, Math.min(0.94, hot.hslLightness + (1 - hot.hslLightness) * 0.35), 1)
+    const keys = ['cyan', 'magenta', 'blue', 'green', 'yellow', 'orange', 'bright_cyan', 'bright_magenta', 'color6', 'color5', 'color2', 'color3']
+    const picks = []
+    for (const k of keys) {
+      const v = theme[k]
+      if (!v) continue
+      const c = color(v)
+      if (c.hslSaturation < 0.22 || c.hslLightness < 0.25 || c.hslLightness > 0.9) continue
+      if (e.hslSaturation > 0.22 && hueGap(c.hslHue, e.hslHue) < 0.05) continue
+      picks.push(c)
+    }
+    function best(away) {
+      let top = null, score = 0.06
+      for (const p of picks) {
+        let d = hueGap(p.hslHue, a.hslHue)
+        if (away) d = Math.min(d, hueGap(p.hslHue, away.hslHue))
+        if (d > score) { score = d; top = p }
+      }
+      return top
+    }
+    let second = best(null)
+    let third = second ? best(second) : null
+    if (!second) second = hsla((a.hslHue + 0.42) % 1, Math.max(0.45, a.hslSaturation), 0.6, 1)
+    if (!third) third = hsla((a.hslHue + 0.82) % 1, Math.max(0.45, a.hslSaturation), 0.6, 1)
+    return [a, f, e, hot, second, third]
+  }
+
+  function relLum(c) {
+    const lin = v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+    return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+  }
+  function contrast(a, b) {
+    const la = relLum(a), lb = relLum(b)
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+  }
+  function liftOver(c, bg, target) {
+    let out = c
+    let l = out.hslLightness
+    while (contrast(out, bg) < target && l < 0.94) {
+      l = Math.min(0.94, l + 0.02)
+      out = hsla(out.hslHue, out.hslSaturation, l, 1)
+    }
+    return out
+  }
+
+  function deriveGlass() {
+    const a = accent, f = foreground, b = background
+    const darkBase = relLum(b) <= relLum(f) ? b : f
+    const lightBase = relLum(b) <= relLum(f) ? f : b
+    const t = tint(darkBase, rgba(a.r, a.g, a.b, 0.14))
+    const panel = hsla(t.hslHue, Math.min(t.hslSaturation, 0.32),
+      Math.min(darkBase.hslLightness, Math.max(0.05, Math.min(0.1, t.hslLightness * 0.8))), 1)
+    const e = tint(darkBase, rgba(a.r, a.g, a.b, 0.3))
+    const edge = hsla(e.hslHue, e.hslSaturation, Math.max(0.16, Math.min(0.24, e.hslLightness)), 1)
+    const base = deriveRoles()
+    const lit = liftOver(a, panel, 6)
+    const ink = liftOver(lightBase, panel, 11)
+    let hot = tint(lit, rgba(ink.r, ink.g, ink.b, 0.55))
+    hot = hsla(hot.hslHue, hot.hslSaturation, Math.min(0.94, hot.hslLightness + (1 - hot.hslLightness) * 0.35), 1)
+    return {
+      panel, edge,
+      roles: [lit, ink, liftOver(errorColor, panel, 5), hot, liftOver(base[4], panel, 5), liftOver(base[5], panel, 5)]
+    }
+  }
+
+  const glass = HOST >= 3
+  const glassTheme = deriveGlass()
+  const dark = glass || luminance(background) < 0.5
+  const roles = glass ? glassTheme.roles : deriveRoles()
+  return {
+    raw, accent, foreground, errorColor, background, glass, glassTheme, dark, roles,
+    surface: darker(background, 1.3),
+    panel: background
+  }
+}
+
+// --- ops painter: Preview.qml paintOps, verbatim logic -------------------------
+
+function roleColor(T, role, a) {
+  // Role 6 (ROLE_INK) never leaves the module (the recorder maps it to the
+  // foreground), but keep it safe if a future frame does emit it.
+  const c = role >= 1 && role <= 5 && Math.floor(role) === role ? T.roles[role] : (role === 6 ? T.roles[1] : T.roles[0])
+  return css(c, Math.max(0, Math.min(1, a)))
+}
+
+function paintOps(T, ctx, list, glowLayer, scale) {
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  if (scale !== 1) ctx.scale(scale, scale)
+  if (glowLayer) ctx.globalCompositeOperation = T.dark ? 'lighter' : 'source-over'
+  const glowAt = [5, 7, 10]
+  for (let i = 0; i < list.length; i++) {
+    const op = list[i]
+    if (op[0] === 3) {
+      if (!glowLayer) ctx.globalCompositeOperation = T.dark && op[1] === 1 ? 'lighter' : 'source-over'
+      continue
+    }
+    const g = op.length > glowAt[op[0]] ? op[glowAt[op[0]]] : 0
+    if (glowLayer && !(g > 0)) continue
+    if (op[0] === 0) {
+      const a = glowLayer ? g : op[2]
+      if (a <= 0) continue
+      ctx.strokeStyle = roleColor(T, op[1], a)
+      ctx.lineWidth = op[3]
+      ctx.beginPath()
+      const cmds = op[4]
+      for (let c = 0; c < cmds.length; c++) {
+        const k = cmds[c]
+        if (k[0] === 0) ctx.moveTo(k[1], k[2])
+        else if (k[0] === 1) ctx.lineTo(k[1], k[2])
+        else if (k[0] === 2) ctx.quadraticCurveTo(k[1], k[2], k[3], k[4])
+        else if (k[0] === 3) ctx.arc(k[1], k[2], k[3], k[4], k[5])
+      }
+      ctx.stroke()
+    } else if (op[0] === 1) {
+      ctx.fillStyle = roleColor(T, op[1], glowLayer ? g : op[2])
+      ctx.fillRect(op[3], op[4], op[5], op[6])
+    } else if (op[0] === 2) {
+      const k2 = glowLayer ? g : 1
+      const gr = ctx.createLinearGradient(0, op[8], 0, op[9])
+      gr.addColorStop(0, roleColor(T, op[1], op[2] * k2))
+      gr.addColorStop(1, roleColor(T, op[1], op[3] * k2))
+      ctx.fillStyle = gr
+      ctx.fillRect(op[4], op[5], op[6], op[7])
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over'
+}
+
+// --- one card ----------------------------------------------------------------
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas')
+  c.width = Math.round(w); c.height = Math.round(h)
+  return c
+}
+
+// The glass panel: a rounded rect, 1 px edge, gradient from the edge tint to
+// the panel over the top 45%.
+function paintGlass(T, ctx, side) {
+  const gt = T.glassTheme
+  const r = Math.round(side * 0.045)
+  const gr = ctx.createLinearGradient(0, 0, 0, side)
+  gr.addColorStop(0, css(tint(gt.panel, alpha(gt.edge, 0.55))))
+  gr.addColorStop(0.45, css(gt.panel))
+  gr.addColorStop(1, css(gt.panel))
+  ctx.beginPath(); ctx.roundRect(0, 0, side, side, r)
+  ctx.fillStyle = gr; ctx.fill()
+  ctx.beginPath(); ctx.roundRect(0.5, 0.5, side - 1, side - 1, Math.max(0, r - 0.5))
+  ctx.strokeStyle = css(gt.edge); ctx.lineWidth = 1; ctx.stroke()
+}
+
+// Renders one card, padded by PAD on every side, over the theme's panel
+// colour. Returns { canvas, ops, glowOps, ms }.
+function renderCard(T, FC, o) {
+  const side = o.side || SIDE, dpr = o.dpr || DPR, pad = o.pad === undefined ? PAD : o.pad
+  const t0 = performance.now()
+  const ops = FC.frame(side, {
+    state: o.state, clock: o.clock, elapsed: o.elapsed, style: o.style,
+    host: HOST >= 2 ? HOST : undefined
+  })
+  const frameMs = performance.now() - t0
+  const full = side + 2 * pad
+  const cvs = makeCanvas(full * dpr, full * dpr)
+  const ctx = cvs.getContext('2d')
+  ctx.fillStyle = css(T.panel); ctx.fillRect(0, 0, cvs.width, cvs.height)
+  ctx.save()
+  ctx.translate(pad * dpr, pad * dpr)
+  if (T.glass) { ctx.save(); ctx.scale(dpr, dpr); paintGlass(T, ctx, side); ctx.restore() }
+
+  if (HOST >= 2) {
+    // The half-resolution bloom source, blurred twice, wide then tight.
+    const gw = side / 2 * dpr
+    const glow = makeCanvas(gw, gw)
+    paintOps(T, glow.getContext('2d'), ops, true, 0.5 * dpr)
+    const px = side * dpr / gw            // glow px -> output px
+    const passes = [
+      { sigma: BLOOM[0] * dpr, opacity: T.dark ? 0.95 : 0.85 },
+      { sigma: BLOOM[1] * dpr, opacity: 1 }
+    ]
+    for (const p of passes) {
+      ctx.save()
+      ctx.filter = 'blur(' + p.sigma.toFixed(2) + 'px)'
+      ctx.globalAlpha = p.opacity
+      ctx.drawImage(glow, 0, 0, side * dpr, side * dpr)
+      ctx.restore()
+    }
+  }
+
+  ctx.save()
+  ctx.beginPath(); ctx.rect(0, 0, side * dpr, side * dpr); ctx.clip()
+  paintOps(T, ctx, ops, false, dpr)
+  ctx.restore()
+  ctx.restore()
+
+  let glowOps = 0
+  const glowAt = [5, 7, 10]
+  for (const op of ops) if (op[0] !== 3 && op.length > glowAt[op[0]] && op[glowAt[op[0]]] > 0) glowOps++
+  return { canvas: cvs, ops: ops.length, glowOps, frameMs }
+}
+
+// --- module loading -----------------------------------------------------------
+
+async function loadModule() {
+  let src
+  try {
+    const r = await fetch('/FaceCardFrame.js')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    src = await r.text()
+  } catch (e) {
+    throw new Error('Cannot fetch /FaceCardFrame.js (' + e.message + ').\nServe the repo root over http, e.g. `node tools/shoot.js --serve`; file:// cannot fetch.')
+  }
+  src = src.replace(/^\.pragma library\s*$/m, '')
+  return new Function(src + '\n;return { frame: frame, holdMs: holdMs, STYLES: STYLES }')()
+}
+
+// --- layouts ---------------------------------------------------------------------
+
+const DEFAULT_ENTERED = { scanning: 0, recognized: 3400, notRecognized: 9200 }
+const DEFAULT_ELAPSED = {
+  scanning: [0, 150, 300, 600, 1200, 2200, 3400],
+  recognized: [0, 150, 300, 500, 800, 1200, 1900],
+  notRecognized: [0, 200, 450, 700, 1000, 1400, 1800]
+}
+const STATE_NAMES = Object.keys(DEFAULT_ELAPSED)
+
+function rowsFromParams() {
+  if (Q.has('timeline')) {
+    return Q.get('timeline').split(';').filter(Boolean).map(seg => {
+      const [state, es] = seg.split('@')
+      return { state: state.trim(), elapsed: (es || '0').split(',').map(Number) }
+    })
+  }
+  const states = list('state', STATE_NAMES)
+  const el = list('elapsed', null)
+  return states.map(s => ({ state: s, elapsed: el ? el.map(Number) : DEFAULT_ELAPSED[s] }))
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag)
+  if (cls) e.className = cls
+  if (text !== undefined) e.textContent = text
+  return e
+}
+
+function cellFor(T, FC, style, state, elapsed) {
+  const entered = Q.has('entered') ? num('entered', 0) : DEFAULT_ENTERED[state] || 0
+  const clock = Q.has('clock') ? num('clock', 0) : entered + elapsed
+  const r = renderCard(T, FC, { style, state, elapsed, clock })
+  const cell = el('div', 'cell')
+  r.canvas.style.width = r.canvas.width / DPR + 'px'
+  r.canvas.style.height = r.canvas.height / DPR + 'px'
+  cell.appendChild(r.canvas)
+  if (LABELS) {
+    const lab = el('div', 'lab')
+    const b = el('b', '', 'e=' + elapsed)
+    lab.appendChild(b)
+    lab.appendChild(document.createTextNode(' c=' + Math.round(clock) + ' · ' + r.ops + ' ops · ' + r.glowOps + ' glow'))
+    cell.appendChild(lab)
+  }
+  return { cell, stats: { style, state, elapsed, clock, ops: r.ops, glowOps: r.glowOps, frameMs: r.frameMs } }
+}
+
+function buildSheet(T, FC, single) {
+  const shot = document.getElementById('shot')
+  shot.textContent = ''
+  const styles = list('style', [FC.STYLES[0]])
+  const rows = rowsFromParams()
+  const stats = []
+  const head = 'host ' + HOST + ' · theme ' + (Q.has('themejson') ? 'custom' : (Q.get('theme') || 'tokyo')) + ' · ' + SIDE + ' px @' + DPR + 'x'
+  for (const style of styles) {
+    if (!single) shot.appendChild(el('h2', '', style + ' · ' + head))
+    for (const row of rows) {
+      const rowEl = el('div', 'row')
+      if (!single) rowEl.appendChild(el('div', 'rowlabel', row.state))
+      for (const e of row.elapsed) {
+        const c = cellFor(T, FC, style, row.state, e)
+        rowEl.appendChild(c.cell)
+        stats.push(c.stats)
+      }
+      shot.appendChild(rowEl)
+    }
+  }
+  return stats
+}
+
+// "stage": the Preview.qml hero. One card on its panel with the hint and op
+// count under it, drawn into a single canvas so a scripted video can pull
+// frames straight out as data URLs. t is the free-running clock in ms.
+const SCRIPT = FC => [
+  { s: 'scanning', ms: 3400 },
+  { s: 'recognized', ms: FC.holdMs('recognized') + 900 },
+  { s: 'scanning', ms: 3000 },
+  { s: 'notRecognized', ms: FC.holdMs('notRecognized') + 900 }
+]
+function scriptAt(FC, t) {
+  const sc = SCRIPT(FC)
+  const total = sc.reduce((a, b) => a + b.ms, 0)
+  let m = t % total, enteredAt = t - m
+  for (const seg of sc) {
+    if (m < seg.ms) return { state: seg.s, elapsed: m, clock: t, total }
+    m -= seg.ms
+  }
+  return { state: 'scanning', elapsed: 0, clock: t, total }
+}
+const HINT = s => s === 'notRecognized' ? 'Face not recognized' : (s === 'recognized' ? 'Face recognized' : 'Look at the camera')
+
+function drawStage(T, FC, style, t) {
+  const st = scriptAt(FC, t)
+  const side = SIDE
+  const W = side + 100, H = side + 150
+  const cvs = makeCanvas(W * DPR, H * DPR)
+  const ctx = cvs.getContext('2d')
+  ctx.scale(DPR, DPR)
+  ctx.fillStyle = css(T.surface); ctx.fillRect(0, 0, W, H)
+  const px = 20, py = 20, pw = W - 40, ph = H - 40
+  ctx.fillStyle = css(T.panel)
+  ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 10); ctx.fill()
+  // Card at the hero position, bloom allowed to spill over the panel.
+  const pad = 40
+  const r = renderCard(T, FC, { style, state: st.state, elapsed: st.elapsed, clock: st.clock, pad })
+  ctx.save()
+  ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 10); ctx.clip()
+  ctx.drawImage(r.canvas, (W - side) / 2 - pad, py + 26 - pad, (side + 2 * pad), (side + 2 * pad))
+  ctx.restore()
+  ctx.font = '13px ui-monospace, "DejaVu Sans Mono", monospace'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = css(st.state === 'notRecognized' ? T.errorColor : T.foreground)
+  ctx.fillText(HINT(st.state), W / 2, py + 26 + side + 24)
+  ctx.font = '10px ui-monospace, "DejaVu Sans Mono", monospace'
+  ctx.fillStyle = css(T.foreground, 0.4)
+  ctx.fillText(st.state + ' e=' + Math.round(st.elapsed) + ' · ' + r.ops + ' ops · ' + r.glowOps + ' glow', W / 2, py + 26 + side + 46)
+  return { canvas: cvs, st, ops: r.ops }
+}
+
+// --- boot ---------------------------------------------------------------------------
+
+async function main() {
+  const shot = document.getElementById('shot')
+  let raw = THEMES[Q.get('theme') || 'tokyo']
+  if (Q.has('themejson')) raw = JSON.parse(Q.get('themejson'))
+  if (!raw) throw new Error('unknown theme ' + Q.get('theme') + '; try ' + Object.keys(THEMES).join(', '))
+  const T = makeTheme(raw)
+  document.body.style.background = css(T.surface)
+  document.body.style.color = css(T.foreground)
+  const FC = await loadModule()
+  const layout = Q.get('layout') || 'sheet'
+  let stats = []
+  if (layout === 'sheet' || layout === 'single') stats = buildSheet(T, FC, layout === 'single')
+  window.harness = {
+    T, FC, stats, scriptTotal: scriptAt(FC, 0).total,
+    // For scripted capture: one stage frame at clock t as a PNG data URL.
+    stage(style, t) {
+      const r = drawStage(T, FC, style || Q.get('style') || FC.STYLES[0], t)
+      return { url: r.canvas.toDataURL('image/png'), state: r.st.state, ops: r.ops, w: r.canvas.width, h: r.canvas.height }
+    }
+  }
+  window.__ready = true
+}
+
+main().catch(e => {
+  document.getElementById('shot').innerHTML = ''
+  const d = el('div', 'err', String(e && e.stack || e))
+  document.getElementById('shot').appendChild(d)
+  window.__error = String(e && e.message || e)
+  window.__ready = true
+})
+</script>
+</body>
+</html>

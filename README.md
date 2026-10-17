@@ -192,4 +192,18 @@ bash test/style-switch-test.sh  # the style switch against a real plugin checkou
 
 The tests are the thing to keep green. The boundary checks are why this plugin is allowed to draw on a credential surface at all. The dot-count check is the approved visual: a settled recognised HUD keeps its depth lattice, and a settled radar or holo face is strokes with no dots. The replay-budget checks, run on every 20 ms of every state on the 220 px card at op levels 2 and 3, keep the dense styles affordable on a software canvas. The level-1 purity check is what keeps the module safe on an older host: without `spec.host` it emits no blend op, no glow value and no role past the error colour.
 
+### Visual harness
+
+`tools/` renders frames headlessly to PNG, so a change can be seen without a Wayland session. It needs node 22+ and `chromium` (and `ffmpeg` for video); nothing is installed. `tools/render.html` paints the ops the way `Preview.qml` does (host level 3 glass, roles, additive blend, half-resolution bloom blurred twice), and `tools/shoot.js` drives headless Chromium over the DevTools protocol. Output goes to the gitignored `tools/out/`.
+
+```bash
+node tools/shoot.js --style hud --sheet                  # contact sheet: scanning, recognized and notRecognized timelines, with op counts
+node tools/shoot.js --style holo --state recognized --elapsed 600 --out f.png   # one frame at 3x
+node tools/shoot.js --style radar --video r.mp4 --seconds 12                    # the Preview script at 30 fps (--gif for a gif)
+node tools/shoot.js --style hud --host 2 --theme latte --sheet                  # host level 1-3; themes tokyo mocha latte gruvbox nord dawn, current, or a colors.toml
+node tools/shoot.js --help
+```
+
+The bloom blur is an approximation of Qt's `MultiEffect` (tune it with `--bloom wide,tight`). `node tools/shoot.js --serve` serves `tools/render.html` for use in a browser, with the same URL parameters.
+
 `Preview.qml` takes its colours from the active Omarchy theme (`~/.local/state/omarchy/current/theme/colors.toml`) when there is one, and falls back to Tokyo Night.
