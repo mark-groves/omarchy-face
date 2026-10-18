@@ -5246,6 +5246,14 @@ function holdMs(state) {
   return 0
 }
 
+// How much of the scanning sequence the host should show before it plays a
+// result: the boot, so a fast match never cuts into a card that is still
+// drawing itself on. Past that the scan runs only as long as the real scan
+// does; every style boots in BOOT_MS.
+function scanMs() {
+  return BOOT_MS
+}
+
 // --- the value-spec boundary ------------------------------------------------
 
 // Stands in for a 2D context so the drawing code above is unchanged, and
