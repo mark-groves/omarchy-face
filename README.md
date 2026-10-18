@@ -120,12 +120,15 @@ The top-left readout is head yaw in degrees, and the bottom-left gauges show yaw
 | `kinds` | `["polkit-chrome"]` |
 | `entryPoints.polkitFace` | `FaceCardFrame.js` |
 
-The entry point is a **JavaScript module, not a QML Item**. It exports exactly two functions:
+The entry point is a **JavaScript module, not a QML Item**. It exports two functions, and an optional third:
 
 ```js
 frame(size, spec) -> ops     // one frame as a list of numeric draw ops
 holdMs(state)     -> ms      // how long the host should hold that state
+scanMs()          -> ms      // optional: scanning to show before a result
 ```
+
+A host that knows `scanMs()` holds a fast match until the card has presented that much of the scan (the boot, so the result never cuts into a card still drawing itself on), then plays the result. Older hosts ignore it.
 
 `spec` carries only values:
 
