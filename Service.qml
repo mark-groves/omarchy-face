@@ -137,7 +137,7 @@ QtObject {
   property string requesterText: ""
 
   property Process requester: Process {
-    command: ["/usr/bin/pgrep", "-l", "^(sudo|polkit-agent-he)$"]
+    command: ["/usr/bin/pgrep", "-l", "^(sudo|su|polkit-agent-he)$"]
     clearEnvironment: true
     environment: root.childEnvironment
     stdout: SplitParser {

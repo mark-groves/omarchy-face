@@ -50,11 +50,11 @@ function hasFace(faceServices, service) {
   return !!(faceServices && faceServices[service])
 }
 
+// A verdict for a service that gets no card belongs to another scan, such as
+// the lock screen's, and leaves the scan in flight alone.
 function result(state, verdict, service) {
-  var next = initialState()
-  if (state.quiet && state.scanning) return { state: next }
-  if (!shown(service)) return { state: next }
-  return { state: next, event: { state: verdict, service: service } }
+  if (!shown(service)) return { state: state }
+  return { state: initialState(), event: { state: verdict, service: service } }
 }
 
 function step(state, rawLine, faceServices) {
@@ -79,14 +79,17 @@ function step(state, rawLine, faceServices) {
     return { state: initialState(), event: { state: "cancel", service: s.service } }
   }
 
-  if (line.indexOf("camera format negotiated") !== -1) {
-    if (s.scanning) return { state: s }
+  // A camera opening is always a new scan, so a scan that never logged its
+  // end cannot hold the reader.
+  if (line.indexOf("camera format negotiated") !== -1)
     return { state: { scanning: true, service: "", quiet: false, announced: false }, probe: true }
-  }
 
   if (line.indexOf("authentication succeeded") !== -1 || line.indexOf("authentication failed") !== -1) {
+    if (!s.scanning) return { state: s }
+    // A scan nobody waiting asked for ends here, shown or not.
+    if (s.quiet) return { state: initialState() }
     // Without a known caller the verdict waits for the pam_facelock line.
-    if (!s.scanning || s.quiet || s.service === "") return { state: s }
+    if (s.service === "") return { state: s }
     var verdict = line.indexOf("authentication succeeded") !== -1 ? "recognized" : "notRecognized"
     return {
       state: { scanning: false, service: s.service, quiet: false, announced: false, settled: true },
@@ -109,15 +112,17 @@ function step(state, rawLine, faceServices) {
       : (word === "no_match" || word === "failure" || word === "fail" || word === "failed") ? "notRecognized"
       : "cancel"
     if (outcome === "cancel" && !s.announced) return { state: initialState() }
-    return result({ scanning: false }, outcome, m[1])
+    if (!shown(m[1])) return { state: initialState() }
+    return result(s, outcome, m[1])
   }
 
   return { state: s }
 }
 
 // `pgrep -l` output for the PAM helpers that ask for a face. polkit wins over
-// sudo: a polkit prompt run from a terminal leaves a sudo process around.
-// Neither means the scan belongs to something else, such as the lock screen.
+// sudo, and sudo over su: a polkit prompt run from a terminal leaves a sudo
+// process around, and `sudo su` leaves an su. None of them means the scan
+// belongs to something else, such as the lock screen.
 function resolveRequester(state, pgrepOutput) {
   var s = state || initialState()
   if (!s.scanning || s.service !== "") return { state: s }
@@ -126,6 +131,7 @@ function resolveRequester(state, pgrepOutput) {
   })
   var who = names.indexOf("polkit-agent-he") !== -1 ? "polkit-1"
     : names.indexOf("sudo") !== -1 ? "sudo"
+    : names.indexOf("su") !== -1 ? "su"
     : ""
   if (who === "") return { state: { scanning: true, service: "", quiet: true, announced: false } }
   return {

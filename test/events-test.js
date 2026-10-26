@@ -139,6 +139,47 @@ check('a cancelled facelock scan closes the card', () => {
   assert.deepStrictEqual(done.events, [{ state: 'cancel', service: 'sudo' }])
 })
 
+check('a quiet scan ended by the daemon verdict does not block the next one', () => {
+  let r = run([camera])
+  const quiet = resolveRequester(r.state, '')
+  r = run([ok, camera], FACE, quiet.state)
+  assert.strictEqual(r.probes, 1, 'the next camera line asks who is waiting')
+  const asked = resolveRequester(r.state, '7 sudo')
+  assert.deepStrictEqual(asked.event, { state: 'scanning', service: 'sudo' })
+})
+
+check('a camera line always starts a new scan', () => {
+  const r = run([camera, camera])
+  assert.strictEqual(r.probes, 2)
+})
+
+check('a verdict for another service leaves the scan in flight alone', () => {
+  const { events, state } = run([gate('sudo'), howdy('omarchy-lock-face', 'succeeded'), howdy('sudo', 'timed out')])
+  assert.deepStrictEqual(events, [
+    { state: 'scanning', service: 'sudo' },
+    { state: 'notRecognized', service: 'sudo' }
+  ])
+  assert.strictEqual(state.scanning, false)
+})
+
+check('a skip still cancels a scan after another service logged a verdict', () => {
+  const { events } = run([gate('sudo'), howdy('sddm', 'timed out'), 'PAM Face verification skipped: Howdy is disabled'])
+  assert.deepStrictEqual(events[1], { state: 'cancel', service: 'sudo' })
+})
+
+check('an su prompt is who asked when no sudo or polkit helper is waiting', () => {
+  const r = run([camera])
+  const asked = resolveRequester(r.state, '31 su\n')
+  assert.deepStrictEqual(asked.event, { state: 'scanning', service: 'su' })
+  const done = run([ok, 'pam_facelock(su): success for user alice'], FACE, asked.state)
+  assert.deepStrictEqual(done.events, [{ state: 'recognized', service: 'su' }])
+})
+
+check('sudo wins over an su it started', () => {
+  const r = run([camera])
+  assert.strictEqual(resolveRequester(r.state, '30 sudo\n31 su\n').event.service, 'sudo')
+})
+
 // --- PAM stacks ----------------------------------------------------------------
 
 check('a PAM stack has face only where a face module is loaded', () => {

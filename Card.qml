@@ -72,6 +72,7 @@ Item {
   }
 
   function close() {
+    demoTimer.stop()
     root.opened = false
     root.pendingResult = ""
   }
