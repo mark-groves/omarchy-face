@@ -13,6 +13,7 @@ jobs:
     # Fork PRs get no OIDC token, so federation cannot work there
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -41,6 +42,8 @@ jobs:
 
             Focus on correctness bugs, security problems, and regressions. Mention style only where it breaks a documented repo convention. Skip praise and restating the diff.
 
+            Earlier pushes to this PR may already have been reviewed. Check the existing inline comments with `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments` and do not raise an issue again when it is already commented on and the code it concerns is unchanged.
+
             Put each specific issue in an inline comment on the line it concerns. Finish with one short top-level comment summarizing the findings, or saying none were found.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments)"
