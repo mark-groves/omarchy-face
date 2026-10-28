@@ -39,3 +39,5 @@ jobs:
           anthropic_organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
           anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          # Ignore comments from anyone else so they cannot plant instructions
+          include_comments_by_actor: ${{ github.repository_owner }},claude[bot]
