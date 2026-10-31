@@ -47,7 +47,8 @@ Item {
   property string pendingResult: ""
   property real resultDueAt: 0
   property real closeAt: 0
-  // A scan with no verdict, such as an abandoned prompt, gives up after this.
+  // A card opened with no verdict (only `face-card show scanning` does that)
+  // gives up after this.
   readonly property int scanTimeoutMs: 15000
   // Reading time after a result's own hold.
   readonly property int lingerMs: 500

@@ -18,7 +18,7 @@ An animated face-scan card for Omarchy. When a face backend checks your face for
 
 - **Omarchy 4** with Quattro shell plugins.
 - **Face authentication already set up and working.** Setting it up is the backend's job, not this plugin's. Either of these works:
-  - [Howdy](https://github.com/boltgolt/howdy) 3, with `pam_howdy.so` in the PAM stacks you care about (`/etc/pam.d/sudo`, `/etc/pam.d/polkit-1`). On the fork, `omarchy setup security face` does this.
+  - [howdy-next](https://codeberg.org/nathawat/howdy-next) 3.4.2 or later, with `pam_howdy.so` in the PAM stacks you care about (`/etc/pam.d/sudo`, `/etc/pam.d/polkit-1`). On the fork, `omarchy setup security face` does this. Earlier versions, and Howdy 3 itself, log a verdict that does not name the PAM service, so they get no card.
   - [facelock](https://github.com/tyvsmith/facelock) 0.2, enrolled, with `pam_facelock.so` in those stacks.
 - **Permission to read the system journal**, which Omarchy accounts have through `wheel`.
 
@@ -43,7 +43,7 @@ omarchy-shell face-card close
 omarchy-shell face-card status                # what the plugin sees: host polkit card, services with a card, journal
 ```
 
-Update with `omarchy plugin update markgroves.polkit-face`; `omarchy update` does not update plugins. A saved style survives updates.
+Update with `omarchy plugin update markgroves.polkit-face`, then `omarchy restart shell`: the plugin's service stays loaded, so new service code only runs after a restart. `omarchy update` does not update plugins. A saved style survives updates.
 
 ## Remove
 
@@ -79,7 +79,7 @@ The choice is saved in the plugin's own row in `~/.config/omarchy/shell.json`, t
 
 The standalone card switches on its next frame. On the fork, the lock screen and the polkit card show the HUD for now: that host does not yet pass a style to the frame module.
 
-Coming from 2.x: the style used to be saved in `~/.config/omarchy/face-style` and written into `FaceCardFrame.js` through a git filter. 3.0 reads neither, so set the style again with the command above and delete that file. The two `filter.omarchy-face-style` lines 2.x added to the plugin checkout's `.git/config` do nothing any more; remove them with `git -C ~/.config/omarchy/plugins/markgroves.polkit-face config --remove-section filter.omarchy-face-style`.
+Coming from 2.x: restart the shell after updating, or the 2.x service keeps running, and on the fork `sudo` gets no card. The style used to be saved in `~/.config/omarchy/face-style` and written into `FaceCardFrame.js` through a git filter. 3.0 reads neither, so set the style again with the command above and delete that file. The two `filter.omarchy-face-style` lines 2.x added to the plugin checkout's `.git/config` do nothing any more; remove them with `git -C ~/.config/omarchy/plugins/markgroves.polkit-face config --remove-section filter.omarchy-face-style`.
 
 To try styles without switching the saved one, use the style chips in the preview, or run `FACE_STYLE=holo quickshell -p Preview.qml` (see [Develop](#develop)).
 
@@ -197,9 +197,9 @@ Any program can log the text of a verdict, so a line counts only when the fields
 | --- | --- |
 | `_EXE` | `/usr/bin/sudo` for `sudo` and `sudo-i`, `/usr/lib/polkit-1/polkit-agent-helper-1` for `polkit-1` |
 | `_CAP_EFFECTIVE` | non-zero: the sender held root's capabilities |
-| `_UID` | yours, or root's |
+| uid | yours: `_UID` for `sudo`, which logs as the user who ran it. The polkit helper is socket-activated and always logs as root, so for it the uid is the one systemd names its instance after (`_SYSTEMD_UNIT`, `polkit-agent-helper@…-<uid>.service`), the uid of the agent that asked. |
 
-The binary is the check that matters. A plain `logger` records no capabilities, but the same line logged from inside `unshare -Ur` reports root's capabilities and your uid, exactly as a real `sudo` does; it cannot report sudo's binary. What remains, a `sudo` run inside your own namespaces with a fake face module, can show at most a fake card, which any program running as you can draw anyway.
+The binary is the check that matters. A plain `logger` records no capabilities, but the same line logged from inside `unshare -Ur` reports root's capabilities and your uid, exactly as a real `sudo` does; it cannot report sudo's binary. What remains can show at most a fake card, which any program running as you can draw anyway: a `sudo` run inside your own namespaces with a fake face module, or a line sent just before its sender execs `sudo`, before journald has read the sender's details.
 
 The child is started by absolute path with a fixed argument vector and a cleared environment, and everything it prints is bounded in `StreamLimits.js` before it is held. The service never runs anything privileged, writes no file and never touches PAM.
 

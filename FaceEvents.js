@@ -24,11 +24,19 @@
 //   _EXE             sudo or the polkit agent helper, and the service in the
 //                    text is one that binary runs
 //   _CAP_EFFECTIVE   non-zero: the sender held root's capabilities
-//   _UID             the user's own uid, or root
+//   the user's uid   sudo logs as the user who ran it (_UID). The polkit helper
+//                    is socket-activated and always logs as root, so systemd's
+//                    name for its instance (_SYSTEMD_UNIT) carries the uid of
+//                    the agent that asked; a setuid helper (polkit before 126)
+//                    logs as the user, like sudo
 // _EXE carries most of the weight. Inside `unshare -Ur` a plain logger reports
-// the same capabilities and uid as a real sudo. What is left is a sudo run in
-// the user's own namespaces with a fake face module, which can show at most a
-// fake card, and any program running as the user can draw one anyway.
+// the same capabilities and uid as a real sudo. What is left can show at most
+// a fake card, which any program running as the user can draw anyway: a sudo
+// run in the user's own namespaces with a fake face module, or a line sent
+// just before its sender execs sudo, before journald reads its /proc entry.
+//
+// The prefixed verdicts are howdy-next 3.4.2's. Earlier versions logged a bare
+// "Face verification succeeded" that names no service, and get no card.
 
 // The PAM callers that get a card, and the services each one runs. The lock
 // screen, a greeter or su are not here: they draw their own face UI or have
@@ -50,12 +58,17 @@ function parseEntry(line) {
   }
 }
 
+var HELPER_UNIT = /^polkit-agent-helper@.+-(\d+)\.service$/
+
 function trusted(entry, service, uid) {
   var runs = Object.prototype.hasOwnProperty.call(CALLERS, entry._EXE) ? CALLERS[entry._EXE] : []
   if (runs.indexOf(service) === -1) return false
   var caps = String(entry._CAP_EFFECTIVE || "")
   if (!/^[0-9a-f]+$/i.test(caps) || !/[1-9a-f]/i.test(caps)) return false
-  return entry._UID === "0" || (uid !== "" && entry._UID === uid)
+  if (uid === "") return false
+  var unit = HELPER_UNIT.exec(String(entry._SYSTEMD_UNIT || ""))
+  if (service === "polkit-1" && unit) return unit[1] === uid
+  return entry._UID === uid
 }
 
 function verdict(entry, context) {

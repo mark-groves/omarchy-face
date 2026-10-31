@@ -23,7 +23,11 @@ function check(name, fn) {
 
 // Who journald says sent a line.
 const SUDO = { _EXE: '/usr/bin/sudo', _CAP_EFFECTIVE: '1ffffffffff', _UID: '1000' }
-const POLKIT = { _EXE: '/usr/lib/polkit-1/polkit-agent-helper-1', _CAP_EFFECTIVE: '1f3fdfeffff', _UID: '0' }
+// polkit 126 and later: a socket-activated helper, named after the agent's uid.
+const POLKIT = {
+  _EXE: '/usr/lib/polkit-1/polkit-agent-helper-1', _CAP_EFFECTIVE: '1f3fdfeffff', _UID: '0',
+  _SYSTEMD_UNIT: 'polkit-agent-helper@0-1-1421_20553-1000.service'
+}
 // A process gone before journald looked, such as logger.
 const LOGGER = { _UID: '1000' }
 // python3 logging from inside `unshare -Ur`.
@@ -71,10 +75,19 @@ check('a caller only speaks for its own service', () => {
   assert.strictEqual(read(entry(POLKIT, howdy('sudo', 'succeeded'))), null)
 })
 
-check('another user\'s sudo is not shown', () => {
-  assert.strictEqual(read(entry(Object.assign({}, SUDO, { _UID: '1001' }), howdy('sudo', 'succeeded'))), null)
-  assert.strictEqual(read(entry(SUDO, howdy('sudo', 'succeeded')), { uid: '', services: CONTEXT.services }), null,
-    'an unknown uid trusts only root')
+check('another user\'s prompt is not shown', () => {
+  const ok = howdy('sudo', 'succeeded')
+  assert.strictEqual(read(entry(Object.assign({}, SUDO, { _UID: '1001' }), ok)), null, 'their sudo')
+  assert.strictEqual(read(entry(Object.assign({}, SUDO, { _UID: '0' }), ok)), null, 'a root sudo')
+  const theirs = Object.assign({}, POLKIT, { _SYSTEMD_UNIT: 'polkit-agent-helper@4-16385-99999_12345-1001.service' })
+  assert.strictEqual(read(entry(theirs, howdy('polkit-1', 'timed out'))), null, 'their polkit agent')
+  assert.strictEqual(read(entry(SUDO, ok), { uid: '', services: CONTEXT.services }), null, 'an unknown uid trusts nothing')
+})
+
+check('a setuid polkit helper is trusted by its uid, like sudo', () => {
+  const setuid = { _EXE: '/usr/lib/polkit-1/polkit-agent-helper-1', _CAP_EFFECTIVE: '1ffffffffff', _UID: '1000', _SYSTEMD_UNIT: 'session-2.scope' }
+  assert.deepStrictEqual(read(entry(setuid, howdy('polkit-1', 'succeeded'))), { state: 'recognized', service: 'polkit-1' })
+  assert.strictEqual(read(entry(Object.assign({}, setuid, { _UID: '0' }), howdy('polkit-1', 'succeeded'))), null)
 })
 
 // --- services ------------------------------------------------------------------

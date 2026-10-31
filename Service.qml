@@ -51,8 +51,8 @@ QtObject {
   })
   readonly property bool following: root.sudoHasFace || (root.polkitHasFace && !root.hostDrawsPolkit)
 
-  // A real sudo logs as the user who ran it. pam_systemd names the runtime
-  // directory after that uid.
+  // The user's uid, which a real sudo logs as and the polkit helper's unit is
+  // named after. pam_systemd names the runtime directory after it.
   readonly property string uid: {
     var m = /^\/run\/user\/(\d+)$/.exec(Quickshell.env("XDG_RUNTIME_DIR") || "")
     return m ? m[1] : ""
@@ -85,7 +85,7 @@ QtObject {
   // Only the callers' own lines, trimmed to the fields the trust check reads.
   property Process journal: Process {
     command: ["/usr/bin/journalctl", "--follow", "--lines=0", "--output=json",
-              "--output-fields=MESSAGE,_EXE,_UID,_CAP_EFFECTIVE"]
+              "--output-fields=MESSAGE,_EXE,_UID,_CAP_EFFECTIVE,_SYSTEMD_UNIT"]
       .concat(Object.keys(Events.CALLERS).map(function(exe) { return "_EXE=" + exe }))
     clearEnvironment: true
     environment: root.childEnvironment
