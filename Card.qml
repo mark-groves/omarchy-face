@@ -8,19 +8,26 @@ import qs.Commons
 import "FaceCardFrame.js" as FaceCard
 import "FacePaint.js" as FacePaint
 
-// The standalone face card, for a host without the polkit face slot (stock
-// Omarchy). Service.qml reports a face scan for sudo or a polkit prompt, and
-// this panel drops the same 220 px card the fork draws in its own surfaces in
-// under the bar on the focused screen: it scans, then locks or misses, then
-// fades. It takes no input and never sits on the lock screen.
+// The standalone face card. Service.qml reports a face verdict for sudo, or
+// for a polkit prompt where the host does not draw the card in its own dialog
+// (stock Omarchy), and this panel drops the same 220 px card the fork draws in
+// its own surfaces in under the bar on the focused screen: it boots, then locks
+// on or misses, then fades. It takes no input and never sits on the lock
+// screen.
 //
 // The card is drawn the way the fork's host draws it, at op level 3: the frame
 // is numbers from FaceCardFrame.js, painted by FacePaint.js on dark glass with
 // a GPU bloom.
 //
+// The style is this plugin's row in ~/.config/omarchy/shell.json,
+// { "id": "markgroves.polkit-face", "style": "radar" }, written through the
+// shell's updateEntryInline like any plugin's own settings.
+//
 //   omarchy-shell face-card show scanning|recognized|notRecognized
 //   omarchy-shell face-card demo
 //   omarchy-shell face-card close
+//   omarchy-shell face-card style hud|radar|holo
+//   omarchy-shell face-card styles
 Item {
   id: root
 
@@ -44,6 +51,12 @@ Item {
   readonly property int scanTimeoutMs: 15000
   // Reading time after a result's own hold.
   readonly property int lingerMs: 500
+
+  // This plugin's own row in shell.json.
+  property string shellConfigText: ""
+  readonly property var settings: root.ownEntry(root.shellConfigText, root.manifest ? root.manifest.id : "")
+  readonly property string style: FaceCard.STYLES.indexOf(root.settings.style) !== -1
+    ? root.settings.style : FaceCard.DEFAULT_STYLE
 
   property var theme: FacePaint.FALLBACK
   readonly property var glassTheme: FacePaint.deriveGlass(root.theme)
@@ -71,6 +84,29 @@ Item {
     root.closeAt = Math.max(root.resultDueAt, root.clock) + FaceCard.holdMs(state) + root.lingerMs
   }
 
+  function ownEntry(text, id) {
+    var config = null
+    try {
+      config = JSON.parse(text)
+    } catch (e) {
+      return {}
+    }
+    var plugins = config && Array.isArray(config.plugins) ? config.plugins : []
+    for (var i = 0; i < plugins.length; i++)
+      if (plugins[i] && plugins[i].id === id) return plugins[i]
+    return {}
+  }
+
+  // Writes the style into this plugin's row. The row keeps any other setting.
+  function setStyle(name) {
+    if (FaceCard.STYLES.indexOf(name) === -1) return false
+    if (name === root.style) return true
+    var next = {}
+    for (var key in root.settings) if (key !== "id") next[key] = root.settings[key]
+    next.style = name
+    return !!(root.shell && root.manifest && root.shell.updateEntryInline(root.manifest.id, next))
+  }
+
   function close() {
     demoTimer.stop()
     root.opened = false
@@ -85,7 +121,8 @@ Item {
     }
     if (root.opened && root.clock >= root.closeAt) root.opened = false
     root.ops = FaceCard.frame(root.side, {
-      state: root.cardState, clock: root.clock, elapsed: root.clock - root.enteredAt, host: root.opLevel
+      state: root.cardState, clock: root.clock, elapsed: root.clock - root.enteredAt, host: root.opLevel,
+      style: root.style
     })
     sharp.requestPaint()
     if (root.bloom) glow.requestPaint()
@@ -108,16 +145,22 @@ Item {
       return "ok"
     }
     function close(): string { root.close(); return "ok" }
+    function style(name: string): string {
+      if (!root.setStyle(name)) return "could not set the style to " + name + " (styles: " + FaceCard.STYLES.join(" ") + ")"
+      return name
+    }
+    function styles(): string { return root.style + " (styles: " + FaceCard.STYLES.join(" ") + ")" }
     function state(): string { return root.opened ? (root.pendingResult || root.cardState) : "closed" }
-    // What the service sees: whether the host draws the card itself, and which
-    // PAM services load a face module.
+    // What the service sees: whether the host draws polkit prompts itself,
+    // which PAM services get a card, and whether the journal is followed.
     function status(): string {
       var s = root.service
       return JSON.stringify({
         opened: root.opened,
         state: root.cardState,
-        hostDrawsCard: !!(s && s.hostDrawsCard),
-        faceServices: s ? s.faceServices : null,
+        style: root.style,
+        hostDrawsPolkit: !!(s && s.hostDrawsPolkit),
+        services: s ? s.services : null,
         journal: !!(s && s.journal && s.journal.running)
       })
     }
@@ -127,6 +170,15 @@ Item {
     id: demoTimer
     interval: 2400
     onTriggered: root.show("recognized")
+  }
+
+  FileView {
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.shellConfigText = text()
+    onLoadFailed: root.shellConfigText = ""
   }
 
   FileView {

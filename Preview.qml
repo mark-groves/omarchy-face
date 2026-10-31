@@ -28,8 +28,8 @@ ShellRoot {
   property bool sequence: true
   // Op level the harness paints, as the host would report it in spec.host.
   property int host: 3
-  // The harness passes the style per frame as spec.style. An installed card
-  // takes it from the STYLE line instead (bin/omarchy-face-style).
+  // The harness passes the style per frame as spec.style, as Card.qml does
+  // with the style saved in the plugin's shell.json row.
   property string style: Quickshell.env("FACE_STYLE") || "hud"
   readonly property var styles: [
     { s: "hud", l: "Depth Lattice HUD" },

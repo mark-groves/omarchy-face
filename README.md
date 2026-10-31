@@ -1,6 +1,6 @@
 # Face Scan Card
 
-An animated face-scan card for Omarchy. While a face backend checks your face for `sudo` or a polkit prompt, the card drops in under the bar, scans, and then locks on or misses. It ships three styles and follows the active Omarchy theme.
+An animated face-scan card for Omarchy. When a face backend checks your face for `sudo` or a polkit prompt, the card drops in under the bar, boots, and then locks on or misses. It ships three styles and follows the active Omarchy theme.
 
 ![The three styles, top to bottom HUD, radar and holo, each scanning, recognized and not recognized](preview.png)
 
@@ -10,8 +10,9 @@ An animated face-scan card for Omarchy. While a face backend checks your face fo
 
 | Host | Surfaces | How |
 | --- | --- | --- |
-| Stock Omarchy 4 | `sudo` and `su` in a terminal, polkit prompts | A card of its own under the bar on the focused screen (`Service.qml` and `Card.qml`). The lock screen draws its own face UI, so lock-screen scans are left alone. |
-| The [mark-groves/omarchy](https://github.com/mark-groves/omarchy) fork | The lock screen, polkit prompts and the sudo face overlay | Inside the host's own card, through the `polkitFace` slot. The host loads `FaceCardFrame.js` as a value-only module and paints what it returns. The plugin's own card stays quiet there, so a scan never shows two cards. |
+| Stock Omarchy 4 | `sudo` in a terminal, polkit prompts | A card of its own under the bar on the focused screen (`Service.qml` and `Card.qml`). The lock screen draws its own face UI, so lock-screen scans are left alone. |
+| The [mark-groves/omarchy](https://github.com/mark-groves/omarchy) fork | The lock screen and polkit prompts | Inside the host's own card, through the `polkitFace` slot. The host loads `FaceCardFrame.js` as a value-only module and paints what it returns. The plugin's own card leaves polkit prompts to the host there, so a scan never shows two cards. |
+| The fork | `sudo` in a terminal | The plugin's own card, as on stock Omarchy. |
 
 ## Requirements
 
@@ -21,7 +22,7 @@ An animated face-scan card for Omarchy. While a face backend checks your face fo
   - [facelock](https://github.com/tyvsmith/facelock) 0.2, enrolled, with `pam_facelock.so` in those stacks.
 - **Permission to read the system journal**, which Omarchy accounts have through `wheel`.
 
-Nothing else is installed or needed at runtime. The style switcher is a bash script that uses `git` and `sed`.
+Nothing else is installed or needed at runtime.
 
 ## Install
 
@@ -39,19 +40,18 @@ To see the card without a camera:
 omarchy-shell face-card demo                  # scan, then lock on
 omarchy-shell face-card show notRecognized    # scan, then miss
 omarchy-shell face-card close
-omarchy-shell face-card status                # what the plugin sees: host slot, face PAM stacks, journal
+omarchy-shell face-card status                # what the plugin sees: host polkit card, services with a card, journal
 ```
 
-Update with `omarchy plugin update markgroves.polkit-face`. A saved style survives updates.
+Update with `omarchy plugin update markgroves.polkit-face`; `omarchy update` does not update plugins. A saved style survives updates.
 
 ## Remove
 
 ```bash
 omarchy plugin remove markgroves.polkit-face
-rm -f ~/.config/omarchy/face-style    # optional: forget the saved style
 ```
 
-Removal disables the plugin and deletes its checkout. Face authentication keeps working: on the fork the host's card falls back to its face glyph and hint, and on stock Omarchy no card is shown. The plugin writes nothing else outside its own folder.
+Removal disables the plugin, which drops its row from `~/.config/omarchy/shell.json` and with it the saved style, and deletes its checkout. Face authentication keeps working: on the fork the host's card falls back to its face glyph and hint, and on stock Omarchy no card is shown. The plugin writes nothing else.
 
 ## Styles
 
@@ -61,24 +61,31 @@ Removal disables the plugin and deletes its checkout. Face authentication keeps 
 | `radar` | Phosphor Radar | A plan-position scope whose sweep paints the head's topography as radar returns |
 | `holo` | Holographic Wireframe | A whole wireframe head floating in an emitter's light cone, in structured-light slices |
 
-Switch with the bundled script:
+Switch from a terminal:
 
 ```bash
-~/.config/omarchy/plugins/markgroves.polkit-face/bin/omarchy-face-style          # show the active style
-~/.config/omarchy/plugins/markgroves.polkit-face/bin/omarchy-face-style radar    # switch
-~/.config/omarchy/plugins/markgroves.polkit-face/bin/omarchy-face-style hud      # back to the default
-~/.config/omarchy/plugins/markgroves.polkit-face/bin/omarchy-face-style apply    # re-apply the saved style after a reinstall
+omarchy-shell face-card styles         # the active style and the choices
+omarchy-shell face-card style radar    # switch
+omarchy-shell face-card style hud      # back to the default
 ```
 
-A switch shows on the next frame, including on a lock screen that is already up, and the shell does not need a restart. The choice is saved in `~/.config/omarchy/face-style`.
+The choice is saved in the plugin's own row in `~/.config/omarchy/shell.json`, the place Omarchy keeps every plugin's settings, so it survives updates. You can also set it there by hand:
 
-The plugin is handed nothing to read, so the choice has to live in the module itself. The script writes it into the single `var STYLE = "…"` line of `FaceCardFrame.js`, which the host watches. It goes through a git clean/smudge filter declared in `.gitattributes`: git always sees the published default and a clean tree, so `omarchy plugin update` still fast-forwards, and every update writes the saved style back in. After removing and re-adding the plugin, run `omarchy-face-style apply` to restore the saved choice.
+```json
+"plugins": [
+  { "id": "markgroves.polkit-face", "style": "radar" }
+]
+```
 
-To try styles without switching the installed one, use the style chips in the preview, or run `FACE_STYLE=holo quickshell -p Preview.qml` (see [Develop](#develop)).
+The standalone card switches on its next frame. On the fork, the lock screen and the polkit card show the HUD for now: that host does not yet pass a style to the frame module.
+
+Coming from 2.x: the style used to be saved in `~/.config/omarchy/face-style` and written into `FaceCardFrame.js` through a git filter. 3.0 reads neither, so set the style again with the command above and delete that file. The two `filter.omarchy-face-style` lines 2.x added to the plugin checkout's `.git/config` do nothing any more; remove them with `git -C ~/.config/omarchy/plugins/markgroves.polkit-face config --remove-section filter.omarchy-face-style`.
+
+To try styles without switching the saved one, use the style chips in the preview, or run `FACE_STYLE=holo quickshell -p Preview.qml` (see [Develop](#develop)).
 
 ## Design
 
-All three styles are designed for the large card: 220 px on the lock screen, the polkit prompt and the sudo face overlay. Smaller sizes still paint, but are not a design target.
+All three styles are designed for the large card: 220 px on the lock screen, the polkit prompt and the standalone card. Smaller sizes still paint, but are not a design target.
 
 Every style covers all three states with the same timing contract, the same corner readouts (a style-specific value top left, match confidence top right, a style gauge bottom left and the status word bottom right), and the same rules:
 
@@ -167,7 +174,7 @@ The top-left readout is head yaw in degrees, and the bottom-left gauges show yaw
 | --- | --- |
 | `id` | `markgroves.polkit-face` |
 | `kinds` | `["service", "panel"]`, with `keepLoaded` |
-| `entryPoints.service` | `Service.qml`: follows the journal for face scans |
+| `entryPoints.service` | `Service.qml`: follows the journal for face verdicts |
 | `entryPoints.panel` | `Card.qml`: the standalone card |
 | `entryPoints.polkitFace` | `FaceCardFrame.js`: the frame module, found by its key in the fork's face slot |
 
@@ -175,16 +182,26 @@ The manifest declares only the shell's own kinds, which the plugin marketplace l
 
 ### The standalone card
 
-`Service.qml` runs one `journalctl --follow` over the authpriv facility and facelock's unit and PAM module, and hands each line to `FaceEvents.js`, a pure reducer:
+`Service.qml` runs one `journalctl --follow --output=json`, and only while `/etc/pam.d/sudo` or `/etc/pam.d/polkit-1` loads a face module. It asks only for lines sent by `sudo` or the polkit agent helper, trimmed to four fields, and hands each one to `FaceEvents.js`, which decides what counts:
 
-| Backend | Scan starts | Verdict |
-| --- | --- | --- |
-| Howdy | `pam_exec(<service>:auth): …omarchy-hw-laptop-closed failed: exit code 1`, Omarchy's lid gate just before the face module, for a service whose stack loads a face module | `pam_howdy(<service>:auth): Face verification succeeded`, `timed out` or `failed: …` |
-| facelock | `camera format negotiated`, then a `pgrep` for the waiting PAM helper | `authentication succeeded` or `failed`, or `pam_facelock(<service>): <result>` |
+| Backend | Verdict |
+| --- | --- |
+| Howdy | `pam_howdy(<service>:auth): Face verification succeeded`, `timed out` or `failed: …` |
+| facelock | `pam_facelock(<service>): <result>` |
 
-Only `sudo`, `sudo-i`, `su`, `su-l` and `polkit-1` get a card. A verdict without a start (a stack without the lid gate) still gets one: the card boots, then plays the result. A match that lands before the card has finished booting waits for `scanMs()`, as the fork's host does, and a scan with no verdict closes after 15 s.
+Neither backend logs the start of a scan, so the card appears once the verdict is in: it boots, holds the result until it has shown `scanMs()` of the boot, as the fork's host does, then plays it. Only `sudo`, `sudo-i` and `polkit-1` get a card, and `polkit-1` only where the host does not draw the card in its own dialog. The service knows that from the fork's `FaceChrome` singleton in `qs.Commons`, which stock Omarchy does not have.
 
-Every child is started by absolute path with a fixed argument vector and a cleared environment, and everything it prints is bounded in `StreamLimits.js` before it is held. The service never runs anything privileged, writes no file and never touches PAM. It stays quiet when `$OMARCHY_PATH/shell/Commons/FaceChrome.qml` exists, since that host draws the card itself.
+Any program can log the text of a verdict, so a line counts only when the fields journald fills in itself say a real PAM caller sent it:
+
+| Field | Must be |
+| --- | --- |
+| `_EXE` | `/usr/bin/sudo` for `sudo` and `sudo-i`, `/usr/lib/polkit-1/polkit-agent-helper-1` for `polkit-1` |
+| `_CAP_EFFECTIVE` | non-zero: the sender held root's capabilities |
+| `_UID` | yours, or root's |
+
+The binary is the check that matters. A plain `logger` records no capabilities, but the same line logged from inside `unshare -Ur` reports root's capabilities and your uid, exactly as a real `sudo` does; it cannot report sudo's binary. What remains, a `sudo` run inside your own namespaces with a fake face module, can show at most a fake card, which any program running as you can draw anyway.
+
+The child is started by absolute path with a fixed argument vector and a cleared environment, and everything it prints is bounded in `StreamLimits.js` before it is held. The service never runs anything privileged, writes no file and never touches PAM.
 
 ### The frame module
 
@@ -205,7 +222,7 @@ A host that knows `scanMs()` holds a fast match until the card has presented tha
 | `state` | `"scanning"`, `"recognized"` or `"notRecognized"` |
 | `clock` | free-running milliseconds, drives every ambient motion |
 | `elapsed` | milliseconds since `state` was entered |
-| `style` | optional, `"hud"`, `"radar"` or `"holo"`. It overrides the installed style, and unknown values are ignored. Today's host does not send it; the preview does. |
+| `style` | optional, `"hud"`, `"radar"` or `"holo"`. Absent or unknown paints the HUD. The standalone card and the preview send it; the fork's host does not yet. |
 | `host` | optional, the op level the host paints. `2` unlocks glow, additive blending and roles 3 to 5. `3` means the host paints the card on its own dark glass and resolves every role against it, so the frame draws its structure in the tint instead of the text colour. Absent means level 1, and the frame is exactly the level-1 frame. |
 
 There are no colours in the spec. Each op carries a role index and the host resolves it against the live theme, so the card follows whatever theme is set and the plugin never chooses a colour:
@@ -262,8 +279,7 @@ Development needs `quickshell` for the live preview and node 22+ for the tests. 
 ```bash
 quickshell -p Preview.qml       # scripted scan / lock / rescan / miss, style chips, host level 1, 2 or 3, the 220 px card
 node test/frame-test.js         # boundary, visual and per-style tests
-node test/events-test.js        # the journal reader, against captured Howdy and facelock lines
-bash test/style-switch-test.sh  # the style switch against a real plugin checkout and update
+node test/events-test.js        # the journal reader, against captured Howdy entries, forgeries and facelock lines
 omarchy plugin validate .       # the manifest checks the shell runs at load time
 ```
 

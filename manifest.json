@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "markgroves.polkit-face",
   "name": "Face Scan Card",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "author": "Mark Groves",
   "license": "MIT",
   "description": "Animated face-scan card for sudo and polkit prompts, and on the Omarchy fork the lock screen too: three themed styles, each scanning, recognized and not recognized. Display only.",
