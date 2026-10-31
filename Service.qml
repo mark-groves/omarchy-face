@@ -1,70 +1,74 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Commons
 import "FaceEvents.js" as Events
 import "StreamLimits.js" as Limits
 
-// Feeds the standalone card (Card.qml) on a host without the polkit face slot.
+// Feeds the standalone card (Card.qml) with face verdicts for sudo and polkit
+// prompts.
 //
 // Display only. It follows the system journal for the face backend's verdicts
-// (Howdy through authpriv, facelock through its daemon and PAM module) and
-// tells the card through lastEvent/eventSerial. Nothing here runs with
-// privileges, writes a file or touches PAM; the rules live in FaceEvents.js.
+// and tells the card through lastEvent/eventSerial. Nothing here runs with
+// privileges, writes a file or touches PAM; which lines count is decided in
+// FaceEvents.js.
 //
-// On the Omarchy fork the host draws this plugin's FaceCardFrame.js inside its
-// own polkit card, lock screen and sudo overlay. There the service stays
-// quiet, so a scan never shows two cards.
+// The journal is followed only while /etc/pam.d/sudo or polkit-1 loads a face
+// module. On the Omarchy fork the host draws this plugin's FaceCardFrame.js
+// inside its own polkit dialog and lock screen, so polkit verdicts are left to
+// it there and only sudo gets this card.
 //
-// Every child is launched by absolute path, with a fixed argument vector and a
+// The child is launched by absolute path, with a fixed argument vector and a
 // closed environment, and everything it prints is bounded in StreamLimits.js.
 QtObject {
   id: root
 
   property var shell: null
   property var manifest: null
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy"
 
   // The card watches eventSerial and reads lastEvent.
   property var lastEvent: null
   property int eventSerial: 0
 
-  // The host has the face slot and draws the card itself.
-  property bool hostDrawsCard: false
+  // The fork's face slot is a qs.Commons singleton that stock Omarchy does not
+  // have, so on stock the lookup throws.
+  readonly property bool hostDrawsPolkit: {
+    try {
+      return FaceChrome.cardSide > 0
+    } catch (e) {
+      return false
+    }
+  }
 
-  // PAM services whose stack loads a face module.
-  property var faceServices: ({})
+  property bool sudoHasFace: false
+  property bool polkitHasFace: false
 
-  property var state: Events.initialState()
+  // The PAM services that get a card right now.
+  readonly property var services: ({
+    "sudo": root.sudoHasFace,
+    "sudo-i": root.sudoHasFace,
+    "polkit-1": root.polkitHasFace && !root.hostDrawsPolkit
+  })
+  readonly property bool following: root.sudoHasFace || (root.polkitHasFace && !root.hostDrawsPolkit)
+
+  // The user's uid, which a real sudo logs as and the polkit helper's unit is
+  // named after. pam_systemd names the runtime directory after it.
+  readonly property string uid: {
+    var m = /^\/run\/user\/(\d+)$/.exec(Quickshell.env("XDG_RUNTIME_DIR") || "")
+    return m ? m[1] : ""
+  }
 
   readonly property var childEnvironment: ({ "PATH": "/usr/bin", "LC_ALL": "C" })
-  readonly property int oneShotDeadlineMs: 3000
 
-  function announce(event) {
-    if (!event || root.hostDrawsCard) return
-    root.lastEvent = event
-    root.eventSerial++
-  }
-
-  function apply(result) {
-    root.state = result.state
-    if (result.probe && !root.requester.running) root.requester.running = true
-    root.announce(result.event)
-  }
-
-  property FileView hostSlot: FileView {
-    path: root.omarchyPath + "/shell/Commons/FaceChrome.qml"
-    printErrors: false
-    onLoaded: root.hostDrawsCard = true
-    onLoadFailed: root.hostDrawsCard = false
-  }
+  onFollowingChanged: root.journal.running = root.following
 
   property FileView sudoStack: FileView {
     path: "/etc/pam.d/sudo"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: root.markStack(["sudo", "sudo-i"], text())
-    onLoadFailed: root.markStack(["sudo", "sudo-i"], "")
+    onLoaded: root.sudoHasFace = Events.stackHasFace(text())
+    onLoadFailed: root.sudoHasFace = false
   }
 
   property FileView polkitStack: FileView {
@@ -72,36 +76,17 @@ QtObject {
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: root.markStack(["polkit-1"], text())
-    onLoadFailed: root.markStack(["polkit-1"], "")
+    onLoaded: root.polkitHasFace = Events.stackHasFace(text())
+    onLoadFailed: root.polkitHasFace = false
   }
 
-  property FileView suStack: FileView {
-    path: "/etc/pam.d/su"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: root.markStack(["su", "su-l"], text())
-    onLoadFailed: root.markStack(["su", "su-l"], "")
-  }
-
-  function markStack(services, text) {
-    var face = Events.stackHasFace(text)
-    var next = Object.assign({}, root.faceServices)
-    for (var i = 0; i < services.length; i++) next[services[i]] = face
-    root.faceServices = next
-  }
-
-  // authpriv carries every PAM module's own lines, Howdy's included. facelock's
-  // daemon logs to its unit, and its PAM module under its own identifier.
   property var journalStream: Limits.initialStream()
 
+  // Only the callers' own lines, trimmed to the fields the trust check reads.
   property Process journal: Process {
-    running: true
-    command: ["/usr/bin/journalctl", "--follow", "--lines=0", "--output=cat",
-              "SYSLOG_FACILITY=10",
-              "+", "_SYSTEMD_UNIT=facelock-daemon.service",
-              "+", "SYSLOG_IDENTIFIER=pam_facelock"]
+    command: ["/usr/bin/journalctl", "--follow", "--lines=0", "--output=json",
+              "--output-fields=MESSAGE,_EXE,_UID,_CAP_EFFECTIVE,_SYSTEMD_UNIT"]
+      .concat(Object.keys(Events.CALLERS).map(function(exe) { return "_EXE=" + exe }))
     clearEnvironment: true
     environment: root.childEnvironment
     stdout: SplitParser {
@@ -112,12 +97,17 @@ QtObject {
         if (fed.overflow) { root.journal.running = false; return }
         for (var i = 0; i < fed.lines.length; i++) {
           root.journalFailures = 0
-          root.apply(Events.step(root.state, fed.lines[i], root.faceServices))
+          var event = Events.verdict(Events.parseEntry(fed.lines[i]), { uid: root.uid, services: root.services })
+          if (event) {
+            root.lastEvent = event
+            root.eventSerial++
+          }
         }
       }
     }
     onExited: {
       root.journalStream = Limits.initialStream()
+      if (!root.following) return
       root.journalFailures++
       root.journalRestart.restart()
     }
@@ -129,38 +119,6 @@ QtObject {
   property int journalFailures: 0
   property Timer journalRestart: Timer {
     interval: Math.min(300000, 3000 * Math.max(1, root.journalFailures))
-    onTriggered: root.journal.running = true
-  }
-
-  // facelock does not name the caller when a scan starts: whichever PAM
-  // helper is alive then is the one asking.
-  property string requesterText: ""
-
-  property Process requester: Process {
-    command: ["/usr/bin/pgrep", "-l", "^(sudo|su|polkit-agent-he)$"]
-    clearEnvironment: true
-    environment: root.childEnvironment
-    stdout: SplitParser {
-      splitMarker: ""
-      onRead: function(chunk) {
-        var got = Limits.collect(root.requesterText, chunk)
-        root.requesterText = got.text
-        if (got.overflow) root.requester.running = false
-      }
-    }
-    onStarted: {
-      root.requesterText = ""
-      root.requesterDeadline.restart()
-    }
-    onExited: {
-      root.requesterDeadline.stop()
-      root.apply(Events.resolveRequester(root.state, root.requesterText))
-      root.requesterText = ""
-    }
-  }
-
-  property Timer requesterDeadline: Timer {
-    interval: root.oneShotDeadlineMs
-    onTriggered: root.requester.running = false
+    onTriggered: root.journal.running = root.following
   }
 }

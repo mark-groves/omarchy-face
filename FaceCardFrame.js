@@ -18,16 +18,15 @@
 //   state        "scanning" | "recognized" | "notRecognized"
 //   clock        free-running milliseconds, drives every ambient motion
 //   elapsed      milliseconds since `state` was entered
-//   style        optional, "hud" | "radar" | "holo"; overrides STYLE below
+//   style        optional, "hud" | "radar" | "holo"; absent or unknown paints
+//                DEFAULT_STYLE below
 //   host         optional op level the host paints; 2 adds glow, additive
 //                blending and roles 3..5. Absent means a level-1 host, and
 //                the frame is exactly what a level-1 host has always drawn.
 //
 // Three styles share the op vocabulary, the timing contract and the corner
 // readouts: the Depth Lattice HUD, the Phosphor Radar and the Holographic
-// Wireframe. The installed style is the STYLE line, which
-// bin/omarchy-face-style rewrites through a git filter so plugin updates
-// still fast-forward.
+// Wireframe. The host picks one per frame through spec.style.
 //
 // Colours are not in the spec. Ops carry a role index and the host resolves
 // it against the live theme.
@@ -98,17 +97,13 @@ var PATH_CHUNK = 560
 
 var TAU = Math.PI * 2
 
-// The installed style. Keep this on one line in exactly this form: the
-// omarchy-face-style filter matches it. Unknown values paint the HUD.
-var STYLE = "hud" // omarchy-face:style
+var DEFAULT_STYLE = "hud"
 
 var STYLES = ["hud", "radar", "holo"]
 
 function resolveStyle(spec) {
   var asked = spec && typeof spec.style === "string" ? spec.style : ""
-  if (STYLES.indexOf(asked) !== -1) return asked
-  if (STYLES.indexOf(STYLE) !== -1) return STYLE
-  return "hud"
+  return STYLES.indexOf(asked) !== -1 ? asked : DEFAULT_STYLE
 }
 
 function mulberry32(a) {

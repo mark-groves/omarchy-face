@@ -1,147 +1,100 @@
-// Turns journal lines into face-card events for the standalone card (Card.qml)
-// on a host without the polkit face slot. A pure reducer, kept out of QML so
-// node can test it (test/events-test.js); Service.qml owns the processes.
+// Turns journal entries into face-card verdicts for the standalone card
+// (Card.qml). Pure functions, kept out of QML so node can test them
+// (test/events-test.js); Service.qml owns the journal process.
 //
 // Display only. Nothing here authenticates or touches PAM: PAM and the face
 // backend do the work and log the outcome, and the card is drawn from the log.
 //
-//   step(state, line, faceServices) -> { state, event?, probe? }
-//   resolveRequester(state, pgrepOutput) -> { state, event? }
+//   parseEntry(line) -> entry | null      one line of `journalctl --output=json`
+//   verdict(entry, context) -> event | null
+//   stackHasFace(text) -> bool            whether a PAM stack loads a face module
 //
-// event is { state: "scanning" | "recognized" | "notRecognized" | "cancel",
-// service }. probe asks Service.qml to run the requester pgrep and hand its
-// output to resolveRequester.
+// context is { uid, services }: the user's uid as a string, and the PAM
+// services that get a card right now ({ sudo: true, "polkit-1": false }).
+// event is { state: "recognized" | "notRecognized", service }.
 //
-// Howdy logs only its verdict, as pam_howdy(<service>:auth): Face verification
-// succeeded | timed out | failed: <reason>. The start of a scan is the line
-// Omarchy's lid gate logs just before the face module runs:
-// pam_exec(<service>:auth): /usr/bin/omarchy-hw-laptop-closed failed: exit code 1.
-// The gate is also in a fingerprint-only stack, so it opens a scan only for a
-// service whose PAM stack loads a face module (faceServices, read by
-// Service.qml from /etc/pam.d). A stack without the gate still gets the
-// verdict: the card then boots and plays the result straight away.
+// The backends log only their verdicts, Howdy as
+// pam_howdy(<service>:auth): Face verification succeeded | timed out | failed: <reason>
+// and facelock as pam_facelock(<service>): <result>. Neither logs the start of
+// a scan, so the card boots and plays the verdict straight away.
 //
-// facelock's daemon logs "camera format negotiated" when a scan starts and
-// "authentication succeeded|failed" when it ends, without naming the caller,
-// so the start asks which PAM helper is waiting. pam_facelock(<service>):
-// <result> names the caller at the end.
+// Any program running as the user can log the same text, and journals here
+// hold forged pam_howdy lines. A verdict counts only when the fields journald
+// fills in itself say a real PAM caller sent it:
+//   _EXE             sudo or the polkit agent helper, and the service in the
+//                    text is one that binary runs
+//   _CAP_EFFECTIVE   non-zero: the sender held root's capabilities
+//   the user's uid   sudo logs as the user who ran it (_UID). The polkit helper
+//                    is socket-activated and always logs as root, so systemd's
+//                    name for its instance (_SYSTEMD_UNIT) carries the uid of
+//                    the agent that asked; a setuid helper (polkit before 126)
+//                    logs as the user, like sudo
+// _EXE carries most of the weight. Inside `unshare -Ur` a plain logger reports
+// the same capabilities and uid as a real sudo. What is left can show at most
+// a fake card, which any program running as the user can draw anyway: a sudo
+// run in the user's own namespaces with a fake face module, or a line sent
+// just before its sender execs sudo, before journald reads its /proc entry.
+//
+// The prefixed verdicts are howdy-next 3.4.2's. Earlier versions logged a bare
+// "Face verification succeeded" that names no service, and get no card.
 
-// PAM services that get a card: terminal elevation and polkit prompts. A lock
-// screen, a greeter or a login draws its own face UI, so their scans are left
-// alone.
-var SERVICES = ["sudo", "sudo-i", "su", "su-l", "polkit-1"]
-
-var GATE = /pam_exec\(([^:()]+):auth\): \S*omarchy-hw-laptop-closed failed: exit code 1/
-var HOWDY = /pam_howdy\(([^:()]+):auth\): Face verification (succeeded|timed out|failed)/
-var FACELOCK_PAM = /^pam_facelock\(([^()]+)\): (\w+)/
-
-function initialState() {
-  // scanning: a scan is open. service: who asked, "" while unknown. quiet: the
-  // scan belongs to something that draws its own UI, so its verdict is dropped.
-  // announced: the card has been told about this scan.
-  return { scanning: false, service: "", quiet: false, announced: false }
+// The PAM callers that get a card, and the services each one runs. The lock
+// screen, a greeter or su are not here: they draw their own face UI or have
+// no face to check.
+var CALLERS = {
+  "/usr/bin/sudo": ["sudo", "sudo-i"],
+  "/usr/lib/polkit-1/polkit-agent-helper-1": ["polkit-1"]
 }
 
-function shown(service) {
-  return SERVICES.indexOf(service) !== -1
+var HOWDY = /^pam_howdy\(([^:()]+):auth\): Face verification (succeeded|timed out|failed)/
+var FACELOCK = /^pam_facelock\(([^()]+)\): (\w+)/
+
+function parseEntry(line) {
+  try {
+    var entry = JSON.parse(line)
+    return entry && typeof entry === "object" ? entry : null
+  } catch (e) {
+    return null
+  }
 }
 
-function hasFace(faceServices, service) {
-  return !!(faceServices && faceServices[service])
+var HELPER_UNIT = /^polkit-agent-helper@.+-(\d+)\.service$/
+
+function trusted(entry, service, uid) {
+  var runs = Object.prototype.hasOwnProperty.call(CALLERS, entry._EXE) ? CALLERS[entry._EXE] : []
+  if (runs.indexOf(service) === -1) return false
+  var caps = String(entry._CAP_EFFECTIVE || "")
+  if (!/^[0-9a-f]+$/i.test(caps) || !/[1-9a-f]/i.test(caps)) return false
+  if (uid === "") return false
+  var unit = HELPER_UNIT.exec(String(entry._SYSTEMD_UNIT || ""))
+  if (service === "polkit-1" && unit) return unit[1] === uid
+  return entry._UID === uid
 }
 
-// A verdict for a service that gets no card belongs to another scan, such as
-// the lock screen's, and leaves the scan in flight alone.
-function result(state, verdict, service) {
-  if (!shown(service)) return { state: state }
-  return { state: initialState(), event: { state: verdict, service: service } }
-}
-
-function step(state, rawLine, faceServices) {
-  var s = state || initialState()
-  var line = String(rawLine).replace(/\x1b\[[0-9;]*m/g, "")
+function verdict(entry, context) {
+  if (!entry || typeof entry.MESSAGE !== "string") return null
+  var uid = context && context.uid ? String(context.uid) : ""
+  var services = (context && context.services) || {}
+  var service = ""
+  var state = ""
   var m
 
-  m = line.match(GATE)
-  if (m) {
-    if (!shown(m[1]) || !hasFace(faceServices, m[1])) return { state: s }
-    return {
-      state: { scanning: true, service: m[1], quiet: false, announced: true },
-      event: { state: "scanning", service: m[1] }
-    }
+  if ((m = entry.MESSAGE.match(HOWDY))) {
+    service = m[1]
+    state = m[2] === "succeeded" ? "recognized" : "notRecognized"
+  } else if ((m = entry.MESSAGE.match(FACELOCK))) {
+    service = m[1]
+    state = m[2] === "success" ? "recognized"
+      : (m[2] === "no_match" || m[2] === "failure" || m[2] === "fail" || m[2] === "failed") ? "notRecognized"
+      : ""
   }
 
-  m = line.match(HOWDY)
-  if (m) return result(s, m[2] === "succeeded" ? "recognized" : "notRecognized", m[1])
-
-  if (line.indexOf("Face verification skipped") !== -1) {
-    if (!s.scanning || s.quiet) return { state: initialState() }
-    return { state: initialState(), event: { state: "cancel", service: s.service } }
-  }
-
-  // A camera opening is always a new scan, so a scan that never logged its
-  // end cannot hold the reader.
-  if (line.indexOf("camera format negotiated") !== -1)
-    return { state: { scanning: true, service: "", quiet: false, announced: false }, probe: true }
-
-  if (line.indexOf("authentication succeeded") !== -1 || line.indexOf("authentication failed") !== -1) {
-    if (!s.scanning) return { state: s }
-    // A scan nobody waiting asked for ends here, shown or not.
-    if (s.quiet) return { state: initialState() }
-    // Without a known caller the verdict waits for the pam_facelock line.
-    if (s.service === "") return { state: s }
-    var verdict = line.indexOf("authentication succeeded") !== -1 ? "recognized" : "notRecognized"
-    return {
-      state: { scanning: false, service: s.service, quiet: false, announced: false, settled: true },
-      event: { state: verdict, service: s.service }
-    }
-  }
-
-  if (line.indexOf("authentication cancelled") !== -1) {
-    if (!s.scanning || s.quiet) return { state: initialState() }
-    return { state: initialState(), event: { state: "cancel", service: s.service } }
-  }
-
-  m = line.match(FACELOCK_PAM)
-  if (m) {
-    // The authoritative end of a facelock scan. A verdict already shown from
-    // the daemon line is not shown twice.
-    if (s.settled || (s.quiet && s.scanning)) return { state: initialState() }
-    var word = m[2]
-    var outcome = word === "success" ? "recognized"
-      : (word === "no_match" || word === "failure" || word === "fail" || word === "failed") ? "notRecognized"
-      : "cancel"
-    if (outcome === "cancel" && !s.announced) return { state: initialState() }
-    if (!shown(m[1])) return { state: initialState() }
-    return result(s, outcome, m[1])
-  }
-
-  return { state: s }
+  if (state === "" || services[service] !== true) return null
+  if (!trusted(entry, service, uid)) return null
+  return { state: state, service: service }
 }
 
-// `pgrep -l` output for the PAM helpers that ask for a face. polkit wins over
-// sudo, and sudo over su: a polkit prompt run from a terminal leaves a sudo
-// process around, and `sudo su` leaves an su. None of them means the scan
-// belongs to something else, such as the lock screen.
-function resolveRequester(state, pgrepOutput) {
-  var s = state || initialState()
-  if (!s.scanning || s.service !== "") return { state: s }
-  var names = String(pgrepOutput || "").split("\n").map(function (l) {
-    return l.trim().split(/\s+/).pop()
-  })
-  var who = names.indexOf("polkit-agent-he") !== -1 ? "polkit-1"
-    : names.indexOf("sudo") !== -1 ? "sudo"
-    : names.indexOf("su") !== -1 ? "su"
-    : ""
-  if (who === "") return { state: { scanning: true, service: "", quiet: true, announced: false } }
-  return {
-    state: { scanning: true, service: who, quiet: false, announced: true },
-    event: { state: "scanning", service: who }
-  }
-}
-
-// Which services in a PAM stack load a face module: the file text of
-// /etc/pam.d/<service>, ignoring comments.
+// The text of /etc/pam.d/<service>, ignoring comments.
 function stackHasFace(text) {
   return String(text || "").split("\n").some(function (l) {
     var t = l.replace(/#.*/, "")
@@ -150,4 +103,4 @@ function stackHasFace(text) {
 }
 
 if (typeof module !== "undefined")
-  module.exports = { SERVICES, initialState, step, resolveRequester, stackHasFace }
+  module.exports = { CALLERS, parseEntry, verdict, stackHasFace }

@@ -61,7 +61,7 @@ check('reads no ambient state', () => {
 
 const body = source.replace(/^\.pragma library\s*$/m, '')
 const exported = {}
-new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLE = STYLE; __out.STYLES = STYLES; __out.easeOutBack = easeOutBack;')(exported)
+new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLES = STYLES; __out.easeOutBack = easeOutBack;')(exported)
 const { frame, holdMs, easeOutBack } = exported
 
 check('a lock ease starts at rest and ends seated', () => {
@@ -257,33 +257,7 @@ check('a frame on the large card stays cheap to replay', () => {
   }
 })
 
-// --- styles and the selector --------------------------------------------------
-
-const STYLE_LINE = /^var STYLE = "([a-z]+)"/m
-
-check('the style line is in the exact form the switch filter rewrites', () => {
-  const lines = source.split('\n').filter(l => /^var STYLE = /.test(l))
-  assert.strictEqual(lines.length, 1, 'expected exactly one STYLE line')
-  assert.match(lines[0], /^var STYLE = "[a-z]+" \/\/ omarchy-face:style$/)
-})
-
-check('the published default is the HUD', () => {
-  assert.strictEqual(source.match(STYLE_LINE)[1], 'hud')
-  assert.strictEqual(exported.STYLE, 'hud')
-})
-
-check('the switch script offers exactly the module styles', () => {
-  const script = fs.readFileSync(path.join(root, 'bin/omarchy-face-style'), 'utf8')
-  const m = script.match(/^STYLES=\(([^)]*)\)/m)
-  assert.ok(m, 'no STYLES=(...) in the script')
-  assert.deepStrictEqual(m[1].trim().split(/\s+/), exported.STYLES)
-  assert.deepStrictEqual(exported.STYLES, ['hud', 'radar', 'holo'])
-})
-
-check('the filter is declared for the entry point', () => {
-  const attrs = fs.readFileSync(path.join(root, '.gitattributes'), 'utf8')
-  assert.match(attrs, /^FaceCardFrame\.js filter=omarchy-face-style$/m)
-})
+// --- styles -------------------------------------------------------------------
 
 function styled(style, state, elapsed, size, clock) {
   const s = { state: state, elapsed: elapsed, clock: clock === undefined ? 900 : clock }
@@ -291,35 +265,16 @@ function styled(style, state, elapsed, size, clock) {
   return frame(size === undefined ? 120 : size, s)
 }
 
-// The installed module with its STYLE line rewritten, loaded as the host does.
-function installedAs(style) {
-  const text = body.replace(STYLE_LINE, 'var STYLE = "' + style + '"')
-  const api = {}
-  new Function('__out', text + '\n__out.frame = frame;')(api)
-  return api.frame
-}
-
-check('spec.style picks the style', () => {
+check('spec.style picks the style, and the HUD without one', () => {
   assert.deepStrictEqual(styled(undefined, 'scanning', 2000), styled('hud', 'scanning', 2000))
   assert.notDeepStrictEqual(styled('radar', 'scanning', 2000), styled('hud', 'scanning', 2000))
   assert.notDeepStrictEqual(styled('holo', 'scanning', 2000), styled('hud', 'scanning', 2000))
   assert.notDeepStrictEqual(styled('holo', 'scanning', 2000), styled('radar', 'scanning', 2000))
 })
 
-check('the STYLE line picks the style when spec.style is absent', () => {
-  for (const style of exported.STYLES) {
-    const f = installedAs(style)
-    assert.deepStrictEqual(f(120, { state: 'recognized', clock: 1200, elapsed: 500 }), styled(style, 'recognized', 500, 120, 1200), style)
-  }
-})
-
-check('an unknown style paints the installed one, never nothing', () => {
+check('an unknown style paints the HUD, never nothing', () => {
   assert.deepStrictEqual(styled('sparkles', 'scanning', 2000), styled('hud', 'scanning', 2000))
   assert.deepStrictEqual(styled(42, 'scanning', 2000), styled('hud', 'scanning', 2000))
-  const radar = installedAs('radar')
-  assert.deepStrictEqual(radar(120, { state: 'scanning', clock: 900, elapsed: 2000, style: 'nope' }), styled('radar', 'scanning', 2000))
-  const broken = installedAs('nope')
-  assert.deepStrictEqual(broken(120, { state: 'scanning', clock: 900, elapsed: 2000 }), styled('hud', 'scanning', 2000))
 })
 
 for (const style of exported.STYLES) {
