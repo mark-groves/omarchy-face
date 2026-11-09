@@ -862,36 +862,56 @@ var HUD_VO = { x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, D: 0, rim: 0, spec: 0, vis
 var HUD_BUF = {
   mx: [], my: [], mv: [], md: [], me: [], mc: [],
   sx: [], sy: [], sa: [],
+  bx: [], by: [], bv: [],
   dx: [], dy: [], ds: [], da: [], dcr: [], dmid: [], drim: [], db: [], dspec: []
 }
 
 // The scan plane's cut through the head at height y, as a screen polyline
 // that follows the surface: {x, y, v} per sample, v the visibility.
-function hudSliceLine(F, y, n) {
-  var out = []
+function hudSliceLineInto(F, y, n, xs, ys, vs) {
   // Past the crown or under the chin the cut shrinks to a point on the pole
   // and goes on, so the beam does not vanish at the ends of its travel.
   var lo = HEAD_TOP + 0.03, hi = HUD_BOT - 0.03
   var yc = clamp(y, lo, hi)
   var shrink = clamp01(1 - Math.abs(y - yc) / 0.1)
   var yy = y + HUD_YC
+  // hudHead(u, yc) at every bearing, its height terms worked out once.
+  var hy = Math.min(yc, HUD_TAPER)
+  headRowAt(hy)
+  var fj = clamp01((hy - 0.3) / 0.32)
+  var fullness = 1 + 0.2 * fj * fj * (3 - 2 * fj)
+  var tapered = !(yc <= HUD_TAPER)
+  var ts = 1, tzc = 0
+  if (tapered) {
+    var tk = clamp01((yc - HUD_TAPER) / (HUD_BOT - HUD_TAPER))
+    ts = Math.sqrt(Math.max(0, 1 - tk * tk))
+    tzc = (profileAt(HEAD_Y, HEAD_FRONT, HUD_TAPER) + profileAt(HEAD_Y, HEAD_BACK, HUD_TAPER)) / 2
+  }
+  var T = hudSliceBearings(n)
   for (var j = 0; j <= n; j++) {
-    var P = hudHead(mix(-1.5, 1.5, j / n), yc)
-    var px = P[0] * shrink
-    var zc = P[2] - HUD_ZC
+    headRowPoint(T, j)
+    var px = (tapered ? HP_X * fullness * ts : HP_X * fullness) * shrink
+    var zc = (tapered ? tzc + (HP_Z - tzc) * ts : HP_Z) - HUD_ZC
     var xr = px * F.cw + zc * F.sw
     var z1 = -px * F.sw + zc * F.cw
     var yr = yy * F.cp - z1 * F.sp
     var zr = yy * F.sp + z1 * F.cp
     var ps = F.scale / (1 - HUD_PERSP * zr)
     var rr = Math.hypot(px, zc) || 1
-    out.push({
-      x: F.cx + xr * ps * F.RF,
-      y: F.cy + (yr - HUD_PARALLAX * zr) * ps * F.RF,
-      v: clamp01(((-px * F.sw + zc * F.cw) / rr + 0.1) / 0.3)
-    })
+    xs[j] = F.cx + xr * ps * F.RF
+    ys[j] = F.cy + (yr - HUD_PARALLAX * zr) * ps * F.RF
+    vs[j] = clamp01(((-px * F.sw + zc * F.cw) / rr + 0.1) / 0.3)
   }
-  return out
+}
+
+// The bearings a slice line is sampled at: n + 1 of them across the face.
+function hudSliceBearings(n) {
+  var key = "hudSliceB" + n
+  if (CACHE[key]) return CACHE[key]
+  var us = []
+  for (var j = 0; j <= n; j++) us.push(mix(-1.5, 1.5, j / n))
+  CACHE[key] = bearingTable(us)
+  return CACHE[key]
 }
 
 // How much bloom the HUD asks for. A light or merely dark card (level 2)
@@ -1093,45 +1113,49 @@ function hudBeam(halo, crisp, G, F, y, dir, k, tint, trail) {
   var R = G.R, cx = G.cx, cy = G.cy
   var i, j
   var hotRole = LUMEN ? hotOf(tint) : tint
+  var lx = HUD_BUF.bx, ly = HUD_BUF.by, lv = HUD_BUF.bv
+  var n = 35
+  // The echoes are cut from the farthest in; the leading edge, cut last, is
+  // also the line the beam runs out on below.
   for (i = trail; i >= 0; i--) {
     var yy = y - dir * i * 0.052 * (1 + i * 0.35)
-    var line = hudSliceLine(F, yy, 34)
-    if (line.length < 2) continue
+    hudSliceLineInto(F, yy, n - 1, lx, ly, lv)
     var fade = i === 0 ? 1 : 0.5 / (i * 1.15)
-    var run = []
-    for (j = 0; j <= line.length; j++) {
-      var p = j < line.length ? line[j] : null
-      if (p && p.v > 0.12) { run.push([p.x, p.y]); continue }
-      if (run.length > 1) {
+    var from = -1
+    for (j = 0; j <= n; j++) {
+      if (j < n && lv[j] > 0.12) {
+        if (from < 0) from = j
+        continue
+      }
+      if (from >= 0 && j - 1 > from) {
         if (i === 0) {
-          halo.poly(tint, 0.32 * k, G.thin * 3.2, run)
-          crisp.poly(tint, 0.95 * k, G.thin, run)
-          if (LUMEN) crisp.poly(hotRole, 0.85 * k, Math.max(0.5, G.thin * 0.45), run)
+          halo.polyXY(tint, 0.32 * k, G.thin * 3.2, lx, ly, from, j - 1)
+          crisp.polyXY(tint, 0.95 * k, G.thin, lx, ly, from, j - 1)
+          if (LUMEN) crisp.polyXY(hotRole, 0.85 * k, Math.max(0.5, G.thin * 0.45), lx, ly, from, j - 1)
         } else {
-          crisp.poly(tint, 0.34 * k * fade, G.hair, run)
+          crisp.polyXY(tint, 0.34 * k * fade, G.hair, lx, ly, from, j - 1)
         }
       }
-      run = []
+      from = -1
     }
   }
   // The beam beyond the head, out to the disc, with range ticks.
-  var lead = hudSliceLine(F, y, 34)
-  if (lead.length < 2) return
-  var mid = lead[Math.floor(lead.length / 2)]
-  var yu = (mid.y - cy) / R
+  var mid = Math.floor(n / 2)
+  var yu = (ly[mid] - cy) / R
   var chord = R * Math.sqrt(Math.max(0.0001, 1 - yu * yu))
-  var first = null, last = null
-  for (j = 0; j < lead.length; j++) if (lead[j].v > 0.12) { if (!first) first = lead[j]; last = lead[j] }
-  if (!first) first = last = mid
-  crisp.line(tint, 0.55 * k, G.hair, cx - chord, first.y, first.x, first.y)
-  crisp.line(tint, 0.55 * k, G.hair, last.x, last.y, cx + chord, last.y)
+  var first = -1, last = -1
+  for (j = 0; j < n; j++) if (lv[j] > 0.12) { if (first < 0) first = j; last = j }
+  if (first < 0) first = last = mid
+  var fx = lx[first], fy = ly[first], lax = lx[last], lay = ly[last]
+  crisp.line(tint, 0.55 * k, G.hair, cx - chord, fy, fx, fy)
+  crisp.line(tint, 0.55 * k, G.hair, lax, lay, cx + chord, lay)
   for (var tk = -9; tk <= 9; tk++) {
     var tx = cx + tk * chord / 10
-    if (tx > first.x - G.R * 0.02 && tx < last.x + G.R * 0.02) continue
-    var ty = tx < cx ? first.y : last.y
+    if (tx > fx - G.R * 0.02 && tx < lax + G.R * 0.02) continue
+    var ty = tx < cx ? fy : lay
     crisp.line(tint, 0.5 * k, G.hair, tx, ty, tx, ty + R * (tk % 5 === 0 ? 0.05 : 0.022) * (tk % 2 ? -dir : dir))
   }
-  return { l: [cx - chord, first.y], r: [cx + chord, last.y] }
+  return { l: [cx - chord, fy], r: [cx + chord, lay] }
 }
 
 function paintHud(ctx, size, spec) {
@@ -1279,7 +1303,11 @@ function paintHud(ctx, size, spec) {
     // The wake behind the plane: a soft light, cut to the disc in slices.
     var planeK = scanning ? boot : (ok ? 1 - easeOutCubic(seg(rt, 0, 160)) : 1 - easeOutCubic(seg(rt, 0, 240)))
     if (scanning && planeK > 0.01) {
-      var pyScr = (outline.length ? hudSliceLine(F, plane.y, 4)[2] : null)
+      var pyScr = null
+      if (outline.length) {
+        hudSliceLineInto(F, plane.y, 4, HUD_BUF.bx, HUD_BUF.by, HUD_BUF.bv)
+        pyScr = { y: HUD_BUF.by[2] }
+      }
       if (pyScr) {
         var wakeLen = 0.34 * RF
         var wy0 = pyScr.y - plane.dir * wakeLen
@@ -4082,6 +4110,67 @@ function headPoint(u, y) {
   return [x, y, z]
 }
 
+// headPoint() round a ring of fixed bearings, one height at a time, with
+// the same arithmetic: a bearing table holds each bearing's share (sine and
+// cosine with their powers, the ear's bearing term), headRowAt() works out a
+// height's share once, and headRowPoint() finishes one point into HP_X and
+// HP_Z, the x and z headPoint(u, y) returns.
+function bearingTable(us) {
+  var T = { u: us, sx: [], sz: [], fr: [], eu: [] }
+  for (var j = 0; j < us.length; j++) {
+    var u = us[j]
+    var su = Math.sin(u), cu = Math.cos(u)
+    var ea = (Math.abs(u) - 1.72) / 0.22
+    T.sx.push(sgnPow(su, 0.78))
+    T.sz.push(sgnPow(cu, 0.85))
+    T.fr.push(Math.max(0, cu))
+    T.eu.push(ea * ea)
+  }
+  return T
+}
+
+var HEAD_ROW = { y: 0, W: 0, ey: 0, zh: 0, zd: 0, g: [0, 0, 0, 0, 0, 0] }
+var HP_X = 0, HP_Z = 0
+
+function headRowAt(y) {
+  var H = HEAD_ROW
+  var F = profileAt(HEAD_Y, HEAD_FRONT, y)
+  var B = profileAt(HEAD_Y, HEAD_BACK, y)
+  H.y = y
+  H.W = Math.max(0, profileAt(HEAD_Y, HEAD_HALF, y))
+  var b = (y + 0.06) / 0.12
+  H.ey = b * b
+  H.zh = (F + B) / 2
+  H.zd = (F - B) / 2
+  // faceRelief()'s height terms, one per gaussian.
+  var g = H.g, d
+  d = (y + 0.46) / 0.18; g[0] = d * d
+  d = (y + 0.2) / 0.07; g[1] = d * d
+  d = (y - 0.02) / 0.2; g[2] = d * d
+  d = (y - 0.15) / 0.07; g[3] = d * d
+  d = (y - 0.04) / 0.16; g[4] = d * d
+  d = (y - 0.56) / 0.09; g[5] = d * d
+}
+
+function headRowPoint(T, j) {
+  var H = HEAD_ROW, g = H.g
+  var ear = 0.11 * Math.exp(-(T.eu[j] + H.ey))
+  var x = H.W * T.sx[j] * (1 + ear)
+  var z = H.zh + H.zd * T.sz[j]
+  var front = T.fr[j]
+  // faceRelief(x, H.y), term for term.
+  var ax = Math.abs(x), d
+  d = x / 0.3; var forehead = 0.03 * Math.exp(-(d * d + g[0]))
+  d = (ax - 0.2) / 0.26; var brow = 0.022 * Math.exp(-(d * d + g[1]))
+  d = x / 0.085; var ridge = 0.085 * Math.exp(-(d * d + g[2]))
+  d = x / 0.08; var tip = 0.04 * Math.exp(-(d * d + g[3]))
+  d = (ax - 0.3) / 0.16; var cheek = 0.045 * Math.exp(-(d * d + g[4]))
+  d = x / 0.15; var chin = 0.04 * Math.exp(-(d * d + g[5]))
+  z += (forehead + brow + ridge + tip + cheek + chin) * front * front
+  HP_X = x
+  HP_Z = z
+}
+
 // A vertex with its outward normal and a slope shade under a light from the
 // upper left: [x, y, z, nx, ny, nz, shade].
 function headVertex(fn, u, y) {
@@ -4298,6 +4387,19 @@ function holoStripXY(p, role, xs, ys, al, wd, n) {
 // Scratch for the hologram's per-line loops. Nothing in it lives past the
 // line that writes it.
 var HOLO_BUF = { x: [], y: [], al: [], wd: [], hal: [], cx: [], cy: [], cal: [], rx: [], ry: [], ral: [] }
+var HOLO_PLANE = {
+  ex: [], ey: [], eal: [], ewd: [], rx: [], ry: [], rf: [], ral: [], rwd: [], rhot: [],
+  fax: [], fay: [], fbx: [], fby: [], fl1: [], fl2: [], tx: [], ty: [], tf: [], tal: []
+}
+
+// The bearings a scan plane's ring is sampled at, all the way round.
+function holoRingBearings() {
+  if (CACHE.holoRingB) return CACHE.holoRingB
+  var us = [], n = 36
+  for (var i = 0; i <= n; i++) us.push(-Math.PI + i / n * TAU)
+  CACHE.holoRingB = bearingTable(us)
+  return CACHE.holoRingB
+}
 
 function holoQuad(k) { return k < 0.5 ? 2 * k * k : 1 - 2 * (1 - k) * (1 - k) }
 
@@ -4459,6 +4561,8 @@ function paintHolo(ctx, size, spec) {
   function glitchX(x, y) {
     return (bad ? tearShift(tears, y) : 0) + blockShift(x, y)
   }
+  // With no miss and no block slipping, glitchX() is 0 everywhere.
+  var glitchOn = bad || blocks.length > 0
 
   // Chromatic offset: copies of the image off register. It closes on a lock
   // and tears wide on a miss.
@@ -4494,6 +4598,18 @@ function paintHolo(ctx, size, spec) {
   function project(P) {
     projectInto(P)
     return { x: pqx, y: pqy, z: pqz, f: pqf }
+  }
+  // projectInto([X, Y, Z]) without the array: a point with no normal.
+  function projectXYZ(X, Y, Z) {
+    var xr = X * cyw + Z * syw
+    var zr = -X * syw + Z * cyw
+    var yr = Y * cp - zr * spp
+    var z2 = Y * spp + zr * cp
+    var s = HOLO_F / (HOLO_F - z2)
+    pqx = xr * s * HOLO_K
+    pqy = yr * s * HOLO_K + HOLO_CY + roll
+    pqz = z2
+    pqf = 1
   }
   // Projected half width of the head at height y, and the offset of its
   // centre, for the rings and beams that wrap it.
@@ -4637,35 +4753,34 @@ function paintHolo(ctx, size, spec) {
     if (cageA > 0.01) {
       var cr = Math.cos(cageRot), sr = Math.sin(cageRot)
       var CA = 0.8 * cageS, CB = 0.98 * cageS
-      var cageLine = function (P3list, dashed) {
-        var pts = [], al = []
-        for (var i = 0; i < P3list.length; i++) {
-          var P = P3list[i]
-          var X = P[0] * cr + P[2] * sr, Z = -P[0] * sr + P[2] * cr
-          var Q = project([X, P[1], Z])
-          pts.push(toPx(Q.x + glitchX(Q.x, Q.y), Q.y))
-          var front = clamp01((Z + 0.8) / 1.6)
-          al.push((0.04 + 0.22 * front * front) * cageA * (dashed && i % 2 ? 0 : 1))
-        }
-        strip(crisp, LUMEN ? ROLE_FG : tint, fine, pts, al)
+      var cageX = HOLO_BUF.x, cageY = HOLO_BUF.y, cageAl = HOLO_BUF.al
+      var cageDash = bad && power < 0.7
+      var cageRole = LUMEN ? ROLE_FG : tint
+      // One point of a cage line, turned with the cage and projected, into
+      // the flat lists at i.
+      var cagePoint = function (i, P0, P1, P2) {
+        var X = P0 * cr + P2 * sr, Z = -P0 * sr + P2 * cr
+        projectXYZ(X, P1, Z)
+        cageX[i] = cx + (pqx + (glitchOn ? glitchX(pqx, pqy) : 0)) * R
+        cageY[i] = cy + pqy * R
+        var front = clamp01((Z + 0.8) / 1.6)
+        cageAl[i] = (0.04 + 0.22 * front * front) * cageA * (cageDash && i % 2 ? 0 : 1)
       }
       for (var cm = 0; cm < 10; cm++) {
         var ph = cm * TAU / 10
-        var mer = []
         for (var cv = 0; cv <= 14; cv++) {
           var vv = mix(-1.35, 1.35, cv / 14)
-          mer.push([CA * Math.cos(vv) * Math.sin(ph), CB * Math.sin(vv), CA * Math.cos(vv) * Math.cos(ph)])
+          cagePoint(cv, CA * Math.cos(vv) * Math.sin(ph), CB * Math.sin(vv), CA * Math.cos(vv) * Math.cos(ph))
         }
-        cageLine(mer, bad && power < 0.7)
+        stripXY(crisp, cageRole, fine, cageX, cageY, cageAl, 15)
       }
       for (var cpl = -2; cpl <= 2; cpl++) {
         var pv = cpl * 0.5
-        var par = []
         for (var cu = 0; cu <= 30; cu++) {
           var uu = cu / 30 * TAU
-          par.push([CA * Math.cos(pv) * Math.sin(uu), CB * Math.sin(pv), CA * Math.cos(pv) * Math.cos(uu)])
+          cagePoint(cu, CA * Math.cos(pv) * Math.sin(uu), CB * Math.sin(pv), CA * Math.cos(pv) * Math.cos(uu))
         }
-        cageLine(par, bad && power < 0.7)
+        stripXY(crisp, cageRole, fine, cageX, cageY, cageAl, 31)
       }
       crisp.flush()
     }
@@ -4866,84 +4981,91 @@ function paintHolo(ctx, size, spec) {
 
   // --- scan planes: a ring of light wrapped round the surface, in a plane that
   // reaches past the head, with an arm sweeping it and a wake behind ------------
-  function surfaceRing(hy) {
-    var out = []
-    var n = 36
-    for (var i = 0; i <= n; i++) {
-      var u = -Math.PI + i / n * TAU
-      var Q = project(headPoint(u, hy))
-      var yq = lensY(Q.y)
-      var P = toPx(Q.x + glitchX(Q.x, yq), yq)
-      P.f = clamp01(0.5 + 0.5 * Math.cos(u + yaw))
-      out.push(P)
+  // The ring of light a scan plane lays round the head at height hy, as
+  // pixel points and how squarely each faces the camera, into flat lists.
+  function surfaceRingInto(hy, xs, ys, fs) {
+    var T = holoRingBearings()
+    var n = T.u.length
+    headRowAt(hy)
+    for (var i = 0; i < n; i++) {
+      headRowPoint(T, i)
+      projectXYZ(HP_X, hy, HP_Z)
+      var yq = lensY(pqy)
+      xs[i] = cx + (pqx + (glitchOn ? glitchX(pqx, yq) : 0)) * R
+      ys[i] = cy + yq * R
+      fs[i] = clamp01(0.5 + 0.5 * Math.cos(T.u[i] + yaw))
     }
-    return out
+    return n
   }
   function drawPlane(sy, k, trails, trailDir, arm, fringe) {
     k *= clamp01((0.97 - Math.abs(sy)) / 0.14)
     if (k <= 0.02 || compact) return
+    var PB = HOLO_PLANE
     var hy = (sy - HOLO_CY) / HOLO_K
     var rr = Math.max(0.16, bodySpan(sy).w * 1.28 / HOLO_K)
-    var zc = project([0, hy, -0.09]).z
-    var ep = [], eal = [], ewd = []
-    var i, Q
+    projectXYZ(0, hy, -0.09)
+    var zc = pqz
+    var epX = PB.ex, epY = PB.ey, eal = PB.eal, ewd = PB.ewd
+    var i
     for (i = 0; i <= 40; i++) {
       var ang = i / 40 * TAU
-      Q = project([Math.cos(ang) * rr, hy, -0.09 + Math.sin(ang) * rr])
-      var ey = lensY(Q.y)
-      ep.push(toPx(Q.x + glitchX(Q.x, ey), ey))
-      eal.push(k * (0.1 + 0.3 * clamp01(0.5 + (Q.z - zc) / (1.8 * rr))))
-      ewd.push(thin)
+      projectXYZ(Math.cos(ang) * rr, hy, -0.09 + Math.sin(ang) * rr)
+      var ey = lensY(pqy)
+      epX[i] = cx + (pqx + (glitchOn ? glitchX(pqx, ey) : 0)) * R
+      epY[i] = cy + ey * R
+      eal[i] = k * (0.1 + 0.3 * clamp01(0.5 + (pqz - zc) / (1.8 * rr)))
+      ewd[i] = thin
     }
-    holoStrip(crisp, tint, ep, eal, ewd)
-    var ip = []
+    holoStripXY(crisp, tint, epX, epY, eal, ewd, 41)
     for (i = 0; i <= 28; i++) {
       var ang2 = i / 28 * TAU
-      Q = project([Math.cos(ang2) * rr * 0.52, hy, -0.09 + Math.sin(ang2) * rr * 0.52])
-      ip.push([cx + Q.x * R, cy + Q.y * R])
+      projectXYZ(Math.cos(ang2) * rr * 0.52, hy, -0.09 + Math.sin(ang2) * rr * 0.52)
+      epX[i] = cx + pqx * R
+      epY[i] = cy + pqy * R
     }
-    crisp.poly(tint, k * 0.12, fine, ip)
+    crisp.polyXY(tint, k * 0.12, fine, epX, epY, 0, 28)
     if (arm) {
       var ar = t / 1400 * TAU
-      Q = project([0, hy, -0.09])
-      var ac = toPx(Q.x, Q.y)
+      projectXYZ(0, hy, -0.09)
+      var acx = cx + pqx * R, acy = cy + pqy * R
       for (var ak = 0; ak < 3; ak++) {
         var aa = ar - ak * 0.2
-        var QA = project([Math.cos(aa) * rr, hy, -0.09 + Math.sin(aa) * rr])
-        var AP = toPx(QA.x, QA.y)
-        crisp.line(tint, k * (0.55 - 0.18 * ak), ak === 0 ? hair : fine, ac.x, ac.y, AP.x, AP.y)
+        projectXYZ(Math.cos(aa) * rr, hy, -0.09 + Math.sin(aa) * rr)
+        crisp.line(tint, k * (0.55 - 0.18 * ak), ak === 0 ? hair : fine, acx, acy, cx + pqx * R, cy + pqy * R)
       }
     }
     if (hy > HEAD_TOP + 0.02 && hy < HEAD_CHIN - 0.02) {
-      var ring = surfaceRing(hy)
-      var ral2 = [], rwd = []
-      for (i = 0; i + 1 < ring.length; i++) {
-        var fa = (ring[i].f + ring[i + 1].f) / 2
-        ral2.push(k * (0.08 + 0.92 * fa * fa))
-        rwd.push(fa > 0.5 ? bold : thin)
+      var rX = PB.rx, rY = PB.ry, rF = PB.rf, ral2 = PB.ral, rwd = PB.rwd, rhot = PB.rhot
+      var nr = surfaceRingInto(hy, rX, rY, rF)
+      for (i = 0; i + 1 < nr; i++) {
+        var fa = (rF[i] + rF[i + 1]) / 2
+        ral2[i] = k * (0.08 + 0.92 * fa * fa)
+        rwd[i] = fa > 0.5 ? bold : thin
       }
-      holoStrip(crisp, tint, ring, ral2, rwd)
-      var rhot = []
-      for (i = 0; i + 1 < ring.length; i++) rhot.push(ral2[i] * 0.8)
-      if (LUMEN) strip(crisp, hotOf(tint), Math.max(0.5, fine), ring, rhot)
-      var rpoly = []
-      for (i = 0; i < ring.length; i++) rpoly.push([ring[i].x, ring[i].y])
-      soft.poly(tint, k * 0.13, bold * 2.2, rpoly)
+      holoStripXY(crisp, tint, rX, rY, ral2, rwd, nr)
+      for (i = 0; i + 1 < nr; i++) rhot[i] = ral2[i] * 0.8
+      if (LUMEN) stripXY(crisp, hotOf(tint), Math.max(0.5, fine), rX, rY, rhot, nr)
+      soft.polyXY(tint, k * 0.13, bold * 2.2, rX, rY, 0, nr - 1)
       if (fringe && chroma > 0.1) {
-        var fa1 = [], fb1 = [], fl1 = [], fl2 = []
-        for (i = 0; i < ring.length; i++) {
-          fa1.push({ x: ring[i].x + chX * 1.3, y: ring[i].y + chY })
-          fb1.push({ x: ring[i].x - chX * 1.3, y: ring[i].y - chY })
-          if (i + 1 < ring.length) { fl1.push(ral2[i] * 0.4); fl2.push(ral2[i] * 0.34) }
+        var faX = PB.fax, faY = PB.fay, fbX = PB.fbx, fbY = PB.fby, fl1 = PB.fl1, fl2 = PB.fl2
+        for (i = 0; i < nr; i++) {
+          faX[i] = rX[i] + chX * 1.3
+          faY[i] = rY[i] + chY
+          fbX[i] = rX[i] - chX * 1.3
+          fbY[i] = rY[i] - chY
+          if (i + 1 < nr) {
+            fl1[i] = ral2[i] * 0.4
+            fl2[i] = ral2[i] * 0.34
+          }
         }
-        strip(crisp, LUMEN ? altOf(tint) : ROLE_FG, fine, fa1, fl1)
-        if (!bad) strip(crisp, LUMEN ? alt2Of(tint) : ROLE_ERROR, fine, fb1, fl2)
+        stripXY(crisp, LUMEN ? altOf(tint) : ROLE_FG, fine, faX, faY, fl1, nr)
+        if (!bad) stripXY(crisp, LUMEN ? alt2Of(tint) : ROLE_ERROR, fine, fbX, fbY, fl2, nr)
       }
+      var tX = PB.tx, tY = PB.ty, tF = PB.tf, tal = PB.tal
       for (var tg = 1; tg <= trails; tg++) {
-        var trail = surfaceRing(clamp(hy - trailDir * 0.055 * tg, HEAD_TOP + 0.02, HEAD_CHIN - 0.02))
-        var tal = []
-        for (i = 0; i + 1 < trail.length; i++) tal.push(k * 0.34 / tg * (0.1 + 0.9 * Math.pow((trail[i].f + trail[i + 1].f) / 2, 2)))
-        strip(crisp, tint, fine, trail, tal)
+        var nt = surfaceRingInto(clamp(hy - trailDir * 0.055 * tg, HEAD_TOP + 0.02, HEAD_CHIN - 0.02), tX, tY, tF)
+        for (i = 0; i + 1 < nt; i++) tal[i] = k * 0.34 / tg * (0.1 + 0.9 * Math.pow((tF[i] + tF[i + 1]) / 2, 2))
+        stripXY(crisp, tint, fine, tX, tY, tal, nt)
       }
     }
   }
@@ -4989,7 +5111,6 @@ function paintHolo(ctx, size, spec) {
   var HB = HOLO_BUF
   var hX = HB.x, hY = HB.y, hAl = HB.al, hWd = HB.wd, hHal = HB.hal
   var fcX = HB.cx, fcY = HB.cy, fcA = HB.cal, frX = HB.rx, frY = HB.ry, frA = HB.ral
-  var glitchOn = bad || blocks.length > 0
   var litK = baseA * flickRaw
   var bandAt = Math.floor(t / 60) * 7
   var buildAt = Math.floor(rt / 40) * 17
@@ -5112,18 +5233,18 @@ function paintHolo(ctx, size, spec) {
       var dsz = Math.max(1, size * 0.006)
       for (var cpi = 0; cpi < cloud.length; cpi++) {
         var cpt = cloud[cpi]
-        var CQ = project(cpt.P)
-        if (CQ.f < 0.05) continue
+        projectInto(cpt.P)
+        if (pqf < 0.05) continue
         var chy = cpt.P[1]
         var cvis = buildY > -8 ? clamp01((chy - buildY) / 0.12) : 1
         if (cvis <= 0.02) continue
-        var cyq = lensY(CQ.y)
-        var cxq = CQ.x + glitchX(CQ.x, cyq) + slipField(chy)
+        var cyq = lensY(pqy)
+        var cxq = pqx + (glitchOn ? glitchX(pqx, cyq) : 0) + slipField(chy)
         var shimmer = 0.5 + 0.5 * Math.sin(t / 180 + cpt.j * 40)
-        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((CQ.f - 0.05) / 0.3) * cloudA * flickRaw * cvis
+        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((pqf - 0.05) / 0.3) * cloudA * flickRaw * cvis
         if (pa3 <= 0.02) continue
-        var CP = toPx(cxq, cyq)
-        ctx.rect(LUMEN && shimmer > 0.85 && !bad ? hotOf(tint) : tint, pa3, CP.x - dsz / 2, CP.y - dsz / 2, dsz, dsz,
+        var cpx = cx + cxq * R, cpy = cy + cyq * R
+        ctx.rect(LUMEN && shimmer > 0.85 && !bad ? hotOf(tint) : tint, pa3, cpx - dsz / 2, cpy - dsz / 2, dsz, dsz,
           LUMEN && shimmer > 0.85 ? pa3 * 0.6 : 0)
       }
       ctx.glow = 0
@@ -5234,22 +5355,24 @@ function paintHolo(ctx, size, spec) {
       }
       if (oA <= 0.02) continue
       var ct = Math.cos(tilt), stl = Math.sin(tilt)
-      var opts = [], oal = []
+      var opX = HOLO_BUF.x, opY = HOLO_BUF.y, oal = HOLO_BUF.al, ohot = HOLO_BUF.hal
       for (var oj = 0; oj <= 56; oj++) {
         var oa2 = oj / 56 * TAU + orot
         var X3 = Math.cos(oa2) * orad, Z3 = Math.sin(oa2) * orad
         var Y3 = -Z3 * stl, Zt = Z3 * ct
-        var OQ = project([X3, Y3 + oyc, Zt])
-        opts.push(toPx(OQ.x + glitchX(OQ.x, OQ.y), OQ.y))
+        projectXYZ(X3, Y3 + oyc, Zt)
+        opX[oj] = cx + (pqx + (glitchOn ? glitchX(pqx, pqy) : 0)) * R
+        opY[oj] = cy + pqy * R
         var odash = oj % 2 ? (ob === 0 ? 1 - ok2 : 1) : 1
-        oal.push(odash * oA * (0.2 + 0.8 * clamp01((Zt + orad) / (2 * orad))))
+        oal[oj] = odash * oA * (0.2 + 0.8 * clamp01((Zt + orad) / (2 * orad)))
       }
-      strip(crisp, tint, ok && ob === 0 ? mix(fine * 1.3, thin, restK) : fine * 1.3, opts, oal)
+      stripXY(crisp, tint, ok && ob === 0 ? mix(fine * 1.3, thin, restK) : fine * 1.3, opX, opY, oal, 57)
       if (ok && ob === 0 && restK > 0.02) {
-        var hpoly = []
-        for (var hp = 0; hp < opts.length; hp++) hpoly.push([opts[hp].x, opts[hp].y])
-        soft.poly(tint, restK * 0.07, bold * 2, hpoly)
-        if (LUMEN) strip(crisp, hotOf(tint), Math.max(0.5, fine), opts, oal.map(function (v) { return v * 0.6 * restK }))
+        soft.polyXY(tint, restK * 0.07, bold * 2, opX, opY, 0, 56)
+        if (LUMEN) {
+          for (var hp = 0; hp <= 56; hp++) ohot[hp] = oal[hp] * 0.6 * restK
+          stripXY(crisp, hotOf(tint), Math.max(0.5, fine), opX, opY, ohot, 57)
+        }
       }
       if (ok && ob === 0 && restK > 0.02) {
         // Graduations round the settled halo.
