@@ -6,6 +6,7 @@ import Quickshell.Wayland
 import qs.Commons
 import "FaceCardFrame.js" as FaceCard
 import "FacePaint.js" as FacePaint
+import "CardSchedule.js" as Schedule
 
 // The standalone face card. Service.qml reports face events for sudo, or for
 // a polkit prompt where the host does not draw the card in its own dialog
@@ -13,7 +14,8 @@ import "FacePaint.js" as FacePaint
 // its own surfaces in under the bar on the focused screen: it opens scanning
 // when the scan starts, plays the verdict, then fades. It takes no input and
 // never sits on the lock screen. CardFace.qml draws it and decides when each
-// state shows; journal events and `show` both reach it through show().
+// state shows; journal events, `show` and `replay` all reach it through
+// show().
 //
 // The card is drawn the way the fork's host draws it, at op level 3: the frame
 // is numbers from FaceCardFrame.js, painted by FacePaint.js on dark glass with
@@ -24,8 +26,10 @@ import "FacePaint.js" as FacePaint
 // shell's updateEntryInline like any plugin's own settings.
 //
 //   omarchy-shell face-card show scanning|recognized|notRecognized|cancel
+//   omarchy-shell face-card replay "scanning:0,recognized:800"
 //   omarchy-shell face-card demo
 //   omarchy-shell face-card close
+//   omarchy-shell face-card stats
 //   omarchy-shell face-card style hud|radar|holo
 //   omarchy-shell face-card styles
 Item {
@@ -74,8 +78,41 @@ Item {
   }
 
   function close() {
-    demoTimer.stop()
+    root.stopReplay()
     face.close()
+  }
+
+  // A replay feeds show() at times relative to the call, as journal events
+  // would arrive. A new replay replaces one still running.
+  property var replayEvents: []
+  property real replayStartedAt: 0
+
+  function startReplay(script) {
+    var events = Schedule.parseReplay(script)
+    if (!events || events.length === 0) return null
+    root.replayEvents = events.slice()
+    root.replayStartedAt = Date.now()
+    root.feedReplay()
+    return events
+  }
+
+  function feedReplay() {
+    var now = Date.now()
+    while (root.replayEvents.length && root.replayStartedAt + root.replayEvents[0].at <= now)
+      root.show(root.replayEvents.shift().state)
+    if (root.replayEvents.length === 0) return
+    replayTimer.interval = Math.max(1, Math.ceil(root.replayStartedAt + root.replayEvents[0].at - now))
+    replayTimer.restart()
+  }
+
+  function stopReplay() {
+    root.replayEvents = []
+    replayTimer.stop()
+  }
+
+  Timer {
+    id: replayTimer
+    onTriggered: root.feedReplay()
   }
 
   Connections {
@@ -89,12 +126,21 @@ Item {
   IpcHandler {
     target: "face-card"
     function show(state: string): string { root.show(state); return face.shownState || "closed" }
+    // Events at milliseconds from now, through the same path as the journal's:
+    // replay "scanning:0,recognized:800"
+    function replay(script: string): string {
+      var events = root.startReplay(script)
+      if (!events) return "could not read the replay: give state:ms pairs such as scanning:0,recognized:800 (states: "
+        + Schedule.STATES.join(" ") + ", 0 to 60000 ms)"
+      return "replaying " + events.length + " events over " + events[events.length - 1].at + " ms"
+    }
     function demo(): string {
-      root.show("scanning")
-      demoTimer.restart()
+      root.startReplay("scanning:0,recognized:2400")
       return "ok"
     }
     function close(): string { root.close(); return "ok" }
+    // The last finished showing's face-probe line.
+    function stats(): string { return JSON.stringify(face.lastProbe || {}) }
     function style(name: string): string {
       if (!root.setStyle(name)) return "could not set the style to " + name + " (styles: " + FaceCard.STYLES.join(" ") + ")"
       return name
@@ -116,12 +162,6 @@ Item {
         journal: !!(s && s.journal && s.journal.running)
       })
     }
-  }
-
-  Timer {
-    id: demoTimer
-    interval: 2400
-    onTriggered: root.show("recognized")
   }
 
   FileView {
@@ -174,6 +214,8 @@ Item {
       enterMs: Style.duration(180)
       exitMs: Style.duration(120)
       easeOut: Style.easeOut
+      surface: "sudo"
+      windowName: "markgroves-face-card"
     }
   }
 }

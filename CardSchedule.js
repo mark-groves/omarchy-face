@@ -8,6 +8,7 @@
 //   deadline(model, timing) -> ms | 0           when advance() next has work
 //   close(model) -> model                       leave now, dropping the queue
 //   finishClose(model) -> model                 the card's exit has played out
+//   parseReplay(text) -> [{ state, at }] | null "scanning:0,recognized:800"
 //
 // Times are wall-clock milliseconds (Date.now() in the card). timing is
 // { scanMs, noVerdictMs, beatMs: function (state) -> ms }: the art's boot,
@@ -36,6 +37,8 @@
 
 var STATES = ["scanning", "recognized", "notRecognized", "cancel"]
 var MAX_QUEUE = 8
+var MAX_REPLAY = 32
+var MAX_REPLAY_MS = 60000
 
 function initial() {
   return { phase: "closed", state: "", since: 0, scanSince: 0, queue: [] }
@@ -136,5 +139,22 @@ function finishClose(model) {
   return m
 }
 
+// "scanning:0,recognized:800" -> [{ state: "scanning", at: 0 }, ...], in time
+// order, or null if any part is not a known state at 0 to 60000 ms.
+function parseReplay(text) {
+  var parts = String(text || "").split(",")
+  if (parts.length > MAX_REPLAY) return null
+  var out = []
+  for (var i = 0; i < parts.length; i++) {
+    var m = /^\s*([A-Za-z]+)\s*:\s*(\d+(?:\.\d+)?)\s*$/.exec(parts[i])
+    if (!m || STATES.indexOf(m[1]) === -1) return null
+    var at = Number(m[2])
+    if (!(at >= 0 && at <= MAX_REPLAY_MS)) return null
+    out.push({ state: m[1], at: at, order: i })
+  }
+  out.sort(function (a, b) { return a.at - b.at || a.order - b.order })
+  return out.map(function (e) { return { state: e.state, at: e.at } })
+}
+
 if (typeof module !== "undefined")
-  module.exports = { STATES, MAX_QUEUE, initial, input, advance, deadline, close, finishClose }
+  module.exports = { STATES, MAX_QUEUE, initial, input, advance, deadline, close, finishClose, parseReplay }

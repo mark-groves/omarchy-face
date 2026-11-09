@@ -23,6 +23,12 @@ import "CardSchedule.js" as Schedule
 // Motion. The card fades and grows in once its first frame has painted, and
 // fades and shrinks out after the schedule's last beat, both on the render
 // thread (Animators), so a busy GUI thread cannot stall them.
+//
+// Probe lines, one JSON object each, for the face verification harness:
+//   face-probe-event {surface, state, t, rect, window}   every state change,
+//                    and "closing" and "hidden" as the card leaves
+//   face-probe {surface, shownAt, firstSwapAt, hiddenAt, swaps, ticks, paints,
+//               swapGapMs, frameMs, paintMs, quality, moved}   once a showing ends
 Item {
   id: root
 
@@ -36,6 +42,9 @@ Item {
   property int enterMs: 180
   property int exitMs: 120
   property var easeOut: [0.23, 1.0, 0.32, 1.0, 1.0, 1.0]
+  // Named in the probe lines.
+  property string surface: "sudo"
+  property string windowName: ""
 
   // The window must be mapped while this holds: from the first event of a
   // showing until its exit has played out.
@@ -43,6 +52,10 @@ Item {
   readonly property string phase: root.schedule.phase
   readonly property string shownState: root.schedule.phase === "closed" ? "" : root.schedule.state
   readonly property int queued: root.schedule.queue.length
+  // The last finished showing's face-probe object, for `face-card stats`.
+  property var lastProbe: null
+  property int lastGlowPaints: 0
+  signal probe(string kind, var data)
 
   implicitWidth: root.side
   implicitHeight: root.side
@@ -95,10 +108,15 @@ Item {
     root.schedule = next
     var now = Date.now()
     if (prev.phase === "closed" && next.phase !== "closed") root.beginShowing(now)
+    if (next.phase === "open" && (prev.phase !== "open" || prev.state !== next.state || prev.since !== next.since))
+      root.noteState(next.state, now)
     if (next.phase === "open" && prev.phase === "closing") root.enter()
     if (next.phase === "closed" && prev.phase !== "closed") root.endShowing(now)
     root.armDeadline()
-    if (next.phase === "closing" && prev.phase !== "closing") root.leave()
+    if (next.phase === "closing" && prev.phase !== "closing") {
+      root.noteState("closing", now)
+      root.leave()
+    }
   }
 
   // Frames drive the schedule while the card is up; this covers a window that
@@ -130,15 +148,26 @@ Item {
   // stay hidden, so a frame left from the last showing never shows.
   property bool contentReady: false
   property bool awaitingEntrance: false
+  property var stats: null
+  property var firstRect: null
+  property bool moved: false
+  property real lastSwapAt: 0
 
   function beginShowing(now) {
     root.showingStart = now
     root.contentReady = false
     root.awaitingEntrance = true
+    root.firstRect = null
+    root.moved = false
+    root.lastSwapAt = 0
     root.frameCalls = 0
     root.frameEma = 0
     root.levelSamples = 0
     root.paintEma = 0
+    root.stats = {
+      shownAt: now, firstSwapAt: 0, swaps: 0, ticks: 0, paints: 0, glowPaints: 0, gaps: [],
+      frameN: 0, frameSum: 0, frameMax: 0, paintN: 0, paintSum: 0, paintMax: 0
+    }
     entranceGrace.restart()
   }
 
@@ -146,6 +175,64 @@ Item {
     entranceGrace.stop()
     root.awaitingEntrance = false
     root.clockBase = root.clockAt(now)
+    root.noteState("hidden", now)
+    var s = root.stats
+    if (!s) return
+    var line = {
+      surface: root.surface,
+      shownAt: s.shownAt,
+      firstSwapAt: s.firstSwapAt,
+      hiddenAt: now,
+      swaps: s.swaps,
+      ticks: s.ticks,
+      paints: s.paints,
+      swapGapMs: { p50: root.percentile(s.gaps, 0.5), p95: root.percentile(s.gaps, 0.95), max: root.percentile(s.gaps, 1) },
+      frameMs: { mean: root.tenths(s.frameN ? s.frameSum / s.frameN : 0), max: s.frameMax },
+      paintMs: { mean: root.tenths(s.paintN ? s.paintSum / s.paintN : 0), max: s.paintMax },
+      quality: root.qualityLevel,
+      moved: root.moved
+    }
+    root.lastProbe = line
+    root.lastGlowPaints = s.glowPaints
+    console.log("face-probe " + JSON.stringify(line))
+    root.probe("face-probe", line)
+  }
+
+  function tenths(v) { return Math.round(v * 10) / 10 }
+
+  function percentile(list, p) {
+    if (!list.length) return 0
+    var sorted = list.slice().sort(function (a, b) { return a - b })
+    return sorted[Math.min(sorted.length - 1, Math.round(p * (sorted.length - 1)))]
+  }
+
+  // The card's place in its window, whatever its entrance scale is doing.
+  function cardRect() {
+    var p = root.mapToItem(null, 0, 0)
+    return { x: Math.round(p.x), y: Math.round(p.y), w: root.side, h: root.side }
+  }
+
+  function noteState(state, now) {
+    var rect = root.cardRect()
+    if (!root.firstRect) root.firstRect = rect
+    else if (rect.x !== root.firstRect.x || rect.y !== root.firstRect.y || rect.w !== root.firstRect.w || rect.h !== root.firstRect.h)
+      root.moved = true
+    var event = { surface: root.surface, state: state, t: now, rect: rect, window: root.windowName }
+    console.log("face-probe-event " + JSON.stringify(event))
+    root.probe("face-probe-event", event)
+  }
+
+  Connections {
+    target: root.Window.window
+    function onFrameSwapped() {
+      var s = root.stats
+      if (!s || root.schedule.phase === "closed") return
+      var now = Date.now()
+      s.swaps++
+      if (root.lastSwapAt > 0 && s.gaps.length < 2000) s.gaps.push(now - root.lastSwapAt)
+      root.lastSwapAt = now
+      if (s.firstSwapAt === 0 && root.contentReady) s.firstSwapAt = now
+    }
   }
 
   // --- motion ----------------------------------------------------------------
@@ -194,6 +281,7 @@ Item {
   FrameAnimation {
     running: root.schedule.phase !== "closed"
     onTriggered: {
+      if (root.stats) root.stats.ticks++
       root.advance()
       root.pump()
     }
@@ -223,6 +311,12 @@ Item {
   }
 
   function noteFrame(ms) {
+    var s = root.stats
+    if (s) {
+      s.frameN++
+      s.frameSum += ms
+      if (ms > s.frameMax) s.frameMax = ms
+    }
     // The first calls after a load pay the JS engine's warm-up.
     root.frameCalls++
     if (root.frameCalls > 2) root.frameEma = root.frameCalls === 3 ? ms : root.frameEma * 0.7 + ms * 0.3
@@ -233,7 +327,15 @@ Item {
     var dispatched = layer.inFlightSince
     layer.inFlightSince = 0
     if (layer !== root.targetLayer) return
-    if (dispatched > 0) root.notePaint(now - dispatched)
+    var s = root.stats
+    if (s && dispatched > 0) {
+      var ms = now - dispatched
+      s.paints++
+      s.paintN++
+      s.paintSum += ms
+      if (ms > s.paintMax) s.paintMax = ms
+      root.notePaint(ms)
+    }
     if (root.liveLayer !== layer) root.retire(root.liveLayer, layer)
     if (!root.contentReady && root.schedule.phase !== "closed") root.contentReady = true
     if (root.awaitingEntrance && root.schedule.phase === "open") root.enter()
@@ -386,7 +488,10 @@ Item {
       property real inFlightSince: 0
 
       onPaint: FacePaint.paintOps(getContext("2d"), root.ops, true, 0.5, root.roles, true)
-      onPainted: inFlightSince = 0
+      onPainted: {
+        inFlightSince = 0
+        if (root.stats) root.stats.glowPaints++
+      }
       onAvailableChanged: inFlightSince = 0
     }
     MultiEffect {

@@ -39,8 +39,10 @@ To see the card without a camera:
 ```bash
 omarchy-shell face-card demo                  # scan, then lock on
 omarchy-shell face-card show notRecognized    # a miss, as when the scan's start was not logged
+omarchy-shell face-card replay "scanning:0,notRecognized:4300,scanning:6000,recognized:6700"   # a timeout, then a retry that matches
 omarchy-shell face-card close
 omarchy-shell face-card status                # what the plugin sees: host polkit card, services with a card, journal
+omarchy-shell face-card stats                 # how the last showing ran: frames presented and painted, frame and paint times
 ```
 
 Update with `omarchy plugin update markgroves.polkit-face`, then `omarchy restart shell`: the plugin's service stays loaded, so new service code only runs after a restart. `omarchy update` does not update plugins. A saved style survives updates.
@@ -213,6 +215,19 @@ The child is started by absolute path with a fixed argument vector and a cleared
 The card opens scanning the moment a scan starts. A verdict that comes during the boot waits for it, so a fast match never cuts into a card still drawing itself on (the art's `scanMs()`); a later one plays as it arrives. A verdict with no scan on show, from a stack without the `pam_warn` line, opens straight into the result: the command has already run, so there is no boot to fake. Each result plays its whole beat, the frame module's `resultMs()` when it exports one, else its `holdMs()` and half a second, and then the card fades out. Events that arrive during a result queue behind it in order: a retry's scan start waits for the miss to finish, and the retry's verdict for the new boot. A scan with no verdict, such as a `sudo` cancelled with Ctrl+C, leaves 5 s after it started, just past Howdy's timeout. Every time is wall-clock time, so a slow frame never stretches the boot or a beat. The rules are pure functions in `CardSchedule.js`; `CardFace.qml` plays them.
 
 The card builds a frame only once the last one has painted, and both of its layers rasterise on Qt's canvas thread, so a slow raster drops frames instead of piling them up. When building and painting a frame takes longer than two refreshes, the sharp layer is rasterised smaller and scaled up and the bloom repaints less often; it steps back up once the larger layer would fit again, and a step never blanks the card. The card fades and grows in once its first frame has painted and fades out after its last beat, both on the render thread, so a busy shell cannot stall either. Its window is unmapped between showings.
+
+#### Checking the card
+
+`replay` takes `state:ms` pairs (states `scanning`, `recognized`, `notRecognized` and `cancel`, 0 to 60000 ms after the call) and feeds them to the card exactly as journal events would arrive, so any real sequence can be played without a camera. A new replay replaces one still running, and `close` stops it.
+
+The card logs these JSON lines to the shell's journal, for the face verification harness to read against a recording:
+
+```
+face-probe-event {"surface":"sudo","state":"scanning","t":<epoch ms>,"rect":{"x":..,"y":..,"w":220,"h":220},"window":"markgroves-face-card"}
+face-probe {"surface":"sudo","shownAt":..,"firstSwapAt":..,"hiddenAt":..,"swaps":..,"ticks":..,"paints":..,"swapGapMs":{"p50":..,"p95":..,"max":..},"frameMs":{"mean":..,"max":..},"paintMs":{"mean":..,"max":..},"quality":..,"moved":false}
+```
+
+`face-probe-event` comes with every state the card shows, then `closing` as it starts to leave and `hidden` once it has; `rect` is the card's place in its window. `face-probe` sums up a showing once it ends: when it began, the first presented frame with the card's content, the window's presented frames (`swaps`) and their gaps, the frame clock's ticks, the sharp frames painted, the cost of `frame()` and of a paint from dispatch to landing, the quality level it ended on, and whether the card ever moved. `face-card stats` prints the last one.
 
 ### The frame module
 

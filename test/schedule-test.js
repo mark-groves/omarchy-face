@@ -107,5 +107,14 @@ check('the deadline is the next time something changes', () => {
   assert.strictEqual(S.deadline(S.initial(), T), 0)
 })
 
+check('a replay script reads as timed events, and anything else is refused', () => {
+  assert.deepStrictEqual(S.parseReplay('scanning:0, recognized:800'),
+    [{ state: 'scanning', at: 0 }, { state: 'recognized', at: 800 }])
+  assert.deepStrictEqual(S.parseReplay('recognized:900,scanning:0'),
+    [{ state: 'scanning', at: 0 }, { state: 'recognized', at: 900 }])
+  for (const bad of ['', 'scanning', 'scanning:-1', 'scanning:x', 'unlock:0', 'scanning:0;recognized:9', 'scanning:60001'])
+    assert.strictEqual(S.parseReplay(bad), null, bad)
+})
+
 console.log(failures ? `\n${failures} schedule test(s) failed` : '\nall schedule tests passed')
 process.exit(failures ? 1 : 0)
