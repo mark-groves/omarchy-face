@@ -486,12 +486,21 @@ function pen(ctx, gain, halo) {
 
   // Keyed by the quantised steps packed into one integer: this runs for
   // every mesh edge, and a string key built from floats was most of a frame.
+  // Runs of strokes in one pen (ticks, glyph segments) repeat the same
+  // role, alpha and width, so the last answer is kept and handed back.
+  var lastRole = -1, lastA = 0, lastW = 0, lastG = null
   function group(role, a, w) {
-    var ia = Math.round(clamp01(a) * 32)
+    if (role === lastRole && a === lastA && w === lastW) return lastG
+    lastRole = role
+    lastA = a
+    lastW = w
+    lastG = null
+    var ia = Math.round((a < 0 ? 0 : (a > 1 ? 1 : a)) * 32)
     if (ia <= 0) return null
     var ig = 0
     if (LUMEN) {
-      ig = Math.round(clamp01(a * gk) * 16)
+      var ag = a * gk
+      ig = Math.round((ag < 0 ? 0 : (ag > 1 ? 1 : ag)) * 16)
       if (halo) {
         if (ig <= 0) return null
         ia = 0
@@ -504,6 +513,7 @@ function pen(ctx, gain, halo) {
       g = groups[key] = { role: role, a: ia / 32, w: iw / 4, g: ig / 16, cmds: [] }
       order.push(g)
     }
+    lastG = g
     return g
   }
 
@@ -547,6 +557,8 @@ function pen(ctx, gain, halo) {
       ctx.glow = 0
       order = []
       groups = {}
+      lastRole = -1
+      lastG = null
     }
   }
 }
@@ -608,33 +620,37 @@ var SEG_LINES = {
 // it dropped fade out behind it, the way a phosphor does, and `fx.step`
 // re-rolls the flicker on the new ones.
 function seg7(p, role, a, ghost, w, x, y, cw, ch, pitch, str, align, fx) {
-  var cells = []
-  for (var i = 0; i < str.length; i++) {
+  var cc = SEG_CELL, dp = SEG_DOT, pc = SEG_PREV
+  var n = 0, npc = 0, i
+  for (i = 0; i < str.length; i++) {
     var c = str.charAt(i)
-    if (c === "." && cells.length) cells[cells.length - 1].dp = true
-    else cells.push({ c: c, dp: false })
-  }
-  var prev = fx && fx.prev
-  var pc = []
-  if (prev) {
-    for (var pi = 0; pi < prev.length; pi++) {
-      var pch = prev.charAt(pi)
-      if (pch !== ".") pc.push(pch)
+    if (c === "." && n) dp[n - 1] = true
+    else {
+      cc[n] = c
+      dp[n] = false
+      n++
     }
   }
-  var x0 = align === 1 ? x - (cells.length * pitch - (pitch - cw)) : x
+  var prev = fx && fx.prev
+  if (prev) {
+    for (i = 0; i < prev.length; i++) {
+      var pch = prev.charAt(i)
+      if (pch !== ".") pc[npc++] = pch
+    }
+  }
+  var x0 = align === 1 ? x - (n * pitch - (pitch - cw)) : x
   var skew = 0.16 * cw
-  for (var ci = 0; ci < cells.length; ci++) {
+  for (var ci = 0; ci < n; ci++) {
     var cx0 = x0 + ci * pitch
-    var lit = SEG7[cells[ci].c] || ""
-    var was = prev && pc[ci] !== undefined && pc[ci] !== cells[ci].c ? (SEG7[pc[ci]] || "") : null
-    for (var s in SEG_LINES) {
-      var L = SEG_LINES[s]
-      var on = lit.indexOf(s) !== -1
+    var lit = SEG7_MASK[cc[ci]] || 0
+    var was = prev && ci < npc && pc[ci] !== cc[ci] ? (SEG7_MASK[pc[ci]] || 0) : -1
+    for (var k = 0; k < 7; k++) {
+      var L = SEG_LINE[k]
+      var on = (lit >> k) & 1
       var alpha = on ? a : ghost
-      if (was !== null) {
-        var wasOn = was.indexOf(s) !== -1
-        if (on && !wasOn) alpha = Math.min(1, a * 1.4) * (hash((fx.step || 0) * 7 + ci * 3 + s.charCodeAt(0)) < 0.22 ? 0.45 : 1)
+      if (was !== -1) {
+        var wasOn = (was >> k) & 1
+        if (on && !wasOn) alpha = Math.min(1, a * 1.4) * (hash((fx.step || 0) * 7 + ci * 3 + (97 + k)) < 0.22 ? 0.45 : 1)
         else if (!on && wasOn) alpha = ghost + a * 0.3
       }
       if (alpha <= 0) continue
@@ -642,12 +658,26 @@ function seg7(p, role, a, ghost, w, x, y, cw, ch, pitch, str, align, fx) {
         cx0 + L[0] * cw + (1 - L[1]) * skew, y + L[1] * ch,
         cx0 + L[2] * cw + (1 - L[3]) * skew, y + L[3] * ch)
     }
-    if (cells[ci].dp) {
+    if (dp[ci]) {
       var dx = cx0 + cw + (pitch - cw) * 0.5
       p.line(role, a, w * 1.4, dx, y + ch, dx + w * 0.3, y + ch)
     }
   }
 }
+
+// seg7's tables: the segments in a..g order (bit k is segment k, whose
+// character code is 97 + k), each glyph's lit segments as a mask, and
+// scratch for the cells of the string being drawn.
+var SEG_LINE = [SEG_LINES.a, SEG_LINES.b, SEG_LINES.c, SEG_LINES.d, SEG_LINES.e, SEG_LINES.f, SEG_LINES.g]
+var SEG7_MASK = {}
+;(function () {
+  for (var c in SEG7) {
+    var bits = 0
+    for (var k = 0; k < 7; k++) if (SEG7[c].indexOf("abcdefg".charAt(k)) !== -1) bits |= 1 << k
+    SEG7_MASK[c] = bits
+  }
+})()
+var SEG_CELL = [], SEG_DOT = [], SEG_PREV = []
 
 var HEX_DIGITS = "0123456789ABCDEF"
 
