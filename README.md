@@ -185,14 +185,18 @@ The manifest declares only the shell's own kinds, which the plugin marketplace l
 
 `Service.qml` runs one `journalctl --follow --output=json`, and only while `/etc/pam.d/sudo` or `/etc/pam.d/polkit-1` loads a face module. It asks only for lines sent by `sudo` or the polkit agent helper, trimmed to four fields, and hands each one to `FaceEvents.js`, which decides what counts:
 
-| Backend | Verdict |
+| Line | Card |
 | --- | --- |
-| Howdy | `pam_howdy(<service>:auth): Face verification succeeded`, `timed out` or `failed: …` |
-| facelock | `pam_facelock(<service>): <result>` |
+| `pam_warn(<service>:auth): function=[pam_sm_authenticate] …` | a scan has started: the card opens, scanning. The fork's face stacks log it just before the face module runs; the `setcred` lines `pam_warn` logs after an approval are ignored |
+| `pam_howdy(<service>:auth): Face verification succeeded` | recognized |
+| `pam_howdy(<service>:auth): Face verification timed out` or `failed: …` | not recognized |
+| `pam_howdy(<service>:auth): Child killed by signal … (24)` | not recognized: the compare overran its CPU budget (SIGXCPU) |
+| `pam_howdy(<service>:auth): Face verification skipped…`, `unavailable…` or `aborted`, or the compare killed by another signal | the scan ended with no verdict, and the card leaves |
+| `pam_facelock(<service>): <result>` | `success` is recognized; `no_match`, `failure`, `fail` and `failed` are not recognized |
 
-Neither backend logs the start of a scan, so the card appears once the verdict is in: it boots, holds the result until it has shown `scanMs()` of the boot, as the fork's host does, then plays it. Only `sudo`, `sudo-i` and `polkit-1` get a card, and `polkit-1` only where the host does not draw the card in its own dialog. The service knows that from the fork's `FaceChrome` singleton in `qs.Commons`, which stock Omarchy does not have.
+A stack without the `pam_warn` line still gets a card: it opens on the verdict. Only `sudo`, `sudo-i` and `polkit-1` get a card, and `polkit-1` only where the host does not draw the card in its own dialog. The service knows that from the fork's `FaceChrome` singleton in `qs.Commons`, which stock Omarchy does not have.
 
-Any program can log the text of a verdict, so a line counts only when the fields journald fills in itself say a real PAM caller sent it:
+Any program can log the same text, so a line counts only when the fields journald fills in itself say a real PAM caller sent it:
 
 | Field | Must be |
 | --- | --- |

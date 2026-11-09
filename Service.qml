@@ -5,13 +5,13 @@ import qs.Commons
 import "FaceEvents.js" as Events
 import "StreamLimits.js" as Limits
 
-// Feeds the standalone card (Card.qml) with face verdicts for sudo and polkit
-// prompts.
+// Feeds the standalone card (Card.qml) with face events for sudo and polkit
+// prompts: a scan starting, its verdict, or its end with no verdict.
 //
-// Display only. It follows the system journal for the face backend's verdicts
-// and tells the card through lastEvent/eventSerial. Nothing here runs with
-// privileges, writes a file or touches PAM; which lines count is decided in
-// FaceEvents.js.
+// Display only. It follows the system journal for the PAM stack's and the
+// face backend's lines and tells the card through lastEvent/eventSerial.
+// Nothing here runs with privileges, writes a file or touches PAM; which
+// lines count is decided in FaceEvents.js.
 //
 // The journal is followed only while /etc/pam.d/sudo or polkit-1 loads a face
 // module. On the Omarchy fork the host draws this plugin's FaceCardFrame.js
@@ -97,7 +97,7 @@ QtObject {
         if (fed.overflow) { root.journal.running = false; return }
         for (var i = 0; i < fed.lines.length; i++) {
           root.journalFailures = 0
-          var event = Events.verdict(Events.parseEntry(fed.lines[i]), { uid: root.uid, services: root.services })
+          var event = Events.cardEvent(Events.parseEntry(fed.lines[i]), { uid: root.uid, services: root.services })
           if (event) {
             root.lastEvent = event
             root.eventSerial++
