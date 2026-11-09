@@ -124,7 +124,7 @@ function hash(n) {
 }
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v) }
-function clamp01(v) { return clamp(v, 0, 1) }
+function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v) }
 function mix(a, b, k) { return a + (b - a) * k }
 
 // Normalised progress through the [a, b] millisecond window.
@@ -516,26 +516,23 @@ function pen(ctx, gain, halo) {
       var g = group(role, a, w)
       if (g) g.cmds.push([0, x + Math.cos(a0) * r, y + Math.sin(a0) * r], [3, x, y, r, a0, a1])
     },
+    // A group's commands go out as they are: the recorder takes the list
+    // itself rather than a copy rebuilt through moveTo and lineTo, so each
+    // command is allocated once.
     flush: function () {
       for (var i = 0; i < order.length; i++) {
         var g = order[i]
         var cmds = g.cmds
+        if (cmds.length <= PATH_CHUNK) {
+          ctx.path(g.role, g.a, g.w, g.g, cmds)
+          continue
+        }
         var at = 0
         while (at < cmds.length) {
           var end = Math.min(cmds.length, at + PATH_CHUNK)
           // Never split a subpath from its moveTo.
           while (end < cmds.length && cmds[end][0] !== 0) end++
-          ctx.strokeStyle = rgba(g.role, g.a)
-          ctx.lineWidth = g.w
-          ctx.glow = g.g
-          ctx.beginPath()
-          for (var c = at; c < end; c++) {
-            var k = cmds[c]
-            if (k[0] === 0) ctx.moveTo(k[1], k[2])
-            else if (k[0] === 1) ctx.lineTo(k[1], k[2])
-            else ctx.arc(k[1], k[2], k[3], k[4], k[5])
-          }
-          ctx.stroke()
+          ctx.path(g.role, g.a, g.w, g.g, cmds.slice(at, end))
           at = end
         }
       }
@@ -1408,9 +1405,7 @@ function paintHud(ctx, size, spec) {
   for (i = 0; i < dd.length; i++) {
     var d = dd[i]
     var hot = LUMEN && (d.crest > 0.45 || d.mid > 0.7 || (d.o.rim > 0.75 && d.o.b > 0.9) || d.o.spec > 0.6)
-    if (LUMEN) ctx.glow = bad ? 0 : (hudGlow(d))
-    ctx.fillStyle = rgba(hot ? hotRole : tint, d.a)
-    ctx.fillRect(d.x - d.s / 2, d.y - d.s / 2, d.s, d.s)
+    ctx.rect(hot ? hotRole : tint, d.a, d.x - d.s / 2, d.y - d.s / 2, d.s, d.s, LUMEN && !bad ? hudGlow(d) : 0)
   }
   ctx.glow = 0
 
@@ -4822,9 +4817,8 @@ function paintHolo(ctx, size, spec) {
         var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((CQ.f - 0.05) / 0.3) * cloudA * flickRaw * cvis
         if (pa3 <= 0.02) continue
         var CP = toPx(cxq, cyq)
-        if (LUMEN) ctx.glow = shimmer > 0.85 ? pa3 * 0.6 : 0
-        ctx.fillStyle = rgba(LUMEN && shimmer > 0.85 && !bad ? hotOf(tint) : tint, pa3)
-        ctx.fillRect(CP.x - dsz / 2, CP.y - dsz / 2, dsz, dsz)
+        ctx.rect(LUMEN && shimmer > 0.85 && !bad ? hotOf(tint) : tint, pa3, CP.x - dsz / 2, CP.y - dsz / 2, dsz, dsz,
+          LUMEN && shimmer > 0.85 ? pa3 * 0.6 : 0)
       }
       ctx.glow = 0
     }
@@ -5291,6 +5285,16 @@ function recorder() {
       if (cmds && cmds.length) lit([OP_PATH, role(st.stroke[0]), st.stroke[1], st.width, cmds])
       cmds = null
     },
+    // A whole stroked path in one call, for the pens: the same op as
+    // strokeStyle, lineWidth, glow, beginPath, the commands and stroke, with
+    // the command list taken as it is. Leaves the stroke state alone; the
+    // pens set the glow back to 0 when they are done.
+    path: function (r, a, w, glow, list) {
+      if (!list.length) return
+      a = clamp01(a)
+      if (LUMEN && glow > 0) ops.push([OP_PATH, role(r), a, w, list, clamp01(glow)])
+      else ops.push([OP_PATH, role(r), a, w, list])
+    },
     fillRect: function (x, y, w, h) {
       if (st.fill && st.fill.__grad) {
         var g = st.fill
@@ -5298,6 +5302,15 @@ function recorder() {
       } else {
         lit([OP_RECT, role(st.fill[0]), st.fill[1], x, y, w, h])
       }
+    },
+    // fillStyle = rgba(r, a) and fillRect in one call, without the colour
+    // token, and with `glow` in place of the glow state for this one op.
+    // Neither the fill nor the glow state changes, so a later fillRect must
+    // set its own fillStyle, as every one here does.
+    rect: function (r, a, x, y, w, h, glow) {
+      a = clamp01(a)
+      if (LUMEN && glow > 0) ops.push([OP_RECT, role(r), a, x, y, w, h, clamp01(glow)])
+      else ops.push([OP_RECT, role(r), a, x, y, w, h])
     },
     // Level 2 only: switch later ops between normal and additive light.
     blend: function (mode) { if (LUMEN) ops.push([OP_BLEND, mode ? 1 : 0]) },
