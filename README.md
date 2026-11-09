@@ -1,6 +1,6 @@
 # Face Scan Card
 
-An animated face-scan card for Omarchy. When a face backend checks your face for `sudo` or a polkit prompt, the card drops in under the bar, boots, and then locks on or misses. It ships three styles and follows the active Omarchy theme.
+An animated face-scan card for Omarchy. When a face backend checks your face for `sudo` or a polkit prompt, the card drops in under the bar while the scan runs, then locks on or misses. It ships three styles and follows the active Omarchy theme.
 
 ![The three styles, top to bottom HUD, radar and holo, each scanning, recognized and not recognized](preview.png)
 
@@ -38,7 +38,7 @@ To see the card without a camera:
 
 ```bash
 omarchy-shell face-card demo                  # scan, then lock on
-omarchy-shell face-card show notRecognized    # scan, then miss
+omarchy-shell face-card show notRecognized    # a miss, as when the scan's start was not logged
 omarchy-shell face-card close
 omarchy-shell face-card status                # what the plugin sees: host polkit card, services with a card, journal
 ```
@@ -208,6 +208,12 @@ The binary is the check that matters. A plain `logger` records no capabilities, 
 
 The child is started by absolute path with a fixed argument vector and a cleared environment, and everything it prints is bounded in `StreamLimits.js` before it is held. The service never runs anything privileged, writes no file and never touches PAM.
 
+#### What the card plays when
+
+The card opens scanning the moment a scan starts. A verdict that comes during the boot waits for it, so a fast match never cuts into a card still drawing itself on (the art's `scanMs()`); a later one plays as it arrives. A verdict with no scan on show, from a stack without the `pam_warn` line, opens straight into the result: the command has already run, so there is no boot to fake. Each result plays its whole beat, the frame module's `resultMs()` when it exports one, else its `holdMs()` and half a second, and then the card fades out. Events that arrive during a result queue behind it in order: a retry's scan start waits for the miss to finish, and the retry's verdict for the new boot. A scan with no verdict, such as a `sudo` cancelled with Ctrl+C, leaves 5 s after it started, just past Howdy's timeout. Every time is wall-clock time, so a slow frame never stretches the boot or a beat. The rules are pure functions in `CardSchedule.js`; `CardFace.qml` plays them.
+
+The card builds a frame only once the last one has painted, and both of its layers rasterise on Qt's canvas thread, so a slow raster drops frames instead of piling them up. When building and painting a frame takes longer than two refreshes, the sharp layer is rasterised smaller and scaled up and the bloom repaints less often; it steps back up once the larger layer would fit again, and a step never blanks the card. The card fades and grows in once its first frame has painted and fades out after its last beat, both on the render thread, so a busy shell cannot stall either. Its window is unmapped between showings.
+
 ### The frame module
 
 `FaceCardFrame.js` is a **JavaScript module, not a QML Item**. It exports two functions, and two optional ones:
@@ -289,10 +295,11 @@ Development needs `quickshell` for the live preview and node 22+ for the tests. 
 quickshell -p Preview.qml       # scripted scan / lock / rescan / miss, style chips, host level 1, 2 or 3, the 220 px card
 node test/frame-test.js         # boundary, visual and per-style tests
 node test/events-test.js        # the journal reader, against captured Howdy entries, forgeries and facelock lines
+node test/schedule-test.js      # what the standalone card plays when
 omarchy plugin validate .       # the manifest checks the shell runs at load time
 ```
 
-`Preview.qml` and `Card.qml` share one painter, `FacePaint.js`, which mirrors the fork's host painter and derives the colours from the theme. `Preview.qml` is the reference for how a host drives the frame module.
+`Preview.qml` and the standalone card share one painter, `FacePaint.js`, which mirrors the fork's host painter and derives the colours from the theme. `Preview.qml` is the reference for how a host drives the frame module.
 
 The tests are the thing to keep green. The boundary checks are why this plugin is allowed to draw on a credential surface at all. The dot-count check is the approved visual: a settled recognised HUD keeps its depth lattice, and a settled radar or holo face is strokes with no dots. The replay-budget checks, run on every 20 ms of every state on the 220 px card at op levels 2 and 3, keep the dense styles affordable on a software canvas. The level-1 purity check is what keeps the module safe on an older host: without `spec.host` it emits no blend op, no glow value and no role past the error colour.
 
