@@ -4276,6 +4276,29 @@ function holoStrip(p, role, pts, al, wd) {
   if (run && run.length > 1 && runA > 0) p.poly(role, runA, runW, run)
 }
 
+// holoStrip() over the first `n` points of flat coordinate lists.
+function holoStripXY(p, role, xs, ys, al, wd, n) {
+  var from = -1
+  var runA = -1
+  var runW = -1
+  for (var i = 1; i < n; i++) {
+    var a = al[i - 1]
+    a = Math.round((a < 0 ? 0 : (a > 1 ? 1 : a)) * 12) / 12
+    var w = wd[i - 1]
+    if (a !== runA || w !== runW) {
+      if (from >= 0 && runA > 0) p.polyXY(role, runA, runW, xs, ys, from, i - 1)
+      from = i - 1
+      runA = a
+      runW = w
+    }
+  }
+  if (from >= 0 && runA > 0) p.polyXY(role, runA, runW, xs, ys, from, n - 1)
+}
+
+// Scratch for the hologram's per-line loops. Nothing in it lives past the
+// line that writes it.
+var HOLO_BUF = { x: [], y: [], al: [], wd: [], hal: [], cx: [], cy: [], cal: [], rx: [], ry: [], ral: [] }
+
 function holoQuad(k) { return k < 0.5 ? 2 * k * k : 1 - 2 * (1 - k) * (1 - k) }
 
 // A closed ellipse as points, for the rings round the emitter and the cone.
@@ -4443,7 +4466,11 @@ function paintHolo(ctx, size, spec) {
   var chX = size * 0.013 * chroma * (bad ? 1 + (hash(Math.floor(rt / 40)) - 0.5) : 1)
   var chY = -size * 0.003 * chroma
 
-  function project(P) {
+  // A point of the head to disc units: {x, y, z, f}. projectInto leaves the
+  // same four numbers in pqx, pqy, pqz and pqf instead, for the loops that
+  // would otherwise allocate a result per vertex.
+  var pqx = 0, pqy = 0, pqz = 0, pqf = 1
+  function projectInto(P) {
     var xr = P[0] * cyw + P[2] * syw
     var zr = -P[0] * syw + P[2] * cyw
     var yr = P[1] * cp - zr * spp
@@ -4459,7 +4486,14 @@ function paintHolo(ctx, size, spec) {
       var vl = Math.hypot(xr, yr, HOLO_F - z2)
       f = (-nxr * xr - nyr * yr + nz2 * (HOLO_F - z2)) / vl
     }
-    return { x: xr * s * HOLO_K, y: yr * s * HOLO_K + HOLO_CY + roll, z: z2, f: f }
+    pqx = xr * s * HOLO_K
+    pqy = yr * s * HOLO_K + HOLO_CY + roll
+    pqz = z2
+    pqf = f
+  }
+  function project(P) {
+    projectInto(P)
+    return { x: pqx, y: pqy, z: pqz, f: pqf }
   }
   // Projected half width of the head at height y, and the offset of its
   // centre, for the rings and beams that wrap it.
@@ -4938,90 +4972,122 @@ function paintHolo(ctx, size, spec) {
   // The outline is traced from the slices' extreme points, so it carries the
   // real profile: the skull behind, the nose and chin when the head turns.
   var silL = [], silR = [], silHy = [], silOn = []
-  function silEdge(ps, i, sgn) {
-    var n = ps.length - 1
-    var a = ps[(i - 1 + n) % n], b = ps[i % n], c = ps[(i + 1) % n]
-    var den = a.x - 2 * b.x + c.x
-    var d = Math.abs(den) > 1e-6 ? clamp(0.5 * (a.x - c.x) / den, -0.5, 0.5) : 0
-    var x = b.x - 0.25 * (a.x - c.x) * d
-    if (sgn * x < sgn * b.x) x = b.x
-    return { x: x, y: b.y + (d > 0 ? (c.y - b.y) * d : (b.y - a.y) * d) }
+  // The extreme of a slice's outline at point i of its first n points,
+  // refined to sub-vertex precision.
+  function silEdge(xs, ys, n1, i, sgn) {
+    var n = n1 - 1
+    var ia = (i - 1 + n) % n, ib = i % n, ic = (i + 1) % n
+    var ax = xs[ia], bx = xs[ib], ccx = xs[ic]
+    var den = ax - 2 * bx + ccx
+    var d = Math.abs(den) > 1e-6 ? clamp(0.5 * (ax - ccx) / den, -0.5, 0.5) : 0
+    var x = bx - 0.25 * (ax - ccx) * d
+    if (sgn * x < sgn * bx) x = bx
+    return { x: x, y: ys[ib] + (d > 0 ? (ys[ic] - ys[ib]) * d : (ys[ib] - ys[ia]) * d) }
   }
+  // Points come in flat lists, and what depends only on a point's height
+  // (every point of a slice shares one) is worked out once per height.
+  var HB = HOLO_BUF
+  var hX = HB.x, hY = HB.y, hAl = HB.al, hWd = HB.wd, hHal = HB.hal
+  var fcX = HB.cx, fcY = HB.cy, fcA = HB.cal, frX = HB.rx, frY = HB.ry, frA = HB.ral
+  var glitchOn = bad || blocks.length > 0
+  var litK = baseA * flickRaw
+  var bandAt = Math.floor(t / 60) * 7
+  var buildAt = Math.floor(rt / 40) * 17
   for (var ln = 0; ln < mesh.length; ln++) {
     var L = mesh[ln]
+    var nL = L.length
     var isSlice = ln < nSl
     var rank = isSlice && ln % 4 === 0 ? 1.25 : 1
-    var pts = [], al = [], wd = [], hal = [], cpts = [], cal = [], rpts = [], ral = []
+    var nf = 0
     var fringeOn = !compact && chroma > 0.02 && isSlice && ln % 4 === 1
     var sliceOn = bad && isSlice ? (hash(slipStep * 3 + ln * 11) > 0.12 * failK ? 1 : 0.2) : 1
-    for (var sj = 0; sj < L.length; sj++) {
+    var bandH = -1, buildH = -1
+    var hyAt = NaN, slipH = 0, waveH = 0, visH = 1, edgeH = 0
+    for (var sj = 0; sj < nL; sj++) {
       var V = L[sj]
       var hy = V[1]
-      var Q = project(V)
-      var y1 = lensY(Q.y)
-      var dx = glitchX(Q.x, y1) + slipField(hy)
-      if (bandK > 0 && Math.abs(y1 - bandY) < 0.09) dx += (hash(Math.floor(t / 60) * 7 + ln) - 0.5) * 0.05 * bandK
-      var PX = toPx(Q.x + dx, y1)
-      pts.push(PX)
+      if (hy !== hyAt) {
+        hyAt = hy
+        slipH = slipField(hy)
+        waveH = 0.86 + 0.14 * Math.sin(hy * 41 - t / 480) * Math.sin(hy * 13 + t / 790)
+        visH = 1
+        edgeH = 0
+        if (buildY > -8) {
+          visH = clamp01((hy - buildY) / 0.12)
+          edgeH = Math.exp(-Math.pow((hy - buildY) / 0.05, 2))
+        }
+      }
+      projectInto(V)
+      var y1 = lensY(pqy)
+      var dx = (glitchOn ? glitchX(pqx, y1) : 0) + slipH
+      if (bandK > 0 && Math.abs(y1 - bandY) < 0.09) {
+        if (bandH < 0) bandH = hash(bandAt + ln)
+        dx += (bandH - 0.5) * 0.05 * bandK
+      }
+      var PXx = cx + (pqx + dx) * R, PXy = cy + y1 * R
+      hX[sj] = PXx
+      hY[sj] = PXy
       // The fringes are faint and offset by a pixel or two: every other
       // vertex is plenty for them.
-      var fringeV = fringeOn && (sj % 2 === 0 || sj === L.length - 1)
+      var fringeV = fringeOn && (sj % 2 === 0 || sj === nL - 1)
       if (fringeV) {
-        cpts.push({ x: PX.x + chX, y: PX.y + chY })
-        rpts.push({ x: PX.x - chX, y: PX.y - chY })
+        fcX[nf] = PXx + chX
+        fcY[nf] = PXy + chY
+        frX[nf] = PXx - chX
+        frY[nf] = PXy - chY
       }
       // Faces turned away show faintly through; faces towards the camera are
       // lit from the upper left, and a rim light runs where the surface turns
       // away, which is what draws the brow, nose and jaw. Nearer surface is
       // brighter and heavier than the far side.
-      var fr = clamp01((Q.f + 0.04) / 0.22)
-      var rim = Math.pow(1 - clamp01(Math.abs(Q.f)), 4) * fr
-      var zn = clamp01(Q.z + 0.5)
+      var fr = clamp01((pqf + 0.04) / 0.22)
+      var rim = Math.pow(1 - clamp01(Math.abs(pqf)), 4) * fr
+      var zn = clamp01(pqz + 0.5)
       var sol = solidAt(y1)
-      var vis = 1, edge = 0
-      if (buildY > -8) {
-        vis = clamp01((hy - buildY) / 0.12)
-        edge = Math.exp(-Math.pow((hy - buildY) / 0.05, 2))
-      }
+      var vis = visH, edge = edgeH
       var lit = fr * 0.34 * (0.2 + 1.1 * V[6]) * (0.75 + 0.5 * zn)
-      var a = baseA * flickRaw * (0.06 * (0.55 + 0.45 * zn) + lit + 0.42 * rim) * mix(0.8, 1.22, sol)
-      a *= 0.86 + 0.14 * Math.sin(hy * 41 - t / 480) * Math.sin(hy * 13 + t / 790)
-      if (vis < 0.999 && hash(Math.floor(rt / 40) * 17 + ln) > 0.45) a *= 0.5
+      var a = litK * (0.06 * (0.55 + 0.45 * zn) + lit + 0.42 * rim) * mix(0.8, 1.22, sol)
+      a *= waveH
+      if (vis < 0.999) {
+        if (buildH < 0) buildH = hash(buildAt + ln)
+        if (buildH > 0.45) a *= 0.5
+      }
       a = a * vis * sliceOn + edge * 0.55 * (0.3 + 0.7 * fr) * flickRaw
       a += bandBoost(y1) * boot * (0.25 + 0.75 * fr) * sliceOn * vis
-      al.push(a)
+      hAl[sj] = a
       var wk = fr > 0.7 && zn > 0.55 ? 1.3 : (fr < 0.25 ? 0.75 : 1)
-      wd.push(mw2 * wk * rank * (1 + 0.12 * sol))
-      var hv = bad ? 0 : baseA * flickRaw * 0.7 * rim * vis * (1 + 1.8 * passPulse + 0.5 * sol)
-      hal.push(hv > 0.08 ? hv : 0)
+      hWd[sj] = mw2 * wk * rank * (1 + 0.12 * sol)
+      var hv = bad ? 0 : litK * 0.7 * rim * vis * (1 + 1.8 * passPulse + 0.5 * sol)
+      hHal[sj] = hv > 0.08 ? hv : 0
       if (fringeV) {
-        cal.push(a * 0.45 * fr)
-        ral.push(a * 0.38 * fr)
+        fcA[nf] = a * 0.45 * fr
+        frA[nf] = a * 0.38 * fr
+        nf++
       }
     }
     if (isSlice) {
       var mnI = 0, mxI = 0
-      for (var se = 1; se < pts.length - 1; se++) {
-        if (pts[se].x < pts[mnI].x) mnI = se
-        if (pts[se].x > pts[mxI].x) mxI = se
+      for (var se = 1; se < nL - 1; se++) {
+        if (hX[se] < hX[mnI]) mnI = se
+        if (hX[se] > hX[mxI]) mxI = se
       }
-      silL.push(silEdge(pts, mnI, -1))
-      silR.push(silEdge(pts, mxI, 1))
+      silL.push(silEdge(hX, hY, nL, mnI, -1))
+      silR.push(silEdge(hX, hY, nL, mxI, 1))
       silHy.push(L[0][1])
       silOn.push(sliceOn)
     }
     // The offset copy rides every third slice; that is enough to read as
     // colour fringing at a fraction of the cost.
     if (fringeOn) {
-      strip(crisp, LUMEN ? altOf(tint) : ROLE_FG, fine, cpts, cal)
+      stripXY(crisp, LUMEN ? altOf(tint) : ROLE_FG, fine, fcX, fcY, fcA, nf)
       // The opposite fringe in a second colour, which is what makes the
       // split read as chromatic: the error colour on a level-1 host, the
       // theme's third hue on a level-2 one. A miss keeps only one fringe.
-      if (!bad) strip(crisp, LUMEN ? alt2Of(tint) : ROLE_ERROR, fine, rpts, ral)
+      if (!bad) stripXY(crisp, LUMEN ? alt2Of(tint) : ROLE_ERROR, fine, frX, frY, frA, nf)
     }
-    holoStrip(crisp, tint, pts, al, wd)
+    holoStripXY(crisp, tint, hX, hY, hAl, hWd, nL)
     // The rim light burns white-hot where the surface turns away.
-    if (LUMEN && !bad) strip(crisp, hotOf(tint), fine, pts, hal)
+    if (LUMEN && !bad) stripXY(crisp, hotOf(tint), fine, hX, hY, hHal, nL)
   }
   crisp.flush()
 
