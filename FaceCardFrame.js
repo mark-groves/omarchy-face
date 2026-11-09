@@ -3082,7 +3082,30 @@ function radarReturns() {
   }
   outline.push(rimChain)
 
-  CACHE.radar8 = { G: G, Z: Z, NX: NX, NY: NY, NZ: NZ, E: E, C: C, contours: contours, outline: outline }
+  // For the per-frame scan converter: the depth term of radarTone(), the
+  // covered cells in order, a scratch list of tones (0 where nothing
+  // returns), each cell's break-up hash for the gates round the hub, and
+  // for each cell of a gate the next covered cell on it (NB when none), so
+  // a gate can step over a stretch with nothing on it.
+  var ZK = [], COVI = [], TN = [], BRK = [], NEXT = []
+  for (k = 0; k < NR * NB; k++) {
+    ZK.push(0.12 * clamp01(Z[k] / 0.6))
+    if (C[k]) COVI.push(k)
+    TN.push(0)
+  }
+  for (k = 0; k < NR; k++) {
+    var nextAt = NB
+    for (j = NB - 1; j >= 0; j--) {
+      BRK[k * NB + j] = k < RADAR_BREAK && hash((j / 7 | 0) * 31 + k * 17) < 0.6 * (1 - k / RADAR_BREAK) ? 1 : 0
+      NEXT[k * NB + j] = nextAt
+      if (C[k * NB + j]) nextAt = j
+    }
+  }
+
+  CACHE.radar8 = {
+    G: G, Z: Z, NX: NX, NY: NY, NZ: NZ, E: E, C: C, contours: contours, outline: outline,
+    ZK: ZK, COVI: COVI, TN: TN, BRK: BRK, NEXT: NEXT
+  }
   return CACHE.radar8
 }
 
@@ -3440,9 +3463,19 @@ function paintRadar(ctx, size, spec) {
   var lgn = 1 / Math.hypot(lgx, lgy, RADAR_LZ)
   lgx *= lgn; lgy *= lgn
   var lgz = RADAR_LZ * lgn
-  var TN = new Array(NR * NB)
-  var cov = geo.C, NXa = geo.NX, NYa = geo.NY, NZa = geo.NZ, Ea = geo.E, Za = geo.Z
-  for (var tn = 0; tn < NR * NB; tn++) TN[tn] = cov[tn] ? radarTone(NXa[tn], NYa[tn], NZa[tn], Ea[tn], Za[tn], lgx, lgy, lgz) : 0
+  // radarTone() for every covered cell, written out, with the depth term
+  // that does not depend on the light taken from the table. Uncovered cells
+  // stay 0 in the scratch list.
+  var TN = geo.TN
+  var cov = geo.C, NXa = geo.NX, NYa = geo.NY, NZa = geo.NZ, Ea = geo.E, ZKa = geo.ZK, COVI = geo.COVI
+  for (var tq = 0; tq < COVI.length; tq++) {
+    var tn = COVI[tq]
+    var lam = NXa[tn] * lgx + NYa[tn] * lgy + NZa[tn] * lgz
+    var td = (lam - 0.42) / 0.55
+    td = td < 0 ? 0 : (td > 1 ? 1 : td)
+    var tv = 0.05 + 0.95 * td * td * (3 - 2 * td) + ZKa[tn] * td + Ea[tn]
+    TN[tn] = tv < 0 ? 0 : (tv > 1 ? 1 : tv)
+  }
 
   var pings = ok ? [[400, 800], [490, 880], [580, 960]] : (bad ? [[0, 340], [150, 500]] : [])
   var pingR = []
@@ -3512,6 +3545,9 @@ function paintRadar(ctx, size, spec) {
     var QL = 10, QH = 5
     var slipStep = Math.floor(rt / 70)
     var hatchGain = ok ? 0.8 : 0.86
+    var BRK = geo.BRK, NEXT = geo.NEXT
+    var heated = LUMEN && !bad
+    var pingT = []
     for (var gi = 0; gi < NR; gi += kStep) {
       // The inner gates are thinned: packed close to the centre they stack up
       // into the whorl of a fingerprint, so only every other one is read.
@@ -3532,22 +3568,45 @@ function paintRadar(ctx, size, spec) {
       // The gates round the hub are small circles, and in the middle of the
       // head they would read as a bullseye, so they are held back.
       var hubFade = 0.3 + 0.7 * smooth01(clamp01((rrg - 0.06) / 0.2))
+      // Near the centre the gates break into short arcs, a different run
+      // missing on each ring, so the relief reads as lit cells and not as a
+      // spiral. The hash behind it is per cell, from the table.
+      var broken = !compact && gi < RADAR_BREAK
+      // heatAt() along this gate: the ping and range-gate terms depend only
+      // on the gate, so they are worked out once here and added per cell in
+      // heatAt's order.
+      var nPing = pingR.length
+      for (var pe = 0; pe < nPing; pe++) {
+        var de = (rrg - pingR[pe]) / 0.06
+        pingT[pe] = Math.exp(-de * de) * 0.55
+      }
+      var dgg = (rrg - gateR) / 0.032
+      var gateT = Math.exp(-dgg * dgg) * gateA
       for (var cj = 0; cj <= NB; cj++) {
         var lvB = 0, lvH = 0
         if (cj < NB) {
           var gci = gbase + (cj + slip + NB * 2) % NB
-          var gg = TN[gci]
-          // Near the centre the gates break into short arcs, a different run
-          // missing on each ring, so the relief reads as lit cells and not as
-          // a spiral.
-          if (!compact && gi < RADAR_BREAK && hash(((cj + slip + NB * 2) % NB / 7 | 0) * 31 + gi * 17) < 0.6 * (1 - gi / RADAR_BREAK)) gg = 0
-          if (cov[gci] && gg > 0.02) {
-            // Halftone by range gate: a lit cell holds every gate, a shaded
-            // one only some of them, so the dark side of the head is a
-            // sparse engraving and the lit side a dense one.
-            var gs = clamp01((gg * 1.15 + 0.1 - thr) / 0.3) * (0.3 + 0.7 * gg) * 1.2 * hubFade
-            lvB = Math.round(clamp01(gs * lightAt(cj, rfr) * hatchGain) * QL)
-            if (LUMEN && !bad) lvH = Math.round(clamp01(gs * heatAt(cj, rrg, frn) - 0.1) * QH)
+          if (!cov[gci]) {
+            // Nothing returns here. With no run open, every cell up to the
+            // next covered one changes nothing either, so step over them.
+            if (slip === 0 && runL === 0 && hotL === 0) cj = NEXT[gci] - 1
+            if (runL === 0 && hotL === 0) continue
+          } else {
+            var gg = broken && BRK[gci] ? 0 : TN[gci]
+            if (gg > 0.02) {
+              // Halftone by range gate: a lit cell holds every gate, a shaded
+              // one only some of them, so the dark side of the head is a
+              // sparse engraving and the lit side a dense one.
+              var gs = clamp01((gg * 1.15 + 0.1 - thr) / 0.3) * (0.3 + 0.7 * gg) * 1.2 * hubFade
+              var lp = pJ[cj]
+              if (ok) lp = mix(mix(lp, 1, rfr), 0.64 + 0.36 * lp, settleK)
+              lvB = Math.round(clamp01(gs * lp * hatchGain) * QL)
+              if (heated) {
+                var hh = hJ[cj] + frn * 0.9
+                for (pe = 0; pe < nPing; pe++) hh += pingT[pe]
+                lvH = Math.round(clamp01(gs * (Math.min(1.2, hh) + gateT) - 0.1) * QH)
+              }
+            }
           }
         }
         if (lvB !== runL) {
