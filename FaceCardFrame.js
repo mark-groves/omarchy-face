@@ -1578,11 +1578,16 @@ function paintHud(ctx, size, spec) {
 
   // --- the analysis markers ------------------------------------------------------
   if (!compact) {
+    var markV = CACHE.hudMarkV || (CACHE.hudMarkV = [])
     faceMarkers(halo, crisp, {
-      proj: function (X, Y, Z) {
-        var V = headFaceVertex(X, Y, 0.02)
-        var mo2 = hudVertex(F, { x: V[0], y: V[1], z: V[2], nx: V[3], ny: V[4], nz: V[5], ra: 0.4 })
-        return { x: mo2.x, y: mo2.y, v: mo2.vis, f: mo2.nz }
+      proj: function (X, Y, Z, key) {
+        var mv = markV[key]
+        if (!mv) {
+          var V = headFaceVertex(X, Y, 0.02)
+          mv = markV[key] = { x: V[0], y: V[1], z: V[2], nx: V[3], ny: V[4], nz: V[5], ra: 0.4 }
+        }
+        hudVertexInto(F, mv, VO, -1)
+        return { x: VO.x, y: VO.y, v: VO.vis, f: VO.nz }
       },
       pass: function (X, Y, q) { return ((plane.y - Y) * plane.dir) * boot - (1 - boot) },
       tint: tint, U: RF, gain: boot, labels: size >= 150, clock: t, cx: cx,
@@ -2432,13 +2437,52 @@ function edgeTicks(p, role, a, w, x, y, br, tk) {
 // middle of each edge, and a two-arc ring that spins while it tracks and
 // winds down onto a lock. Five carry a leader to a confidence label. A miss
 // jitters them, scatters the brackets and fades the lot in the error colour.
+//
+// Every point the markers project is fixed in face space: the marks, and 13
+// samples along each measurement line. markGeom() works them out once, and
+// `o.proj` gets a fourth argument, a small integer naming the point, so a
+// style can keep its own per-point work (the head vertex under it) the same
+// way.
+var MARK_STEPS = 12
+
+function markGeom() {
+  if (CACHE.marks) return CACHE.marks
+  var mz = [], lines = []
+  var i, j
+  for (i = 0; i < MARKS.length; i++) mz.push(holoZAt(MARKS[i][0], MARKS[i][1]) + 0.02)
+  for (i = 0; i < MARK_LINES.length; i++) {
+    var A = MARKS[MARK_LINES[i][0]], B = MARKS[MARK_LINES[i][1]]
+    var L = { x: [], y: [], z: [] }
+    for (j = 0; j <= MARK_STEPS; j++) {
+      var u = j / MARK_STEPS
+      var X = mix(A[0], B[0], u), Y = mix(A[1], B[1], u)
+      L.x.push(X)
+      L.y.push(Y)
+      L.z.push(holoZAt(X, Y) + 0.02)
+    }
+    lines.push(L)
+  }
+  CACHE.marks = { mz: mz, lines: lines }
+  return CACHE.marks
+}
+
+// The key markGeom's point i on measurement line `line` goes by.
+function markLineKey(line, i) { return MARKS.length + line * (MARK_STEPS + 1) + i }
+
+// The head vertex under a marker point, `lift` out along its normal, from a
+// per-lift table kept in CACHE.
+function markFaceVertex(tab, X, Y, lift, key) {
+  return tab[key] || (tab[key] = headFaceVertex(X, Y, lift))
+}
+
 function faceMarkers(halo, crisp, o) {
   var mode = FEAT.mode
   var U = o.U
+  var MG = markGeom()
   var st = [], pt = [], i, j
   for (i = 0; i < MARKS.length; i++) {
     var m = MARKS[i]
-    var q = o.proj(m[0], m[1], holoZAt(m[0], m[1]) + 0.02)
+    var q = o.proj(m[0], m[1], MG.mz[i], i)
     if (o.post && q) q = o.post(q)
     var d = mode === "scan" ? o.pass(m[0], m[1], q) : 0
     var s = markState(m, i, d)
@@ -2475,13 +2519,13 @@ function faceMarkers(halo, crisp, o) {
     }
     if (prog <= 0.02 || la <= 0.02) continue
     var role = mode === "fail" ? ROLE_ERROR : o.tint
-    var N = 12, run = []
+    var N = MARK_STEPS, run = []
     var broke = mode === "fail" ? Math.max(sa.fail, sb.fail) : 0
+    var ML = MG.lines[i]
     for (j = 0; j <= N; j++) {
       var u = j / N
       if (u > prog) break
-      var X = mix(A[0], B[0], u), Y = mix(A[1], B[1], u)
-      var qq = o.proj(X, Y, holoZAt(X, Y) + 0.02)
+      var qq = o.proj(ML.x[j], ML.y[j], ML.z[j], markLineKey(i, j))
       if (o.post && qq) qq = o.post(qq)
       // The line stays on its endpoints as they drift.
       if (broke > 0) {
@@ -3679,8 +3723,13 @@ function paintRadar(ctx, size, spec) {
       if (LUMEN && ok && seat > 0.05) bracketBox(crisp, hotOf(tint), 0.9 * seat, fine * 1.2, cx, cy, boxH, R * 0.24)
     }
     // Analysis markers: seated by the arm's pass over each region.
+    var markRX = CACHE.radarMarkX || (CACHE.radarMarkX = [])
     faceMarkers(halo, crisp, {
-      proj: function (X, Y, Z) { return { x: cx + radarX(X, Y) * R, y: cy + radarY(Y) * R, v: 1 } },
+      proj: function (X, Y, Z, key) {
+        var sx = markRX[key]
+        if (sx === undefined) sx = markRX[key] = radarX(X, Y)
+        return { x: cx + sx * R, y: cy + radarY(Y) * R, v: 1 }
+      },
       pass: function (X, Y, q) {
         var ag2 = ageOf(Math.atan2(radarY(Y), radarX(X, Y)))
         return visible(ag2.f) * boot > 0.5 ? ag2.f * 1.4 : -0.1
@@ -5158,9 +5207,10 @@ function paintHolo(ctx, size, spec) {
 
   // --- the analysis markers, on the head's own surface ---------------------------------
   if (!compact) {
+    var markFV = CACHE.holoMarkV || (CACHE.holoMarkV = [])
     faceMarkers(halo, crisp, {
-      proj: function (X, Y, Z) {
-        var V = headFaceVertex(X, Y, 0.03)
+      proj: function (X, Y, Z, key) {
+        var V = markFaceVertex(markFV, X, Y, 0.03, key)
         var Q = project(V)
         var PX = toPx(Q.x, lensY(Q.y))
         return { x: PX.x, y: PX.y, v: clamp01((Q.f - 0.04) / 0.26), f: Q.f }
