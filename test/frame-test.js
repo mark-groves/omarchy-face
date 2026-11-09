@@ -61,7 +61,7 @@ check('reads no ambient state', () => {
 
 const body = source.replace(/^\.pragma library\s*$/m, '')
 const exported = {}
-new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLES = STYLES; __out.easeOutBack = easeOutBack;')(exported)
+new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLES = STYLES; __out.easeOutBack = IMPL.easeOutBack;')(exported)
 const { frame, holdMs, easeOutBack } = exported
 
 check('a lock ease starts at rest and ends seated', () => {

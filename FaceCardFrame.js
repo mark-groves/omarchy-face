@@ -43,6 +43,14 @@
 //
 // Hints, glyphs, card geometry and the failure shake stay host-owned.
 
+// The module runs inside one function, and the API at the end of the file
+// hands calls to it. A `.pragma library` import looks every top-level name
+// up on the library's global object each time it is used, which cost about a
+// third of a frame; inside a function the names are closure slots, so the
+// import and the host's `new Function` load run the same code at the same
+// speed. The body is left unindented so it reads as the file it is.
+var IMPL = (function () {
+
 // --- the op vocabulary the host replays ------------------------------------
 
 var ROLE_ACCENT = 0
@@ -5346,3 +5354,17 @@ function frame(size, spec) {
   paintInto(rec, size, spec)
   return rec.ops
 }
+
+return {
+  frame: frame, holdMs: holdMs, scanMs: scanMs,
+  STYLES: STYLES, DEFAULT_STYLE: DEFAULT_STYLE, easeOutBack: easeOutBack
+}
+})()
+
+// --- the API ------------------------------------------------------------------
+
+function frame(size, spec) { return IMPL.frame(size, spec) }
+function holdMs(state) { return IMPL.holdMs(state) }
+function scanMs() { return IMPL.scanMs() }
+var STYLES = IMPL.STYLES
+var DEFAULT_STYLE = IMPL.DEFAULT_STYLE
