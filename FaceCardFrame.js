@@ -4372,6 +4372,15 @@ function holoPoints() {
   return pts
 }
 
+// holoPoints()' points alone, in the same order, for the projector.
+function holoPointList() {
+  if (CACHE.headPL) return CACHE.headPL
+  var pts = holoPoints(), out = []
+  for (var i = 0; i < pts.length; i++) out.push(pts[i].P)
+  CACHE.headPL = out
+  return out
+}
+
 // Iso-depth contours of the relief, by marching squares. Static geometry in
 // face space; the pose is applied per frame. `skipSockets` drops the closed loops
 // the eye sockets make (concentric loops there read as eyes); `skipNose`
@@ -4510,7 +4519,7 @@ function holoStripXY(p, role, xs, ys, al, wd, n) {
 
 // Scratch for the hologram's per-line loops. Nothing in it lives past the
 // line that writes it.
-var HOLO_BUF = { x: [], y: [], al: [], wd: [], hal: [], cx: [], cy: [], cal: [], rx: [], ry: [], ral: [] }
+var HOLO_BUF = { x: [], y: [], al: [], wd: [], hal: [], cx: [], cy: [], cal: [], rx: [], ry: [], ral: [], qx: [], qy: [], qz: [], qf: [] }
 var HOLO_PLANE = {
   ex: [], ey: [], eal: [], ewd: [], rx: [], ry: [], rf: [], ral: [], rwd: [], rhot: [],
   fax: [], fay: [], fbx: [], fby: [], fl1: [], fl2: [], tx: [], ty: [], tf: [], tal: []
@@ -4723,6 +4732,29 @@ function paintHolo(ctx, size, spec) {
     projectInto(P)
     return { x: pqx, y: pqy, z: pqz, f: pqf }
   }
+  // projectInto() over the first n points of a list of points with normals,
+  // into flat lists: one call for a whole slice or the whole cloud.
+  function projectAll(V, n, X, Y, Z, Fc) {
+    var ff = HOLO_F
+    for (var i = 0; i < n; i++) {
+      var P = V[i]
+      var p0 = P[0], p1 = P[1], p2 = P[2]
+      var xr = p0 * cyw + p2 * syw
+      var zr = -p0 * syw + p2 * cyw
+      var yr = p1 * cp - zr * spp
+      var z2 = p1 * spp + zr * cp
+      var s = ff / (ff - z2)
+      var nxr = P[3] * cyw + P[5] * syw
+      var nzr = -P[3] * syw + P[5] * cyw
+      var nyr = P[4] * cp - nzr * spp
+      var nz2 = P[4] * spp + nzr * cp
+      var vl = Math.hypot(xr, yr, ff - z2)
+      Fc[i] = (-nxr * xr - nyr * yr + nz2 * (ff - z2)) / vl
+      X[i] = xr * s * HOLO_K
+      Y[i] = yr * s * HOLO_K + HOLO_CY + roll
+      Z[i] = z2
+    }
+  }
   // projectInto([X, Y, Z]) without the array: a point with no normal.
   function projectXYZ(X, Y, Z) {
     var xr = X * cyw + Z * syw
@@ -4766,22 +4798,35 @@ function paintHolo(ctx, size, spec) {
     if (band2K > 0 && Math.abs(d2) < 0.1) out -= 0.012 * band2K * Math.sin(Math.PI * d2 / 0.1)
     return y + out
   }
-  function tri(d, w) { var k = 1 - Math.abs(d) / w; return k > 0 ? k * k : 0 }
+  // A triangle of width w round 0, squared: 1 at d = 0, 0 from |d| = w.
+  // bandBoost() runs for every vertex of the head, so it writes it out.
   function bandBoost(y) {
-    var a = 0
+    var a = 0, d, k
     if (bandK > 0) {
-      a += 0.5 * tri(y - bandY, 0.1) * bandK
+      d = y - bandY
+      k = 1 - (d < 0 ? -d : d) / 0.1
+      a += 0.5 * (k > 0 ? k * k : 0) * bandK
       // The wake: the scan leaves the head lit above it, fading out.
       var wk = bandY - y
       if (wk > 0 && wk < 1.1) a += 0.13 * Math.exp(-wk / 0.32) * bandK
     }
-    if (band2K > 0) a += 0.3 * tri(y - band2Y, 0.05) * band2K
-    if (pulseOn) a += 0.8 * tri(y - pulseY, 0.16) * bump(rt, 0, 450)
-    if (ringOn) a += 0.6 * tri(y - ringY, 0.12) * bump(rt, 340, 960)
+    if (band2K > 0) {
+      d = y - band2Y
+      k = 1 - (d < 0 ? -d : d) / 0.05
+      a += 0.3 * (k > 0 ? k * k : 0) * band2K
+    }
+    if (pulseOn) {
+      d = y - pulseY
+      k = 1 - (d < 0 ? -d : d) / 0.16
+      a += 0.8 * (k > 0 ? k * k : 0) * bump(rt, 0, 450)
+    }
+    if (ringOn) {
+      d = y - ringY
+      k = 1 - (d < 0 ? -d : d) / 0.12
+      a += 0.6 * (k > 0 ? k * k : 0) * bump(rt, 340, 960)
+    }
     return a
   }
-  // 0 before the solidify ring has passed, 1 behind it.
-  function solidAt(y) { return ok ? clamp01((solidFront - y) / 0.08) : 0 }
 
   var halo = haloPen(ctx)
   var soft = pen(ctx, GLASS ? 3.2 : 1.6, true)
@@ -5232,9 +5277,13 @@ function paintHolo(ctx, size, spec) {
   }
   // Points come in flat lists, and what depends only on a point's height
   // (every point of a slice shares one) is worked out once per height.
+  // The loop over every vertex of the head is the hottest one in the style,
+  // so clamp01() and mix() are written out in it; the arithmetic is theirs,
+  // in order.
   var HB = HOLO_BUF
   var hX = HB.x, hY = HB.y, hAl = HB.al, hWd = HB.wd, hHal = HB.hal
   var fcX = HB.cx, fcY = HB.cy, fcA = HB.cal, frX = HB.rx, frY = HB.ry, frA = HB.ral
+  var qX = HB.qx, qY = HB.qy, qZ = HB.qz, qF = HB.qf
   var litK = baseA * flickRaw
   var bandAt = Math.floor(t / 60) * 7
   var buildAt = Math.floor(rt / 40) * 17
@@ -5248,6 +5297,7 @@ function paintHolo(ctx, size, spec) {
     var sliceOn = bad && isSlice ? (hash(slipStep * 3 + ln * 11) > 0.12 * failK ? 1 : 0.2) : 1
     var bandH = -1, buildH = -1
     var hyAt = NaN, slipH = 0, waveH = 0, visH = 1, edgeH = 0
+    projectAll(L, nL, qX, qY, qZ, qF)
     for (var sj = 0; sj < nL; sj++) {
       var V = L[sj]
       var hy = V[1]
@@ -5262,7 +5312,10 @@ function paintHolo(ctx, size, spec) {
           edgeH = Math.exp(-Math.pow((hy - buildY) / 0.05, 2))
         }
       }
-      projectInto(V)
+      pqx = qX[sj]
+      pqy = qY[sj]
+      pqz = qZ[sj]
+      pqf = qF[sj]
       var y1 = lensY(pqy)
       var dx = (glitchOn ? glitchX(pqx, y1) : 0) + slipH
       if (bandK > 0 && Math.abs(y1 - bandY) < 0.09) {
@@ -5285,13 +5338,22 @@ function paintHolo(ctx, size, spec) {
       // lit from the upper left, and a rim light runs where the surface turns
       // away, which is what draws the brow, nose and jaw. Nearer surface is
       // brighter and heavier than the far side.
-      var fr = clamp01((pqf + 0.04) / 0.22)
-      var rim = Math.pow(1 - clamp01(Math.abs(pqf)), 4) * fr
-      var zn = clamp01(pqz + 0.5)
-      var sol = solidAt(y1)
+      var fr = (pqf + 0.04) / 0.22
+      fr = fr < 0 ? 0 : (fr > 1 ? 1 : fr)
+      var af = Math.abs(pqf)
+      var rim = Math.pow(1 - (af < 0 ? 0 : (af > 1 ? 1 : af)), 4) * fr
+      var zn = pqz + 0.5
+      zn = zn < 0 ? 0 : (zn > 1 ? 1 : zn)
+      // How solid the head is here: 0 before a lock's solidify ring has
+      // passed, 1 behind it.
+      var sol = 0
+      if (ok) {
+        sol = (solidFront - y1) / 0.08
+        sol = sol < 0 ? 0 : (sol > 1 ? 1 : sol)
+      }
       var vis = visH, edge = edgeH
       var lit = fr * 0.34 * (0.2 + 1.1 * V[6]) * (0.75 + 0.5 * zn)
-      var a = litK * (0.06 * (0.55 + 0.45 * zn) + lit + 0.42 * rim) * mix(0.8, 1.22, sol)
+      var a = litK * (0.06 * (0.55 + 0.45 * zn) + lit + 0.42 * rim) * (0.8 + (1.22 - 0.8) * sol)
       a *= waveH
       if (vis < 0.999) {
         if (buildH < 0) buildH = hash(buildAt + ln)
@@ -5355,17 +5417,23 @@ function paintHolo(ctx, size, spec) {
     var cloudA = ok ? (1 + bump(rt, 150, 400)) * (1 - easeInOutCubic(seg(rt, 450, 800))) : (bad ? 0.6 * (0.4 + 0.6 * power) : 1)
     if (cloudA > 0.01) {
       var dsz = Math.max(1, size * 0.006)
+      var cloudP = holoPointList()
+      projectAll(cloudP, cloudP.length, HB.qx, HB.qy, HB.qz, HB.qf)
       for (var cpi = 0; cpi < cloud.length; cpi++) {
         var cpt = cloud[cpi]
-        projectInto(cpt.P)
+        pqf = HB.qf[cpi]
         if (pqf < 0.05) continue
+        pqx = HB.qx[cpi]
+        pqy = HB.qy[cpi]
+        pqz = HB.qz[cpi]
         var chy = cpt.P[1]
         var cvis = buildY > -8 ? clamp01((chy - buildY) / 0.12) : 1
         if (cvis <= 0.02) continue
         var cyq = lensY(pqy)
         var cxq = pqx + (glitchOn ? glitchX(pqx, cyq) : 0) + slipField(chy)
         var shimmer = 0.5 + 0.5 * Math.sin(t / 180 + cpt.j * 40)
-        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * clamp01((pqf - 0.05) / 0.3) * cloudA * flickRaw * cvis
+        var cf = (pqf - 0.05) / 0.3
+        var pa3 = (0.3 + 0.35 * shimmer + bandBoost(cyq)) * (0.3 + 0.9 * cpt.P[6]) * (cf < 0 ? 0 : (cf > 1 ? 1 : cf)) * cloudA * flickRaw * cvis
         if (pa3 <= 0.02) continue
         var cpx = cx + cxq * R, cpy = cy + cyq * R
         ctx.rect(LUMEN && shimmer > 0.85 && !bad ? hotOf(tint) : tint, pa3, cpx - dsz / 2, cpy - dsz / 2, dsz, dsz,
