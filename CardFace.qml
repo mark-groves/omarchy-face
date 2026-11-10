@@ -167,6 +167,8 @@ Item {
   property real lastSwapAt: 0
 
   function beginShowing(now) {
+    if (root.nextQuality >= 0 && root.nextQuality !== root.qualityLevel) root.setQuality(root.nextQuality)
+    root.nextQuality = -1
     root.showingStart = now
     root.contentReady = false
     root.glowReady = false
@@ -416,13 +418,20 @@ Item {
     var n = root.levelSamples - 2
     if (n < 1) return
     root.paintEma = n === 1 ? ms : root.paintEma * 0.7 + ms * 0.3
+    // The call is made once a showing and applied at the next one: a level
+    // change in the middle of a scan would show as the art going soft or
+    // sharp under the viewer.
     var level = root.qualityLevel
+    if (root.nextQuality >= 0) return
     if (n >= 6 && level < root.qualityLevels.length - 1 && root.frameEma + root.paintEma > root.frameBudgetMs)
-      root.setQuality(level + 1)
+      root.nextQuality = level + 1
     else if (n >= 30 && level > 0
         && root.frameEma + root.paintEma * root.rasterGrowth(level, level - 1) < root.frameBudgetMs * 0.8)
-      root.setQuality(level - 1)
+      root.nextQuality = level - 1
   }
+
+  // The level the next showing starts at, -1 for the same as this one.
+  property int nextQuality: -1
 
   function setQuality(level) {
     console.log("face-card quality level", level, "frame", Math.round(root.frameEma), "ms paint", Math.round(root.paintEma), "ms")
