@@ -61,8 +61,8 @@ check('reads no ambient state', () => {
 
 const body = source.replace(/^\.pragma library\s*$/m, '')
 const exported = {}
-new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.STYLES = STYLES; __out.easeOutBack = IMPL.easeOutBack;')(exported)
-const { frame, holdMs, easeOutBack } = exported
+new Function('__out', body + '\n__out.frame = frame; __out.holdMs = holdMs; __out.resultMs = resultMs; __out.STYLES = STYLES; __out.easeOutBack = IMPL.easeOutBack;')(exported)
+const { frame, holdMs, resultMs, easeOutBack } = exported
 
 check('a lock ease starts at rest and ends seated', () => {
   assert.strictEqual(easeOutBack(0), 0)
@@ -528,6 +528,47 @@ check('the radar jam burst plays inside the host hold of a miss', () => {
   for (const clock of [0, 5000, 9200, 20000]) {
     assert.ok(cmds(1510, clock) > cmds(1400, clock), 'no jam burst before the hold ends at clock ' + clock)
   }
+})
+
+// --- the brief result ----------------------------------------------------------
+
+// Two frames with the same ops, numbers equal to within float noise.
+function sameFrame(a, b, where) {
+  assert.strictEqual(a.length, b.length, where + ': ' + a.length + ' ops against ' + b.length)
+  for (let i = 0; i < a.length; i++) {
+    const x = JSON.stringify(a[i], (k, v) => typeof v === 'number' ? Math.round(v * 1e6) / 1e6 : v)
+    const y = JSON.stringify(b[i], (k, v) => typeof v === 'number' ? Math.round(v * 1e6) / 1e6 : v)
+    assert.strictEqual(x, y, where + ': op ' + i + ' differs')
+  }
+}
+
+// A host that sends spec.resultMs gets the cinematic result's keyframes in
+// that many milliseconds: the brief frame f of the way through its beat is
+// the cinematic frame f of the way through its hold. A miss's attempt keeps
+// the live clock in both, so its failure starts that much earlier on the
+// clock in the brief one: the entry clock is shifted by the time the shorter
+// attempt saves (the attempt is the first quarter of a miss).
+for (const style of exported.STYLES) {
+  check(style + ': a brief result plays the cinematic keyframes in resultMs()', () => {
+    for (const state of ['recognized', 'notRecognized']) {
+      const B = resultMs(state), H = holdMs(state)
+      assert.ok(B >= 400 && B < H, state + ' beat ' + B + ' against a hold of ' + H)
+      const shift = state === 'notRecognized' ? (H - B) / 4 : 0
+      for (const f of state === 'notRecognized' ? [0.3, 0.6, 0.85, 1] : [0.1, 0.35, 0.6, 0.85, 1]) {
+        const brief = frame(CARD, { state: state, elapsed: f * B, clock: 5000 + f * B, style: style, host: 3, resultMs: B })
+        const cinematic = frame(CARD, { state: state, elapsed: f * H, clock: 5000 - shift + f * H, style: style, host: 3 })
+        sameFrame(brief, cinematic, state + ' at ' + f)
+      }
+    }
+  })
+}
+
+check('a brief miss attempts the match on the live clock before it fails', () => {
+  const B = resultMs('notRecognized')
+  const brief = (e) => frame(CARD, { state: 'notRecognized', elapsed: e, clock: 5000 + e, style: 'hud', host: 3, resultMs: B })
+  const scan = (e) => frame(CARD, { state: 'scanning', elapsed: 9000, clock: 5000 + e, style: 'hud', host: 3 })
+  sameFrame(brief(B * 0.1), scan(B * 0.1), 'the attempt')
+  assert.ok(paintOps(brief(B)).some(o => o[1] === 2), 'no error colour at the end of the beat')
 })
 
 console.log(failures === 0 ? '\nall frame tests passed' : '\n' + failures + ' frame test(s) failed')

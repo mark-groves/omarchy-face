@@ -93,6 +93,7 @@ Every style covers all three states with the same timing contract, the same corn
 - The scanner's analysis is shown with technical markers, not pictures: landmark points, crosshair brackets, measurement ticks, distance lines and confidence readouts at fifteen regions of the face. While scanning, each marker seats as the style's scan head passes it. A recognised face confirms them in a cascade and the mesh locks with them. A miss never lets them confirm: they drift off, break away and fade in the error colour while the head volume stays visible.
 - Each style boots in about 620 ms, and the module exports that as `scanMs()`, so a host that knows it lets the boot finish before it plays a fast match.
 - A lock plays as a multi-beat sequence over 1.9 s. A miss is told as a story over 1.8 s: the scan runs for 450 ms in the accent, so a miss never flashes a result state, then the markers fail to confirm and break off in the error colour. Both stay under the host's 2 s hold clamp.
+- A host that wants one short beat instead asks for it with `spec.resultMs`: the same keyframes, time-compressed into that many milliseconds. `resultMs()` names the beats the result is drawn to read at, 900 ms for a lock and 800 ms for a miss (whose attempt then lasts 200 ms).
 - A settled recognised face is strokes only. Once the attempt has failed, a miss paints only in the error colour.
 - Every frame on the 220 px card stays under 1,500 ops, 7,500 path commands and 1,200 glowing ops, well inside the host caps (6,000 ops, 600 commands per op, 2,000 glow ops).
 - Every colour follows the active Omarchy theme. The plugin paints role indices only, and the host resolves them, including the derived roles (see [Contract](#contract)).
@@ -205,15 +206,18 @@ The child is started by absolute path with a fixed argument vector and a cleared
 
 ### The frame module
 
-`FaceCardFrame.js` is a **JavaScript module, not a QML Item**. It exports two functions, and an optional third:
+`FaceCardFrame.js` is a **JavaScript module, not a QML Item**. It exports two functions, and two optional ones:
 
 ```js
 frame(size, spec) -> ops     // one frame as a list of numeric draw ops
 holdMs(state)     -> ms      // how long the host should hold that state
 scanMs()          -> ms      // optional: scanning to show before a result
+resultMs(state)   -> ms      // optional: the brief beat of a result
 ```
 
 A host that knows `scanMs()` holds a fast match until the card has presented that much of the scan (the boot, so the result never cuts into a card still drawing itself on), then plays the result. Older hosts ignore it.
+
+A host that wants a result to be one short beat sends `resultMs(state)` (or its own length) as `spec.resultMs` with every frame of the result and holds the state that long instead of `holdMs(state)`. The result's keyframes, its marker cascade and its ambient motion are time-compressed into the beat; a length is kept between 400 ms, under which a lock no longer reads, and the cinematic `holdMs(state)`. A miss's attempt keeps the live clock, so the scan carries on unchanged until it fails. Without `spec.resultMs` the result is the cinematic one, exactly as before.
 
 `spec` carries only values:
 
@@ -223,6 +227,7 @@ A host that knows `scanMs()` holds a fast match until the card has presented tha
 | `clock` | free-running milliseconds, drives every ambient motion |
 | `elapsed` | milliseconds since `state` was entered |
 | `style` | optional, `"hud"`, `"radar"` or `"holo"`. Absent or unknown paints the HUD. The standalone card and the preview send it; the fork's host does not yet. |
+| `resultMs` | optional, the length in milliseconds of a brief result (see `resultMs()` above). Absent, a result plays at its cinematic length. |
 | `host` | optional, the op level the host paints. `2` unlocks glow, additive blending and roles 3 to 5. `3` means the host paints the card on its own dark glass and resolves every role against it, so the frame draws its structure in the tint instead of the text colour. Absent means level 1, and the frame is exactly the level-1 frame. |
 
 There are no colours in the spec. Each op carries a role index and the host resolves it against the live theme, so the card follows whatever theme is set and the plugin never chooses a colour:

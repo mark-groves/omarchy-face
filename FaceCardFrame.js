@@ -3,11 +3,13 @@
 // Paint routine for the Omarchy shared face-scan card.
 //
 // This file is the whole plugin. It owns no Item, keeps no state between
-// frames, and has no route to anything in the host. It exports two pure
+// frames, and has no route to anything in the host. It exports pure
 // functions and nothing else.
 //
 //   frame(size, spec)   return one frame as a list of numeric draw ops
 //   holdMs(state)       how long the host should hold that state
+//   scanMs()            how much of a scan to show before a result
+//   resultMs(state)     how long the brief result of that state lasts
 //
 // The host does NOT hand this module a drawing context. Handing one over is
 // the whole leak: a 2D context exposes `canvas`, the canvas is a host Item,
@@ -23,6 +25,10 @@
 //   host         optional op level the host paints; 2 adds glow, additive
 //                blending and roles 3..5. Absent means a level-1 host, and
 //                the frame is exactly what a level-1 host has always drawn.
+//   resultMs     optional length of a result in milliseconds. A result
+//                plays as one brief beat of that length (resultMs() names
+//                the ones it is drawn for) instead of the cinematic
+//                holdMs() one. Absent, the result is the cinematic one.
 //
 // Three styles share the op vocabulary, the timing contract and the corner
 // readouts: the Depth Lattice HUD, the Phosphor Radar and the Holographic
@@ -5843,13 +5849,35 @@ var AUTHORED_REC = 1150
 var AUTHORED_MISS = 900
 var MISS_ATTEMPT = 450
 
+// The brief result. A host that wants a result to be one short beat sends
+// its length as spec.resultMs, and the whole result (the lock or the miss,
+// with its attempt and the marker cascade) plays that much faster than the
+// cinematic one holdMs() times. resultMs() names the lengths this module is
+// drawn to hold up at; a length is kept between BRIEF_MIN_MS, under which a
+// lock no longer reads, and the cinematic length.
+var BRIEF_REC_MS = 900
+var BRIEF_MISS_MS = 800
+var BRIEF_MIN_MS = 400
+
+// How many times faster than the cinematic one this frame's result plays:
+// 1 when spec.resultMs is absent or not a positive number.
+function resultSpeed(spec) {
+  var hold = holdMs(spec.state)
+  var beat = Number(spec.resultMs)
+  if (!(hold > 0) || !isFinite(beat) || beat <= 0) return 1
+  return hold / clamp(beat, BRIEF_MIN_MS, hold)
+}
+
 function paintInto(ctx, size, spec) {
   var style = resolveStyle(spec)
   var rt = spec.elapsed || 0
   var t = spec.clock || 0
   var s = spec
   FEAT = { mode: "scan", rt: 0 }
-  if (spec.state === "recognized") {
+  var speed = resultSpeed(spec)
+  if (speed !== 1) {
+    s = briefResult(spec, t, rt, speed)
+  } else if (spec.state === "recognized") {
     var kr = AUTHORED_REC / holdMs("recognized")
     s = { state: "recognized", clock: t - rt + rt * kr, elapsed: rt * kr }
     FEAT = { mode: "rec", rt: rt }
@@ -5875,6 +5903,26 @@ function paintInto(ctx, size, spec) {
   else paintHud(ctx, size, s)
 }
 
+// paintInto()'s mapping for a brief result: the cinematic timeline at
+// `speed` times, `rc` cinematic milliseconds in, its ambient clock included.
+// A miss's attempt keeps the live clock, as the cinematic one does, so the
+// scan carries on unchanged, and the failure takes the clock up from where
+// the attempt left it, without a jump.
+function briefResult(spec, t, rt, speed) {
+  var rc = rt * speed
+  var t0 = t - rt
+  if (spec.state === "recognized") {
+    var kr = AUTHORED_REC / holdMs("recognized")
+    FEAT = { mode: "rec", rt: rc }
+    return { state: "recognized", clock: t0 + rc * kr, elapsed: rc * kr }
+  }
+  if (rc < MISS_ATTEMPT) return { state: "scanning", clock: t, elapsed: Math.max(t, BOOT_MS) }
+  var km = AUTHORED_MISS / (holdMs("notRecognized") - MISS_ATTEMPT)
+  var fr = rc - MISS_ATTEMPT
+  FEAT = { mode: "fail", rt: fr }
+  return { state: "notRecognized", clock: t0 + MISS_ATTEMPT / speed + fr * km, elapsed: fr * km }
+}
+
 // How long the host should hold each state before it tears the card down.
 // This is the cost of the result sequence, well under the host's 2 s clamp.
 // Clipping it cuts the confirmation off before the instrument has settled.
@@ -5890,6 +5938,15 @@ function holdMs(state) {
 // does; every style boots in BOOT_MS.
 function scanMs() {
   return BOOT_MS
+}
+
+// How long the brief result of each state lasts: the length a host sends as
+// spec.resultMs, and holds the state for, when it wants one short beat
+// instead of holdMs(). 0 for anything but a result.
+function resultMs(state) {
+  if (state === "recognized") return BRIEF_REC_MS
+  if (state === "notRecognized") return BRIEF_MISS_MS
+  return 0
 }
 
 // --- the value-spec boundary ------------------------------------------------
@@ -5995,7 +6052,7 @@ function frame(size, spec) {
 }
 
 return {
-  frame: frame, holdMs: holdMs, scanMs: scanMs,
+  frame: frame, holdMs: holdMs, scanMs: scanMs, resultMs: resultMs,
   STYLES: STYLES, DEFAULT_STYLE: DEFAULT_STYLE, easeOutBack: easeOutBack
 }
 })()
@@ -6005,5 +6062,6 @@ return {
 function frame(size, spec) { return IMPL.frame(size, spec) }
 function holdMs(state) { return IMPL.holdMs(state) }
 function scanMs() { return IMPL.scanMs() }
+function resultMs(state) { return IMPL.resultMs(state) }
 var STYLES = IMPL.STYLES
 var DEFAULT_STYLE = IMPL.DEFAULT_STYLE
