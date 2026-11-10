@@ -941,6 +941,9 @@ var HUD_BUF = {
   dx: [], dy: [], ds: [], da: [], dcr: [], dmid: [], drim: [], db: [], dspec: []
 }
 
+// Scratch for the silhouette: each side's points, segment alphas and halos.
+var HUD_SIL = { lx: [], ly: [], rx: [], ry: [], al: [], ar: [], hl: [], hr: [] }
+
 // The dots' placement noise: dot i's two hash values for noise step js,
 // kept until the step moves on. They are a pure function of (js, i), so
 // this is a memo, not state: a frame draws the same whatever came before.
@@ -1575,35 +1578,37 @@ function paintHud(ctx, size, spec) {
   // The silhouette: a rim of light where the surface turns away, brighter on
   // the key side.
   if (!compact) {
-    var sideL = [], sideR = [], alL = [], alR = []
+    var SB = HUD_SIL
+    var lX = SB.lx, lY = SB.ly, rX = SB.rx, rY = SB.ry, alL = SB.al, alR = SB.ar, haloL = SB.hl, haloR = SB.hr
+    var nO = outline.length
     var rimIn = seg(boot, 0.4, 1)
-    for (i = 0; i < outline.length; i++) {
+    for (i = 0; i < nO; i++) {
       var ol = outline[i]
       var oa = hudStateAt(F, ol.y)
       var rb = (0.30 + 0.5 * oa[2] + 0.5 * oa[1] + 0.5 * oa[0]) * rimIn * breath
-      sideL.push({ x: ol.xl, y: ol.yl })
-      sideR.push({ x: ol.xr, y: ol.yr })
-      alL.push(Math.min(1, rb * 0.95))
-      alR.push(Math.min(1, rb * 0.6))
+      lX[i] = ol.xl
+      lY[i] = ol.yl
+      rX[i] = ol.xr
+      rY[i] = ol.yr
+      // Segment alpha: stripXY() reads one per segment, so the last point's
+      // is never read.
+      alL[i] = Math.min(1, rb * 0.95)
+      alR[i] = Math.min(1, rb * 0.6)
     }
-    // Segment alpha: strip() reads one per segment.
-    alL.pop()
-    alR.pop()
     if (bad) {
       var rimBrk = easeOutCubic(seg(rt, 100, 600)) * 0.5
-      for (i = 0; i < alL.length; i++) {
+      for (i = 0; i < nO - 1; i++) {
         if (hash(i * 3.3 + 1) < rimBrk) alL[i] = 0
         if (hash(i * 5.1 + 2) < rimBrk) alR[i] = 0
         alL[i] *= 0.7
         alR[i] *= 0.7
       }
     }
-    var haloL = [], haloR = []
-    for (i = 0; i < alL.length; i++) { haloL.push(alL[i] * 0.28); haloR.push(alR[i] * 0.28) }
-    strip(halo, tint, thin * 2.6, sideL, haloL)
-    strip(halo, tint, thin * 2.6, sideR, haloR)
-    strip(crisp, tint, hair, sideL, alL)
-    strip(crisp, tint, hair, sideR, alR)
+    for (i = 0; i < nO - 1; i++) { haloL[i] = alL[i] * 0.28; haloR[i] = alR[i] * 0.28 }
+    stripXY(halo, tint, thin * 2.6, lX, lY, haloL, nO)
+    stripXY(halo, tint, thin * 2.6, rX, rY, haloR, nO)
+    stripXY(crisp, tint, hair, lX, lY, alL, nO)
+    stripXY(crisp, tint, hair, rX, rY, alR, nO)
     flush()
   }
 
