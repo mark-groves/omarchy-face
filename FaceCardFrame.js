@@ -858,22 +858,82 @@ function hudVertexInto(F, v, o, minVis) {
   return true
 }
 
-function hudVertex(F, v) {
-  var o = { x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, D: 0, rim: 0, spec: 0, vis: 0, b: 0 }
-  hudVertexInto(F, v, o, -1)
-  return o
+// hudVertexInto() over a whole list of model points, into the flat lists of
+// `P`: P.vis for every point, and P.x, P.y, P.z, P.D, P.b, P.rim and P.spec
+// for a point at or over `minVis`. A null in the list is a gap and is
+// skipped. The pose and the light are read once for the list instead of
+// once a point, which in Qt's engine is most of what a point costs. The
+// arithmetic is hudVertexInto()'s, step for step.
+function hudProject(F, V, minVis, P) {
+  var cw = F.cw, sw = F.sw, cp = F.cp, sp = F.sp
+  var scale = F.scale, cx = F.cx, cy = F.cy, RF = F.RF, R = F.R
+  var bad = F.bad, tearD = F.tearD, tears = F.tears
+  var k0 = HUD_KEY[0], k1 = HUD_KEY[1], k2 = HUD_KEY[2]
+  var h0 = HUD_HALF[0], h1 = HUD_HALF[1], h2 = HUD_HALF[2]
+  var f0 = HUD_FILL[0], f1 = HUD_FILL[1], f2 = HUD_FILL[2]
+  var PX = P.x, PY = P.y, PZ = P.z, PV = P.vis, PD = P.D, PB = P.b, PR = P.rim, PS = P.spec
+  for (var i = 0; i < V.length; i++) {
+    var v = V[i]
+    if (v === null) continue
+    var vnx = v.nx, vny = v.ny, vnz = v.nz
+    var nz1 = -vnx * sw + vnz * cw
+    var nzr = vny * sp + nz1 * cp
+    var vis = (nzr + 0.12) / 0.32
+    vis = vis < 0 ? 0 : (vis > 1 ? 1 : vis)
+    PV[i] = vis
+    if (vis < minVis) continue
+    var x = v.x, y = v.y
+    if (bad) x += hudSlip(F, y)
+    var zc = v.z - HUD_ZC
+    var xr = x * cw + zc * sw
+    var z1 = -x * sw + zc * cw
+    var yy = y + HUD_YC
+    var yr = yy * cp - z1 * sp
+    var zr = yy * sp + z1 * cp
+    var nxr = vnx * cw + vnz * sw
+    var nyr = vny * cp - nz1 * sp
+    var ps = scale / (1 - HUD_PERSP * zr)
+    var px = cx + xr * ps * RF, py = cy + yr * ps * RF, D = 0
+    if (bad) {
+      D = tearD * (v.ra - 0.4)
+      px += nxr * D * RF
+      py += nyr * D * RF
+      if (tears.length) px += tearShift(tears, (py - cy) / R) * R
+    }
+    PX[i] = px
+    PY[i] = py
+    PZ[i] = zr
+    PD[i] = D
+    var diff = nxr * k0 + nyr * k1 + nzr * k2
+    if (diff < 0) diff = 0
+    var rim = Math.pow(1 - (nzr < 0 ? 0 : (nzr > 1 ? 1 : nzr)), 2.2)
+    var hh = nxr * h0 + nyr * h1 + nzr * h2
+    var spec = hh > 0 ? Math.pow(hh, 38) : 0
+    PR[i] = rim
+    PS[i] = spec
+    var fill = nxr * f0 + nyr * f1 + nzr * f2
+    if (fill < 0) fill = 0
+    var b = 0.15 + 0.7 * Math.pow(diff, 1.5) + 0.3 * fill + rim * (0.3 + 0.5 * (nxr < 0 ? 1 : 0.7)) + 0.55 * spec
+    PB[i] = b < 0 ? 0 : (b > 1 ? 1 : b)
+  }
 }
 
-// Scratch for the per-frame loops: one vertex, and flat per-point lists
-// that replace thousands of small objects a frame. Nothing in them lives
-// past the frame that writes it.
+// Scratch for the per-frame loops: one vertex, the projected points of one
+// list (hudProject), and flat per-point lists that replace thousands of
+// small objects a frame. Nothing in them lives past the loop that writes it.
 var HUD_VO = { x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, D: 0, rim: 0, spec: 0, vis: 0, b: 0 }
+var HUD_PJ = { x: [], y: [], z: [], vis: [], D: [], b: [], rim: [], spec: [] }
 var HUD_BUF = {
-  mx: [], my: [], mv: [], md: [], me: [], mc: [],
+  me: [], mc: [],
   sx: [], sy: [], sa: [],
   bx: [], by: [], bv: [],
   dx: [], dy: [], ds: [], da: [], dcr: [], dmid: [], drim: [], db: [], dspec: []
 }
+
+// The dots' placement noise: dot i's two hash values for noise step js,
+// kept until the step moves on. They are a pure function of (js, i), so
+// this is a memo, not state: a frame draws the same whatever came before.
+var HUD_DN = { js: [], hx: [], hy: [] }
 
 // The scan plane's cut through the head at height y, as a screen polyline
 // that follows the surface: {x, y, v} per sample, v the visibility.
@@ -1341,30 +1401,27 @@ function paintHud(ctx, size, spec) {
   // Every lattice row shares one height, so the scan state is read once a
   // row rather than once a point.
   var VO = HUD_VO
+  var PJ = HUD_PJ
   var rowY = NaN, s0 = 0, s1 = 0, s2 = 0, s3 = 0
   if (!compact) {
     var MS = hudLattice(mStep, true)
     var MV = MS.V, nM = MV.length
-    var mX = HUD_BUF.mx, mY = HUD_BUF.my, mVis = HUD_BUF.mv, mD = HUD_BUF.md, mE = HUD_BUF.me, mC = HUD_BUF.mc
+    // An edge with an end under 0.05 visibility is skipped, so that end
+    // needs nothing past its visibility.
+    hudProject(F, MV, 0.05, PJ)
+    var mX = PJ.x, mY = PJ.y, mVis = PJ.vis, mD = PJ.D, mB = PJ.b, mE = HUD_BUF.me, mC = HUD_BUF.mc
     var meshIn = seg(boot, 0.5, 1)
+    var rowLit = 0
     for (i = 0; i < nM; i++) {
+      if (mVis[i] < 0.05) continue
       v = MV[i]
-      // An edge with an end under 0.05 visibility is skipped, so that end
-      // needs nothing past its visibility.
-      if (!hudVertexInto(F, v, VO, 0.05)) {
-        mVis[i] = VO.vis
-        continue
-      }
       if (v.y !== rowY) {
         a = hudStateAt(F, v.y)
         s0 = a[0]; s1 = a[1]; s2 = a[2]; s3 = a[3]
         rowY = v.y
+        rowLit = 0.45 + 0.55 * clamp01(0.16 + 0.5 * s2 + 0.4 * s1)
       }
-      mX[i] = VO.x
-      mY[i] = VO.y
-      mVis[i] = VO.vis
-      mD[i] = VO.D
-      mE[i] = ((0.05 + 0.42 * VO.b) * (0.45 + 0.55 * clamp01(0.16 + 0.5 * s2 + 0.4 * s1)) + 0.5 * s1 * 0.8) * breath
+      mE[i] = ((0.05 + 0.42 * mB[i]) * rowLit + 0.5 * s1 * 0.8) * breath
       mC[i] = s0
     }
     var edges = MS.edges
@@ -1394,6 +1451,7 @@ function paintHud(ctx, size, spec) {
     var stw = fine * 1.7
     for (i = 0; i < SG.length; i++) {
       var srow = SG[i], ns = 0
+      hudProject(F, srow, -1, PJ)
       for (j = 0; j <= srow.length; j++) {
         var sv = j < srow.length ? srow[j] : null
         if (!sv) {
@@ -1401,13 +1459,13 @@ function paintHud(ctx, size, spec) {
           ns = 0
           continue
         }
-        hudVertexInto(F, sv, VO, -1)
         a = hudStateAt(F, sv.y)
-        var sal = ((0.05 + 0.2 * VO.b) * (0.5 + 0.5 * clamp01(0.16 + 0.5 * a[2] + 0.4 * a[1])) + 0.55 * a[1] * 0.7 + 0.5 * a[0]) * VO.vis * meshIn * breath
+        var sl = 0.16 + 0.5 * a[2] + 0.4 * a[1]
+        var sal = ((0.05 + 0.2 * PJ.b[j]) * (0.5 + 0.5 * (sl < 0 ? 0 : (sl > 1 ? 1 : sl))) + 0.55 * a[1] * 0.7 + 0.5 * a[0]) * PJ.vis[j] * meshIn * breath
         if (ok) sal += 0.12 * a[2]
         if (bad && hash(i * 131 + j) < stripeBrk) sal = 0
-        sX[ns] = VO.x
-        sY[ns] = VO.y - HUD_PARALLAX * VO.z * RF
+        sX[ns] = PJ.x[j]
+        sY[ns] = PJ.y[j] - HUD_PARALLAX * PJ.z[j] * RF
         sA[ns] = sal
         ns++
       }
@@ -1431,29 +1489,40 @@ function paintHud(ctx, size, spec) {
   var dropAt = bad ? Math.floor(t / 90) * 71 : 0
   var missDim = bad ? mix(1, 0.85, easeOutCubic(seg(rt, 0, 260))) : 1
   rowY = NaN
+  hudProject(F, DV, 0.05, PJ)
+  var pX = PJ.x, pY = PJ.y, pZ = PJ.z, pVis = PJ.vis, pB = PJ.b
+  var DN = HUD_DN, dnJs = DN.js, dnX = DN.hx, dnY = DN.hy
+  var crest = 0, mid = 0, tail = 0, placed = 0, dotLit = 0
   for (i = 0; i < nD; i++) {
+    if (pVis[i] < 0.05) continue
     v = DV[i]
-    if (!hudVertexInto(F, v, VO, 0.05)) continue
     if (v.y !== rowY) {
       a = hudStateAt(F, v.y)
       s0 = a[0]; s1 = a[1]; s2 = a[2]; s3 = a[3]
       rowY = v.y
+      crest = s0; mid = s1; tail = s2; placed = s3
+      var lit = 0.16 + 0.5 * tail + 0.4 * mid
+      dotLit = 0.4 + 0.6 * clamp01(lit)
     }
-    var crest = s0, mid = s1, tail = s2, placed = s3
-    var ob = VO.b
+    var ob = pB[i]
 
-    var lit = 0.16 + 0.5 * tail + 0.4 * mid
-    var alpha = ((0.07 + 0.68 * ob) * (0.4 + 0.6 * clamp01(lit)) + 0.22 * crest * (0.35 + 0.65 * ob)) * breath
-    var dof = 0.72 + 0.4 * clamp01((VO.z + 0.45) / 0.9)
+    var alpha = ((0.07 + 0.68 * ob) * dotLit + 0.22 * crest * (0.35 + 0.65 * ob)) * breath
+    var dz = (pZ[i] + 0.45) / 0.9
+    var dof = 0.72 + 0.4 * (dz < 0 ? 0 : (dz > 1 ? 1 : dz))
     var s = dotBase * (0.5 + 0.9 * ob) * dof * (1 + 0.4 * crest) * (0.8 + 0.2 * placed)
-    var px = VO.x, py = VO.y
+    var px = pX[i], py = pY[i]
 
     // Not yet placed: the point shimmers in noise and resolves as the light
     // reaches it.
     var un = 1 - placed
     if (un > 0.02) {
-      px += (hash(js * 61 + i * 3.1) - 0.5) * un * RF * 0.15
-      py += (hash(js * 47 + i * 2.3 + 7) - 0.5) * un * RF * 0.15
+      if (dnJs[i] !== js) {
+        dnJs[i] = js
+        dnX[i] = hash(js * 61 + i * 3.1)
+        dnY[i] = hash(js * 47 + i * 2.3 + 7)
+      }
+      px += (dnX[i] - 0.5) * un * RF * 0.15
+      py += (dnY[i] - 0.5) * un * RF * 0.15
     }
 
     if (scanning && boot < 1) {
@@ -1483,9 +1552,9 @@ function paintHud(ctx, size, spec) {
     dA[nDD] = alpha
     dCr[nDD] = crest
     dMid[nDD] = mid
-    dRim[nDD] = VO.rim
+    dRim[nDD] = PJ.rim[i]
     dB[nDD] = ob
-    dSpec[nDD] = VO.spec
+    dSpec[nDD] = PJ.spec[i]
     nDD++
   }
 
@@ -1531,16 +1600,17 @@ function paintHud(ctx, size, spec) {
     var spw = Math.max(1, size * 0.0042)
     var flickAt = Math.floor(t / 80) * 17
     var spMiss = bad ? (1 - easeOutCubic(seg(rt, 100, 500))) * 0.7 + 0.1 : 1
+    hudProject(F, SK, -1, PJ)
     for (i = 0; i < SK.length; i++) {
       var sp = SK[i]
-      if (!hudVertexInto(F, sp, VO, sp.wall ? -1 : 0.1)) continue
-      var ox = VO.x, oy = VO.y
+      if (!sp.wall && PJ.vis[i] < 0.1) continue
+      var ox = PJ.x[i], oy = PJ.y[i]
       var rr = Math.hypot(ox - cx, oy - cy) / R
       if (rr > 0.9) continue
       a = hudStateAt(F, sp.y)
       var flick = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t / (190 + 110 * sp.rb) + sp.ra * TAU))
       if (hash(flickAt + sp.rc * 977) < 0.22) flick *= 0.2
-      var spa = (sp.wall ? 0.15 : 0.2 + 0.4 * VO.b) * flick + 0.45 * a[1] + 0.3 * a[0]
+      var spa = (sp.wall ? 0.15 : 0.2 + 0.4 * PJ.b[i]) * flick + 0.45 * a[1] + 0.3 * a[0]
       spa *= clamp01((0.9 - rr) / 0.12) * boot
       if (sp.wall) {
         // Hidden behind the head.
