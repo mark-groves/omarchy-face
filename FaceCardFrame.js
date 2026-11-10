@@ -481,14 +481,18 @@ var GLOW_HALO = 2.4
 // have no sharp alpha, just glow.
 function pen(ctx, gain, halo) {
   var order = []
-  var groups = {}
+  var groups = new Map()
   var gk = gain === undefined ? GLOW_CRISP : gain
 
   // Keyed by the quantised steps packed into one integer: this runs for
   // every mesh edge, and a string key built from floats was most of a frame.
+  // A Map, because Qt's engine keeps an object's integer keys this large in
+  // a sparse tree, which cost about a tenth of a frame.
   // Runs of strokes in one pen (ticks, glyph segments) repeat the same
-  // role, alpha and width, so the last answer is kept and handed back.
+  // role, alpha and width, so the last answer is kept and handed back; a
+  // run of one width repeats its width step too.
   var lastRole = -1, lastA = 0, lastW = 0, lastG = null
+  var stepW = -1, stepIw = 1
   function group(role, a, w) {
     if (role === lastRole && a === lastA && w === lastW) return lastG
     lastRole = role
@@ -506,11 +510,16 @@ function pen(ctx, gain, halo) {
         ia = 0
       }
     }
-    var iw = Math.max(1, Math.round(w * 4))
+    if (w !== stepW) {
+      stepW = w
+      stepIw = Math.max(1, Math.round(w * 4))
+    }
+    var iw = stepIw
     var key = role + 8 * (ia + 33 * (ig + 17 * iw))
-    var g = groups[key]
+    var g = groups.get(key)
     if (!g) {
-      g = groups[key] = { role: role, a: ia / 32, w: iw / 4, g: ig / 16, cmds: [] }
+      g = { role: role, a: ia / 32, w: iw / 4, g: ig / 16, cmds: [] }
+      groups.set(key, g)
       order.push(g)
     }
     lastG = g
@@ -565,7 +574,7 @@ function pen(ctx, gain, halo) {
       }
       ctx.glow = 0
       order = []
-      groups = {}
+      groups.clear()
       lastRole = -1
       lastG = null
     }
