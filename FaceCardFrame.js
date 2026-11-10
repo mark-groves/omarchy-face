@@ -3110,15 +3110,14 @@ function radarReturns() {
   }
   outline.push(rimChain)
 
-  // For the per-frame scan converter: the depth term of radarTone(), the
-  // covered cells in order, a scratch list of tones (0 where nothing
-  // returns), each cell's break-up hash for the gates round the hub, and
-  // for each cell of a gate the next covered cell on it (NB when none), so
-  // a gate can step over a stretch with nothing on it.
-  var ZK = [], COVI = [], TN = [], BRK = [], NEXT = []
+  // For the per-frame scan converter: the depth term of radarTone(), a
+  // scratch list of tones (0 where nothing returns), each cell's break-up
+  // hash for the gates round the hub, and for each cell of a gate the next
+  // covered cell on it (NB when none), so a gate can step over a stretch
+  // with nothing on it.
+  var ZK = [], TN = [], BRK = [], NEXT = []
   for (k = 0; k < NR * NB; k++) {
     ZK.push(0.12 * clamp01(Z[k] / 0.6))
-    if (C[k]) COVI.push(k)
     TN.push(0)
   }
   for (k = 0; k < NR; k++) {
@@ -3129,10 +3128,25 @@ function radarReturns() {
       if (C[k * NB + j]) nextAt = j
     }
   }
+  // The covered cells a frame reads a tone from, in order: every cell of a
+  // gate the scan converter draws (the inner gates are thinned to the even
+  // ones; a compact card draws only even gates) and the cell under each
+  // contour and outline piece. Only these are shaded each frame.
+  var need = []
+  for (k = 0; k < NR * NB; k++) need.push(C[k] && ((k / NB | 0) % 2 === 0 || (k / NB | 0) >= RADAR_THIN) ? 1 : 0)
+  var lists = contours.concat(outline)
+  for (var li2 = 0; li2 < lists.length; li2++) {
+    for (var pi = 0; pi < lists[li2].length; pi++) {
+      var pc = lists[li2][pi].ci
+      if (C[pc]) need[pc] = 1
+    }
+  }
+  var COVR = []
+  for (k = 0; k < NR * NB; k++) if (need[k]) COVR.push(k)
 
   CACHE.radar8 = {
     G: G, Z: Z, NX: NX, NY: NY, NZ: NZ, E: E, C: C, contours: contours, outline: outline,
-    ZK: ZK, COVI: COVI, TN: TN, BRK: BRK, NEXT: NEXT
+    ZK: ZK, COVR: COVR, TN: TN, BRK: BRK, NEXT: NEXT
   }
   return CACHE.radar8
 }
@@ -3162,6 +3176,10 @@ function radarSweep(state, t, rt) {
   }
   return t / RADAR_REV_MS * TAU
 }
+
+// Scratch for the scope's chain strokes: a run's points and each piece's
+// alpha. Nothing in it lives past the chain that writes it.
+var RADAR_BUF = { x: [], y: [], a: [], h: [] }
 
 function frac(v) { return v - Math.floor(v) }
 function smooth01(v) { return v * v * (3 - 2 * v) }
@@ -3491,13 +3509,13 @@ function paintRadar(ctx, size, spec) {
   var lgn = 1 / Math.hypot(lgx, lgy, RADAR_LZ)
   lgx *= lgn; lgy *= lgn
   var lgz = RADAR_LZ * lgn
-  // radarTone() for every covered cell, written out, with the depth term
-  // that does not depend on the light taken from the table. Uncovered cells
-  // stay 0 in the scratch list.
+  // radarTone() for every covered cell this frame reads (geo.COVR), written
+  // out, with the depth term that does not depend on the light taken from
+  // the table. Uncovered cells stay 0 in the scratch list.
   var TN = geo.TN
-  var cov = geo.C, NXa = geo.NX, NYa = geo.NY, NZa = geo.NZ, Ea = geo.E, ZKa = geo.ZK, COVI = geo.COVI
-  for (var tq = 0; tq < COVI.length; tq++) {
-    var tn = COVI[tq]
+  var cov = geo.C, NXa = geo.NX, NYa = geo.NY, NZa = geo.NZ, Ea = geo.E, ZKa = geo.ZK, COVR = geo.COVR
+  for (var tq = 0; tq < COVR.length; tq++) {
+    var tn = COVR[tq]
     var lam = NXa[tn] * lgx + NYa[tn] * lgy + NZa[tn] * lgz
     var td = (lam - 0.42) / 0.55
     td = td < 0 ? 0 : (td > 1 ? 1 : td)
@@ -3610,10 +3628,12 @@ function paintRadar(ctx, size, spec) {
       }
       var dgg = (rrg - gateR) / 0.032
       var gateT = Math.exp(-dgg * dgg) * gateA
+      // The cell loop is the hottest loop on the scope, so clamp01() and
+      // mix() are written out in it; the arithmetic is theirs, in order.
       for (var cj = 0; cj <= NB; cj++) {
         var lvB = 0, lvH = 0
         if (cj < NB) {
-          var gci = gbase + (cj + slip + NB * 2) % NB
+          var gci = slip === 0 ? gbase + cj : gbase + (cj + slip + NB * 2) % NB
           if (!cov[gci]) {
             // Nothing returns here. With no run open, every cell up to the
             // next covered one changes nothing either, so step over them.
@@ -3625,14 +3645,20 @@ function paintRadar(ctx, size, spec) {
               // Halftone by range gate: a lit cell holds every gate, a shaded
               // one only some of them, so the dark side of the head is a
               // sparse engraving and the lit side a dense one.
-              var gs = clamp01((gg * 1.15 + 0.1 - thr) / 0.3) * (0.3 + 0.7 * gg) * 1.2 * hubFade
+              var gh = (gg * 1.15 + 0.1 - thr) / 0.3
+              var gs = (gh < 0 ? 0 : (gh > 1 ? 1 : gh)) * (0.3 + 0.7 * gg) * 1.2 * hubFade
               var lp = pJ[cj]
-              if (ok) lp = mix(mix(lp, 1, rfr), 0.64 + 0.36 * lp, settleK)
-              lvB = Math.round(clamp01(gs * lp * hatchGain) * QL)
+              if (ok) {
+                var lr = lp + (1 - lp) * rfr
+                lp = lr + (0.64 + 0.36 * lp - lr) * settleK
+              }
+              var lb = gs * lp * hatchGain
+              lvB = Math.round((lb < 0 ? 0 : (lb > 1 ? 1 : lb)) * QL)
               if (heated) {
                 var hh = hJ[cj] + frn * 0.9
                 for (pe = 0; pe < nPing; pe++) hh += pingT[pe]
-                lvH = Math.round(clamp01(gs * (Math.min(1.2, hh) + gateT) - 0.1) * QH)
+                var lh = gs * ((hh < 1.2 ? hh : 1.2) + gateT) - 0.1
+                lvH = Math.round((lh < 0 ? 0 : (lh > 1 ? 1 : lh)) * QH)
               }
             }
           }
@@ -3661,23 +3687,32 @@ function paintRadar(ctx, size, spec) {
 
   // Strokes a chain of pieces as polylines, one stroke per run of equal
   // brightness, so a contour costs a handful of path commands and not a move
-  // and a line for every segment.
-  function strokeChain(pn, role, chain, w, Q, alphaOf, scale) {
-    var pts = null, lvl = 0, lastOx = 0
+  // and a line for every segment. Piece i's alpha is al[i] * k; a run's
+  // points go into flat scratch lists.
+  function strokeChain(pn, role, chain, w, Q, al, k, scale) {
+    var xs = RADAR_BUF.x, ys = RADAR_BUF.y
+    var n = 0, lvl = 0, lastOx = 0
     for (var ci = 0; ci <= chain.length; ci++) {
       var P = ci < chain.length ? chain[ci] : null
       var lv = 0, ox = 0
       if (P) {
-        lv = Math.round(clamp01(alphaOf(P)) * Q)
+        var pa = al[ci] * k
+        lv = Math.round((pa < 0 ? 0 : (pa > 1 ? 1 : pa)) * Q)
         ox = tears.length ? tearShift(tears, P.my) * R : 0
       }
-      if (pts && (!P || lv !== lvl || ox !== lastOx)) {
-        if (lvl > 0 && pts.length > 1) pn.poly(role, lvl / Q, w, pts)
-        pts = null
+      if (n && (!P || lv !== lvl || ox !== lastOx)) {
+        if (lvl > 0) pn.polyXY(role, lvl / Q, w, xs, ys, 0, n - 1)
+        n = 0
       }
       if (P && lv > 0) {
-        if (!pts) pts = [[cx + ox + P.x0 * R * scale, cy + P.y0 * R * scale]]
-        pts.push([cx + ox + P.x1 * R * scale, cy + P.y1 * R * scale])
+        if (!n) {
+          xs[0] = cx + ox + P.x0 * R * scale
+          ys[0] = cy + P.y0 * R * scale
+          n = 1
+        }
+        xs[n] = cx + ox + P.x1 * R * scale
+        ys[n] = cy + P.y1 * R * scale
+        n++
       }
       lvl = lv
       lastOx = ox
@@ -3687,6 +3722,12 @@ function paintRadar(ctx, size, spec) {
   var contourH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * (0.3 + 0.7 * TN[P.ci]); return h > 0.14 ? h * 0.65 : 0 }
   var outlineA = function (P) { return (0.55 + 0.45 * TN[P.ci]) * vJ[P.j] * (0.4 + 0.6 * clamp01(lightAt(P.j, refreshOf(P.r)))) }
   var outlineH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * (0.55 + 0.45 * TN[P.ci]) * vJ[P.j]; return h > 0.12 ? h : 0 }
+  // One alpha per piece of a chain, into a scratch list, so the strokes that
+  // share a chain work it out once.
+  function chainAlpha(chain, alphaOf, out) {
+    for (var i = 0; i < chain.length; i++) out[i] = alphaOf(chain[i])
+    return out
+  }
 
   // Iso-depth contours of the relief, brighter on the nearer levels: where
   // they crowd the surface is steep, and that is how the head reads in 3D.
@@ -3695,8 +3736,9 @@ function paintRadar(ctx, size, spec) {
     var heated = LUMEN && !bad
     for (var ci2 = 0; ci2 < geo.contours.length; ci2++) {
       var cscale = bad && jamK > 0 ? 1 + (hash(jitStep * 7 + ci2) - 0.5) * 0.04 * jamK : 1
-      strokeChain(crisp, tint, geo.contours[ci2], cw, 12, contourA, cscale)
-      if (heated) strokeChain(crisp, hotOf(tint), geo.contours[ci2], cw, 5, contourH, cscale)
+      var cch = geo.contours[ci2]
+      strokeChain(crisp, tint, cch, cw, 12, chainAlpha(cch, contourA, RADAR_BUF.a), 1, cscale)
+      if (heated) strokeChain(crisp, hotOf(tint), cch, cw, 5, chainAlpha(cch, contourH, RADAR_BUF.h), 1, cscale)
       if (smearK > 0.01 && ci2 % 3 === 0) {
         var sch = geo.contours[ci2]
         for (var sj = 0; sj < sch.length; sj += 4) {
@@ -3717,11 +3759,13 @@ function paintRadar(ctx, size, spec) {
   for (var oi = 0; oi < geo.outline.length; oi++) {
     var och = geo.outline[oi]
     var ow = oRim
-    strokeChain(crisp, tint, och, ow, 14, outlineA, 1)
-    strokeChain(halo, tint, och, ow * 2, 8, function (P) { return outlineA(P) * 0.14 }, 1)
+    var oA = chainAlpha(och, outlineA, RADAR_BUF.a)
+    strokeChain(crisp, tint, och, ow, 14, oA, 1, 1)
+    strokeChain(halo, tint, och, ow * 2, 8, oA, 0.14, 1)
     if (LUMEN && !bad) {
-      strokeChain(crisp, hotOf(tint), och, ow * 0.5, 6, function (P) { return outlineH(P) * 0.7 }, 1)
-      strokeChain(halo, tint, och, ow * 2.4, 6, function (P) { return outlineH(P) * 0.26 }, 1)
+      var oH = chainAlpha(och, outlineH, RADAR_BUF.h)
+      strokeChain(crisp, hotOf(tint), och, ow * 0.5, 6, oH, 0.7, 1)
+      strokeChain(halo, tint, och, ow * 2.4, 6, oH, 0.26, 1)
     }
   }
   flush()
@@ -3945,22 +3989,23 @@ function paintRadarReadouts(p, size, state, t, rt, boot, tint, arm, dir) {
   p.line(ROLE_FG, 0.22 * boot, g.hair, x0, yb, x0 + wA, yb)
   var n = 44
   var noiseStep = Math.floor(t / 50)
+  var xs = RADAR_BUF.x, ys = RADAR_BUF.y, G = geo.G
   for (var tr = 3; tr >= 0; tr--) {
     var ang = arm - dir * tr * 0.2
     var j0 = Math.floor((((ang % TAU) + TAU) % TAU) / TAU * RADAR_NB)
-    var pts = []
     for (var s = 0; s <= n; s++) {
       var rr = s / n
       var amp = 0.05 + 0.06 * hash(noiseStep * 31 + s + tr * 977) * (bad ? 2.2 : 1)
       var k = Math.round((rr - RADAR_RIN) / RADAR_DR)
       if (k >= 0 && k < RADAR_NR) {
         var gsum = 0
-        for (var dj = -1; dj <= 1; dj++) gsum += geo.G[k * RADAR_NB + (j0 + dj + RADAR_NB) % RADAR_NB]
+        for (var dj = -1; dj <= 1; dj++) gsum += G[k * RADAR_NB + (j0 + dj + RADAR_NB) % RADAR_NB]
         amp += gsum / 3 * 0.8
       }
-      pts.push([x0 + rr * wA, yb - Math.min(1, amp) * hA * boot])
+      xs[s] = x0 + rr * wA
+      ys[s] = yb - Math.min(1, amp) * hA * boot
     }
-    p.poly(bad ? ROLE_ERROR : tint, (tr === 0 ? 0.9 : 0.26 / tr) * boot, g.hair, pts)
+    p.polyXY(bad ? ROLE_ERROR : tint, (tr === 0 ? 0.9 : 0.26 / tr) * boot, g.hair, xs, ys, 0, n)
   }
 
   readStatus(p, g, size, state, t, rt, tint)
