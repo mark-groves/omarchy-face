@@ -74,10 +74,17 @@ Item {
   // How long a result plays before anything replaces it or the card leaves:
   // the art's resultMs when it gives one, else its hold and a short linger.
   function beatMs(state) {
-    var given = FaceCard.resultMs
-    var ms = typeof given === "function" ? Number(given(state)) : Number(given)
+    var ms = root.artBeatMs(state)
     if (ms > 0) return ms
     return Math.max(0, Number(FaceCard.holdMs(state)) || 0) + root.lingerMs
+  }
+
+  // The art's own short result beat, 0 when it has none. Every frame of a
+  // result carries it, so the art plays its result in that time.
+  function artBeatMs(state) {
+    var given = FaceCard.resultMs
+    var ms = typeof given === "function" ? Number(given(state)) : Number(given)
+    return isFinite(ms) && ms > 0 ? ms : 0
   }
 
   readonly property var timing: ({
@@ -302,10 +309,13 @@ Item {
     if (s.phase === "closed" || !layer || !layer.available) return
     var now = Date.now()
     if (layer.inFlightSince > 0 && now - layer.inFlightSince < root.paintStallMs) return
-    root.ops = FaceCard.frame(root.side, {
+    var spec = {
       state: s.state, clock: root.clockAt(now), elapsed: Math.max(0, now - s.since), host: root.opLevel,
       style: root.style
-    })
+    }
+    var beat = root.artBeatMs(s.state)
+    if (beat > 0) spec.resultMs = beat
+    root.ops = FaceCard.frame(root.side, spec)
     var built = Date.now()
     root.noteFrame(built - now)
     layer.inFlightSince = built
