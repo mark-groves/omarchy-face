@@ -962,19 +962,21 @@ function hudSliceLineInto(F, y, n, xs, ys, vs) {
     tzc = (profileAt(HEAD_Y, HEAD_FRONT, HUD_TAPER) + profileAt(HEAD_Y, HEAD_BACK, HUD_TAPER)) / 2
   }
   var T = hudSliceBearings(n)
+  var cw = F.cw, sw = F.sw, cp = F.cp, sp = F.sp, scale = F.scale, cx = F.cx, cy = F.cy, RF = F.RF
   for (var j = 0; j <= n; j++) {
     headRowPoint(T, j)
     var px = (tapered ? HP_X * fullness * ts : HP_X * fullness) * shrink
     var zc = (tapered ? tzc + (HP_Z - tzc) * ts : HP_Z) - HUD_ZC
-    var xr = px * F.cw + zc * F.sw
-    var z1 = -px * F.sw + zc * F.cw
-    var yr = yy * F.cp - z1 * F.sp
-    var zr = yy * F.sp + z1 * F.cp
-    var ps = F.scale / (1 - HUD_PERSP * zr)
+    var xr = px * cw + zc * sw
+    var z1 = -px * sw + zc * cw
+    var yr = yy * cp - z1 * sp
+    var zr = yy * sp + z1 * cp
+    var ps = scale / (1 - HUD_PERSP * zr)
     var rr = Math.hypot(px, zc) || 1
-    xs[j] = F.cx + xr * ps * F.RF
-    ys[j] = F.cy + (yr - HUD_PARALLAX * zr) * ps * F.RF
-    vs[j] = clamp01(((-px * F.sw + zc * F.cw) / rr + 0.1) / 0.3)
+    xs[j] = cx + xr * ps * RF
+    ys[j] = cy + (yr - HUD_PARALLAX * zr) * ps * RF
+    var v = ((-px * sw + zc * cw) / rr + 0.1) / 0.3
+    vs[j] = v < 0 ? 0 : (v > 1 ? 1 : v)
   }
 }
 
@@ -1155,16 +1157,17 @@ function hudRings(halo, crisp, G) {
 // section on either side, so a turn shows the cranium behind the face.
 function hudOutline(F) {
   var rows = hudSilhouette(), out = []
+  var cw = F.cw, sw = F.sw, cp = F.cp, sp = F.sp, scale = F.scale
   for (var r = 0; r < rows.length; r++) {
     var row = rows[r], s = row.s, yy = row.y + HUD_YC
     var xl = 1e9, xr = -1e9, yl = 0, yrr = 0
     for (var j = 0; j < s.length; j += 2) {
       var x = s[j], zc = s[j + 1] - HUD_ZC
-      var xr0 = x * F.cw + zc * F.sw
-      var z1 = -x * F.sw + zc * F.cw
-      var yr = yy * F.cp - z1 * F.sp
-      var zr = yy * F.sp + z1 * F.cp
-      var ps = F.scale / (1 - HUD_PERSP * zr)
+      var xr0 = x * cw + zc * sw
+      var z1 = -x * sw + zc * cw
+      var yr = yy * cp - z1 * sp
+      var zr = yy * sp + z1 * cp
+      var ps = scale / (1 - HUD_PERSP * zr)
       var X = xr0 * ps
       if (X < xl) { xl = X; yl = yr * ps }
       if (X > xr) { xr = X; yrr = yr * ps }
