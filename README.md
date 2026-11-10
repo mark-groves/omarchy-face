@@ -304,7 +304,9 @@ node tools/shoot.js --style hud --host 2 --theme latte --sheet                  
 node tools/shoot.js --help
 ```
 
-The bloom blur is an approximation of Qt's `MultiEffect` (tune it with `--bloom wide,tight`). `node tools/shoot.js --serve` serves `tools/render.html` for use in a browser, with the same URL parameters.
+The bloom blur is an approximation of Qt's `MultiEffect` (tune it with `--bloom wide,tight`). `node tools/shoot.js --serve` serves `tools/render.html` for use in a browser, with the same URL parameters. `--result-ms brief` (or a length in milliseconds) renders results as the brief beat.
+
+`tools/bench.qml` measures what `frame()` costs in Qt's own JavaScript engine, which is what a host pays on its GUI thread every frame and about five times what node takes. It loads each file the way the fork's host does and interleaves them, so a before and an after run under the same conditions; see its header for the command line.
 
 `Preview.qml` takes its colours from the active Omarchy theme (`~/.local/state/omarchy/current/theme/colors.toml`) when there is one, and falls back to Tokyo Night.
 
