@@ -105,13 +105,16 @@ Item {
   }
 
   // A replay feeds show() at times relative to the call, as journal events
-  // would arrive. A new replay replaces one still running.
+  // would arrive. A new replay replaces one still running, card included, the
+  // way a real event does. Callers refuse while a real showing is up.
   property var replayEvents: []
   property real replayStartedAt: 0
 
   function startReplay(script) {
     var events = Schedule.parseReplay(script)
     if (!events || events.length === 0) return null
+    root.stopReplay()
+    face.close()
     root.replayEvents = events.slice()
     root.replayStartedAt = Date.now()
     root.feedReplay()
