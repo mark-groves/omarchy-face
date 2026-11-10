@@ -173,6 +173,7 @@ Item {
     root.glowDue = true
     root.awaitingEntrance = true
     root.firstRect = null
+    root.pendingStates = []
     root.moved = false
     root.lastSwapAt = 0
     root.frameCalls = 0
@@ -191,6 +192,9 @@ Item {
     root.awaitingEntrance = false
     root.clockBase = root.clockAt(now)
     root.noteState("hidden", now)
+    // A showing that never presented still logs its states, with whatever
+    // place the card has now.
+    root.flushStates()
     var s = root.stats
     if (!s) return
     var line = {
@@ -227,14 +231,31 @@ Item {
     return { x: Math.round(p.x), y: Math.round(p.y), w: root.side, h: root.side }
   }
 
+  // State changes wait for a presented frame before they are logged: a card
+  // shown in a window the compositor has not configured yet has no place in
+  // it, so its first rect would be wrong. The time is still the change's.
+  property var pendingStates: []
+
   function noteState(state, now) {
+    var pending = root.pendingStates.slice()
+    pending.push({ state: state, t: now })
+    root.pendingStates = pending
+    if (root.stats && root.stats.firstSwapAt > 0) root.flushStates()
+  }
+
+  function flushStates() {
+    if (!root.pendingStates.length) return
     var rect = root.cardRect()
     if (!root.firstRect) root.firstRect = rect
     else if (rect.x !== root.firstRect.x || rect.y !== root.firstRect.y || rect.w !== root.firstRect.w || rect.h !== root.firstRect.h)
       root.moved = true
-    var event = { surface: root.surface, state: state, t: now, rect: rect, window: root.windowName }
-    console.log("face-probe-event " + JSON.stringify(event))
-    root.probe("face-probe-event", event)
+    var pending = root.pendingStates
+    root.pendingStates = []
+    for (var i = 0; i < pending.length; i++) {
+      var event = { surface: root.surface, state: pending[i].state, t: pending[i].t, rect: rect, window: root.windowName }
+      console.log("face-probe-event " + JSON.stringify(event))
+      root.probe("face-probe-event", event)
+    }
   }
 
   Connections {
@@ -247,6 +268,7 @@ Item {
       if (root.lastSwapAt > 0 && s.gaps.length < 2000) s.gaps.push(now - root.lastSwapAt)
       root.lastSwapAt = now
       if (s.firstSwapAt === 0 && root.contentReady) s.firstSwapAt = now
+      if (s.firstSwapAt > 0) root.flushStates()
     }
   }
 
