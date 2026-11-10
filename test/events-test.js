@@ -7,7 +7,7 @@
 // asks journalctl for; the facelock lines follow the format facelock 0.2 logs.
 
 const assert = require('assert')
-const { parseEntry, verdict, stackHasFace } = require('../FaceEvents.js')
+const { parseEntry, cardEvent, stackHasFace } = require('../FaceEvents.js')
 const Limits = require('../StreamLimits.js')
 
 let failures = 0
@@ -37,7 +37,7 @@ const entry = (from, message) => JSON.stringify(Object.assign({ MESSAGE: message
 const howdy = (svc, what) => `pam_howdy(${svc}:auth): Face verification ${what}`
 
 const CONTEXT = { uid: '1000', services: { sudo: true, 'sudo-i': true, 'polkit-1': true } }
-const read = (line, context = CONTEXT) => verdict(parseEntry(line), context)
+const read = (line, context = CONTEXT) => cardEvent(parseEntry(line), context)
 
 // --- Howdy -------------------------------------------------------------------
 
@@ -52,13 +52,56 @@ check('a timeout and a failure both read as not recognized', () => {
     { state: 'notRecognized', service: 'polkit-1' })
 })
 
-check('a skip, the lid gate and session noise show nothing', () => {
+check('the lid gate, an unprefixed skip and session noise show nothing', () => {
   for (const message of [
     'PAM Face verification skipped: Howdy is disabled',
     'pam_exec(sudo:auth): /usr/bin/omarchy-hw-laptop-closed failed: exit code 1',
     'pam_unix(sudo:session): session opened for user root(uid=0) by grovr(uid=1000)',
     '   grovr : TTY=pts/5 ; PWD=/home/grovr ; USER=root ; COMMAND=/usr/bin/true'
   ]) assert.strictEqual(read(entry(SUDO, message)), null, message)
+})
+
+// --- scan start and the end of a scan ----------------------------------------
+
+// pam_warn sits just before the face module in the fork's stacks. These are
+// real lines from sudo and the polkit helper.
+const warn = (svc, fn, rest) => `pam_warn(${svc}:${fn === 'pam_sm_authenticate' ? 'auth' : 'setcred'}): function=[${fn}] ${rest}`
+const SUDO_START = warn('sudo', 'pam_sm_authenticate', 'flags=0x8000 service=[sudo] terminal=[/dev/pts/3] user=[grovr] ruser=[grovr] rhost=[<unknown>]')
+const POLKIT_START = warn('polkit-1', 'pam_sm_authenticate', 'flags=0 service=[polkit-1] terminal=[<unknown>] user=[grovr] ruser=[grovr] rhost=[<unknown>]')
+
+check('a trusted scan start opens the card scanning', () => {
+  assert.deepStrictEqual(read(entry(SUDO, SUDO_START)), { state: 'scanning', service: 'sudo' })
+  assert.deepStrictEqual(read(entry(POLKIT, POLKIT_START)), { state: 'scanning', service: 'polkit-1' })
+})
+
+check('setcred after an approval is not a scan start', () => {
+  for (const flags of ['flags=0x8', 'flags=0x8004'])
+    assert.strictEqual(read(entry(SUDO, warn('sudo', 'pam_sm_setcred', flags + ' service=[sudo] terminal=[/dev/pts/3] user=[root] ruser=[grovr] rhost=[<unknown>]'))), null, flags)
+})
+
+check('a scan start is trusted like a verdict', () => {
+  assert.strictEqual(read(entry(LOGGER, SUDO_START)), null, 'no capabilities recorded')
+  assert.strictEqual(read(entry(NAMESPACED, SUDO_START)), null, 'capabilities from a user namespace')
+  assert.strictEqual(read(entry(Object.assign({}, SUDO, { _UID: '1001' }), SUDO_START)), null, 'their sudo')
+  assert.strictEqual(read(entry(SUDO, POLKIT_START)), null, 'sudo speaking for polkit')
+  assert.strictEqual(read(entry(POLKIT, POLKIT_START), { uid: '1000', services: { sudo: true, 'polkit-1': false } }), null, 'the host draws polkit')
+})
+
+check('a compare killed for overrunning its CPU budget reads as not recognized', () => {
+  assert.deepStrictEqual(read(entry(SUDO, 'pam_howdy(sudo:auth): Child killed by signal CPU time limit exceeded (24)')),
+    { state: 'notRecognized', service: 'sudo' })
+  assert.deepStrictEqual(read(entry(SUDO, 'pam_howdy(sudo:auth): Child killed by signal Rechenzeitbegrenzung überschritten (24)')),
+    { state: 'notRecognized', service: 'sudo' }, 'another locale')
+})
+
+check('a scan that ends with no verdict cancels the card', () => {
+  for (const message of [
+    'pam_howdy(sudo:auth): Face verification skipped: lid is closed',
+    'pam_howdy(sudo:auth): Face verification skipped for SSH session',
+    'pam_howdy(sudo:auth): Face verification unavailable: no enrolled face model',
+    'pam_howdy(sudo:auth): Face verification aborted',
+    'pam_howdy(sudo:auth): Child killed by signal Terminated (15)'
+  ]) assert.deepStrictEqual(read(entry(SUDO, message)), { state: 'cancel', service: 'sudo' }, message)
 })
 
 // --- trust -------------------------------------------------------------------

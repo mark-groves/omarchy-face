@@ -1,4 +1,4 @@
-// Turns journal entries into face-card verdicts for the standalone card
+// Turns journal entries into face-card events for the standalone card
 // (Card.qml). Pure functions, kept out of QML so node can test them
 // (test/events-test.js); Service.qml owns the journal process.
 //
@@ -6,20 +6,26 @@
 // backend do the work and log the outcome, and the card is drawn from the log.
 //
 //   parseEntry(line) -> entry | null      one line of `journalctl --output=json`
-//   verdict(entry, context) -> event | null
+//   cardEvent(entry, context) -> event | null
 //   stackHasFace(text) -> bool            whether a PAM stack loads a face module
 //
 // context is { uid, services }: the user's uid as a string, and the PAM
 // services that get a card right now ({ sudo: true, "polkit-1": false }).
-// event is { state: "recognized" | "notRecognized", service }.
-//
-// The backends log only their verdicts, Howdy as
-// pam_howdy(<service>:auth): Face verification succeeded | timed out | failed: <reason>
-// and facelock as pam_facelock(<service>): <result>. Neither logs the start of
-// a scan, so the card boots and plays the verdict straight away.
+// event is { state, service }, state one of:
+//   scanning        a scan has started: pam_warn(<service>:auth) logs
+//                   function=[pam_sm_authenticate] just before the face module
+//                   runs. The fork's face stacks put it there for exactly this;
+//                   its setcred lines, logged after an approval, are not a start.
+//   recognized      pam_howdy(<service>:auth): Face verification succeeded, or
+//                   facelock's success
+//   notRecognized   Howdy's timed out and failed: lines, facelock's no_match and
+//                   failure, and a compare killed by SIGXCPU when it overran its
+//                   CPU budget: Child killed by signal CPU time limit exceeded (24)
+//   cancel          the scan ended with no verdict: Howdy skipped it, found no
+//                   face model, aborted it, or the compare died of another signal
 //
 // Any program running as the user can log the same text, and journals here
-// hold forged pam_howdy lines. A verdict counts only when the fields journald
+// hold forged pam_howdy lines. A line counts only when the fields journald
 // fills in itself say a real PAM caller sent it:
 //   _EXE             sudo or the polkit agent helper, and the service in the
 //                    text is one that binary runs
@@ -46,8 +52,17 @@ var CALLERS = {
   "/usr/lib/polkit-1/polkit-agent-helper-1": ["polkit-1"]
 }
 
-var HOWDY = /^pam_howdy\(([^:()]+):auth\): Face verification (succeeded|timed out|failed)/
+var SCAN_START = /^pam_warn\(([^:()]+):auth\): function=\[pam_sm_authenticate\]/
+var HOWDY = /^pam_howdy\(([^:()]+):auth\): Face verification (succeeded|timed out|failed|skipped|unavailable|aborted)/
+// strsignal() text follows the locale; the number in brackets does not.
+var HOWDY_SIGNAL = /^pam_howdy\(([^:()]+):auth\): Child killed by signal .*\((\d+)\)$/
+var SIGXCPU = 24
 var FACELOCK = /^pam_facelock\(([^()]+)\): (\w+)/
+
+var HOWDY_STATES = {
+  "succeeded": "recognized", "timed out": "notRecognized", "failed": "notRecognized",
+  "skipped": "cancel", "unavailable": "cancel", "aborted": "cancel"
+}
 
 function parseEntry(line) {
   try {
@@ -71,7 +86,7 @@ function trusted(entry, service, uid) {
   return entry._UID === uid
 }
 
-function verdict(entry, context) {
+function cardEvent(entry, context) {
   if (!entry || typeof entry.MESSAGE !== "string") return null
   var uid = context && context.uid ? String(context.uid) : ""
   var services = (context && context.services) || {}
@@ -79,9 +94,15 @@ function verdict(entry, context) {
   var state = ""
   var m
 
-  if ((m = entry.MESSAGE.match(HOWDY))) {
+  if ((m = entry.MESSAGE.match(SCAN_START))) {
     service = m[1]
-    state = m[2] === "succeeded" ? "recognized" : "notRecognized"
+    state = "scanning"
+  } else if ((m = entry.MESSAGE.match(HOWDY))) {
+    service = m[1]
+    state = HOWDY_STATES[m[2]]
+  } else if ((m = entry.MESSAGE.match(HOWDY_SIGNAL))) {
+    service = m[1]
+    state = Number(m[2]) === SIGXCPU ? "notRecognized" : "cancel"
   } else if ((m = entry.MESSAGE.match(FACELOCK))) {
     service = m[1]
     state = m[2] === "success" ? "recognized"
@@ -103,4 +124,4 @@ function stackHasFace(text) {
 }
 
 if (typeof module !== "undefined")
-  module.exports = { CALLERS, parseEntry, verdict, stackHasFace }
+  module.exports = { CALLERS, parseEntry, cardEvent, stackHasFace }

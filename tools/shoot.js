@@ -39,6 +39,8 @@ what to draw
   --side PX         card size (default 220)
   --scale N         device pixel ratio (default 2 sheet, 3 single, 2 video, 1 gif)
   --bloom W,T       wide,tight bloom blur sigma in card px (default 10,3.2)
+  --result-ms MS    play results as a brief beat of MS ms (spec.resultMs);
+                    "brief" uses the module's own resultMs(state)
   --no-labels       no per-cell labels on a sheet
 
 what to write (default dir: tools/out/)
@@ -209,6 +211,7 @@ async function main() {
   const q = new URLSearchParams()
   if (o.style) q.set('style', o.style)
   for (const k of ['state', 'elapsed', 'clock', 'entered', 'timeline', 'side', 'bloom']) if (o[k] !== undefined) q.set(k, o[k])
+  if (o['result-ms'] !== undefined) q.set('resultms', o['result-ms'])
   q.set('host', host)
   if (o['no-labels']) q.set('labels', '0')
   let tag = themeName

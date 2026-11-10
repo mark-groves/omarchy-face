@@ -1,6 +1,6 @@
 # Face Scan Card
 
-An animated face-scan card for Omarchy. When a face backend checks your face for `sudo` or a polkit prompt, the card drops in under the bar, boots, and then locks on or misses. It ships three styles and follows the active Omarchy theme.
+An animated face-scan card for Omarchy. When a face backend checks your face for `sudo` or a polkit prompt, the card drops in under the bar while the scan runs, then locks on or misses. It ships three styles and follows the active Omarchy theme.
 
 ![The three styles, top to bottom HUD, radar and holo, each scanning, recognized and not recognized](preview.png)
 
@@ -38,9 +38,11 @@ To see the card without a camera:
 
 ```bash
 omarchy-shell face-card demo                  # scan, then lock on
-omarchy-shell face-card show notRecognized    # scan, then miss
+omarchy-shell face-card show notRecognized    # a miss, as when the scan's start was not logged
+omarchy-shell face-card replay "scanning:0,notRecognized:4300,scanning:6000,recognized:6700"   # a timeout, then a retry that matches
 omarchy-shell face-card close
 omarchy-shell face-card status                # what the plugin sees: host polkit card, services with a card, journal
+omarchy-shell face-card stats                 # how the last showing ran: frames presented and painted, frame and paint times
 ```
 
 Update with `omarchy plugin update markgroves.polkit-face`, then `omarchy restart shell`: the plugin's service stays loaded, so new service code only runs after a restart. `omarchy update` does not update plugins. A saved style survives updates.
@@ -93,6 +95,7 @@ Every style covers all three states with the same timing contract, the same corn
 - The scanner's analysis is shown with technical markers, not pictures: landmark points, crosshair brackets, measurement ticks, distance lines and confidence readouts at fifteen regions of the face. While scanning, each marker seats as the style's scan head passes it. A recognised face confirms them in a cascade and the mesh locks with them. A miss never lets them confirm: they drift off, break away and fade in the error colour while the head volume stays visible.
 - Each style boots in about 620 ms, and the module exports that as `scanMs()`, so a host that knows it lets the boot finish before it plays a fast match.
 - A lock plays as a multi-beat sequence over 1.9 s. A miss is told as a story over 1.8 s: the scan runs for 450 ms in the accent, so a miss never flashes a result state, then the markers fail to confirm and break off in the error colour. Both stay under the host's 2 s hold clamp.
+- A host that wants one short beat instead asks for it with `spec.resultMs`: the same keyframes, time-compressed into that many milliseconds. `resultMs()` names the beats the result is drawn to read at, 900 ms for a lock and 800 ms for a miss (whose attempt then lasts 200 ms).
 - A settled recognised face is strokes only. Once the attempt has failed, a miss paints only in the error colour.
 - Every frame on the 220 px card stays under 1,500 ops, 7,500 path commands and 1,200 glowing ops, well inside the host caps (6,000 ops, 600 commands per op, 2,000 glow ops).
 - Every colour follows the active Omarchy theme. The plugin paints role indices only, and the host resolves them, including the derived roles (see [Contract](#contract)).
@@ -184,14 +187,18 @@ The manifest declares only the shell's own kinds, which the plugin marketplace l
 
 `Service.qml` runs one `journalctl --follow --output=json`, and only while `/etc/pam.d/sudo` or `/etc/pam.d/polkit-1` loads a face module. It asks only for lines sent by `sudo` or the polkit agent helper, trimmed to four fields, and hands each one to `FaceEvents.js`, which decides what counts:
 
-| Backend | Verdict |
+| Line | Card |
 | --- | --- |
-| Howdy | `pam_howdy(<service>:auth): Face verification succeeded`, `timed out` or `failed: …` |
-| facelock | `pam_facelock(<service>): <result>` |
+| `pam_warn(<service>:auth): function=[pam_sm_authenticate] …` | a scan has started: the card opens, scanning. The fork's face stacks log it just before the face module runs; the `setcred` lines `pam_warn` logs after an approval are ignored |
+| `pam_howdy(<service>:auth): Face verification succeeded` | recognized |
+| `pam_howdy(<service>:auth): Face verification timed out` or `failed: …` | not recognized |
+| `pam_howdy(<service>:auth): Child killed by signal … (24)` | not recognized: the compare overran its CPU budget (SIGXCPU) |
+| `pam_howdy(<service>:auth): Face verification skipped…`, `unavailable…` or `aborted`, or the compare killed by another signal | the scan ended with no verdict, and the card leaves |
+| `pam_facelock(<service>): <result>` | `success` is recognized; `no_match`, `failure`, `fail` and `failed` are not recognized |
 
-Neither backend logs the start of a scan, so the card appears once the verdict is in: it boots, holds the result until it has shown `scanMs()` of the boot, as the fork's host does, then plays it. Only `sudo`, `sudo-i` and `polkit-1` get a card, and `polkit-1` only where the host does not draw the card in its own dialog. The service knows that from the fork's `FaceChrome` singleton in `qs.Commons`, which stock Omarchy does not have.
+A stack without the `pam_warn` line still gets a card: it opens on the verdict. Only `sudo`, `sudo-i` and `polkit-1` get a card, and `polkit-1` only where the host does not draw the card in its own dialog. The service knows that from the fork's `FaceChrome` singleton in `qs.Commons`, which stock Omarchy does not have.
 
-Any program can log the text of a verdict, so a line counts only when the fields journald fills in itself say a real PAM caller sent it:
+Any program can log the same text, so a line counts only when the fields journald fills in itself say a real PAM caller sent it:
 
 | Field | Must be |
 | --- | --- |
@@ -203,17 +210,39 @@ The binary is the check that matters. A plain `logger` records no capabilities, 
 
 The child is started by absolute path with a fixed argument vector and a cleared environment, and everything it prints is bounded in `StreamLimits.js` before it is held. The service never runs anything privileged, writes no file and never touches PAM.
 
+#### What the card plays when
+
+The card opens scanning the moment a scan starts. A verdict that comes during the boot waits for it, so a fast match never cuts into a card still drawing itself on (the art's `scanMs()`); a later one plays as it arrives. A verdict with no scan on show, from a stack without the `pam_warn` line, opens straight into the result: the command has already run, so there is no boot to fake. Each result plays its whole beat, the frame module's `resultMs()` when it exports one, else its `holdMs()` and half a second, and then the card fades out. Events that arrive during a result queue behind it in order: a retry's scan start waits for the miss to finish, and the retry's verdict for the new boot. A scan with no verdict, such as a `sudo` cancelled with Ctrl+C, leaves 5 s after it started, just past Howdy's timeout. Every time is wall-clock time, so a slow frame never stretches the boot or a beat. The rules are pure functions in `CardSchedule.js`; `CardFace.qml` plays them.
+
+The card builds a frame only once the last one has painted, and both of its layers rasterise on Qt's canvas thread, so a slow raster drops frames instead of piling them up. When building and painting a frame takes longer than two refreshes, the sharp layer is rasterised smaller and scaled up and the bloom repaints less often; it steps back up once the larger layer would fit again, and a step never blanks the card. The card fades and grows in once its first frame has painted and fades out after its last beat, both on the render thread, so a busy shell cannot stall either. Its window is unmapped between showings.
+
+#### Checking the card
+
+`replay` takes `state:ms` pairs (states `scanning`, `recognized`, `notRecognized` and `cancel`, 0 to 60000 ms after the call) and feeds them to the card exactly as journal events would arrive, so any real sequence can be played without a camera. A new replay replaces one still running, and `close` stops it. A real face event ends a replay, `show` or `demo` at once and drops what it had queued, so a scripted verdict never plays into a real scan; while a real card is up, `show`, `replay` and `demo` are refused.
+
+The card logs these JSON lines to the shell's journal, for the face verification harness to read against a recording:
+
+```
+face-probe-event {"surface":"sudo","state":"scanning","t":<epoch ms>,"rect":{"x":..,"y":..,"w":220,"h":220},"window":"markgroves-face-card"}
+face-probe {"surface":"sudo","shownAt":..,"firstSwapAt":..,"hiddenAt":..,"swaps":..,"ticks":..,"paints":..,"swapGapMs":{"p50":..,"p95":..,"max":..},"frameMs":{"mean":..,"max":..},"paintMs":{"mean":..,"max":..},"quality":..,"moved":false}
+```
+
+`face-probe-event` comes with every state the card shows, then `closing` as it starts to leave and `hidden` once it has; `rect` is the card's place in its window. `face-probe` sums up a showing once it ends: when it began, the first presented frame with the card's content, the window's presented frames (`swaps`) and their gaps, the frame clock's ticks, the sharp frames painted, the cost of `frame()` and of a paint from dispatch to landing, the quality level it ended on, and whether the card ever moved. `face-card stats` prints the last one.
+
 ### The frame module
 
-`FaceCardFrame.js` is a **JavaScript module, not a QML Item**. It exports two functions, and an optional third:
+`FaceCardFrame.js` is a **JavaScript module, not a QML Item**. It exports two functions, and two optional ones:
 
 ```js
 frame(size, spec) -> ops     // one frame as a list of numeric draw ops
 holdMs(state)     -> ms      // how long the host should hold that state
 scanMs()          -> ms      // optional: scanning to show before a result
+resultMs(state)   -> ms      // optional: the brief beat of a result
 ```
 
 A host that knows `scanMs()` holds a fast match until the card has presented that much of the scan (the boot, so the result never cuts into a card still drawing itself on), then plays the result. Older hosts ignore it.
+
+A host that wants a result to be one short beat sends `resultMs(state)` (or its own length) as `spec.resultMs` with every frame of the result and holds the state that long instead of `holdMs(state)`. The result's keyframes, its marker cascade and its ambient motion are time-compressed into the beat; a length is kept between 400 ms, under which a lock no longer reads, and the cinematic `holdMs(state)`. A miss's attempt keeps the live clock, so the scan carries on unchanged until it fails. Without `spec.resultMs` the result is the cinematic one, exactly as before.
 
 `spec` carries only values:
 
@@ -223,6 +252,7 @@ A host that knows `scanMs()` holds a fast match until the card has presented tha
 | `clock` | free-running milliseconds, drives every ambient motion |
 | `elapsed` | milliseconds since `state` was entered |
 | `style` | optional, `"hud"`, `"radar"` or `"holo"`. Absent or unknown paints the HUD. The standalone card and the preview send it; the fork's host does not yet. |
+| `resultMs` | optional, the length in milliseconds of a brief result (see `resultMs()` above). Absent, a result plays at its cinematic length. |
 | `host` | optional, the op level the host paints. `2` unlocks glow, additive blending and roles 3 to 5. `3` means the host paints the card on its own dark glass and resolves every role against it, so the frame draws its structure in the tint instead of the text colour. Absent means level 1, and the frame is exactly the level-1 frame. |
 
 There are no colours in the spec. Each op carries a role index and the host resolves it against the live theme, so the card follows whatever theme is set and the plugin never chooses a colour:
@@ -280,10 +310,11 @@ Development needs `quickshell` for the live preview and node 22+ for the tests. 
 quickshell -p Preview.qml       # scripted scan / lock / rescan / miss, style chips, host level 1, 2 or 3, the 220 px card
 node test/frame-test.js         # boundary, visual and per-style tests
 node test/events-test.js        # the journal reader, against captured Howdy entries, forgeries and facelock lines
+node test/schedule-test.js      # what the standalone card plays when
 omarchy plugin validate .       # the manifest checks the shell runs at load time
 ```
 
-`Preview.qml` and `Card.qml` share one painter, `FacePaint.js`, which mirrors the fork's host painter and derives the colours from the theme. `Preview.qml` is the reference for how a host drives the frame module.
+`Preview.qml` and the standalone card share one painter, `FacePaint.js`, which mirrors the fork's host painter and derives the colours from the theme. `Preview.qml` is the reference for how a host drives the frame module.
 
 The tests are the thing to keep green. The boundary checks are why this plugin is allowed to draw on a credential surface at all. The dot-count check is the approved visual: a settled recognised HUD keeps its depth lattice, and a settled radar or holo face is strokes with no dots. The replay-budget checks, run on every 20 ms of every state on the 220 px card at op levels 2 and 3, keep the dense styles affordable on a software canvas. The level-1 purity check is what keeps the module safe on an older host: without `spec.host` it emits no blend op, no glow value and no role past the error colour.
 
@@ -299,7 +330,9 @@ node tools/shoot.js --style hud --host 2 --theme latte --sheet                  
 node tools/shoot.js --help
 ```
 
-The bloom blur is an approximation of Qt's `MultiEffect` (tune it with `--bloom wide,tight`). `node tools/shoot.js --serve` serves `tools/render.html` for use in a browser, with the same URL parameters.
+The bloom blur is an approximation of Qt's `MultiEffect` (tune it with `--bloom wide,tight`). `node tools/shoot.js --serve` serves `tools/render.html` for use in a browser, with the same URL parameters. `--result-ms brief` (or a length in milliseconds) renders results as the brief beat.
+
+`tools/bench.qml` measures what `frame()` costs in Qt's own JavaScript engine, which is what a host pays on its GUI thread every frame and about five times what node takes. It loads each file the way the fork's host does and interleaves them, so a before and an after run under the same conditions; see its header for the command line.
 
 `Preview.qml` takes its colours from the active Omarchy theme (`~/.local/state/omarchy/current/theme/colors.toml`) when there is one, and falls back to Tokyo Night.
 

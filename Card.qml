@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Effects
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
@@ -7,13 +6,16 @@ import Quickshell.Wayland
 import qs.Commons
 import "FaceCardFrame.js" as FaceCard
 import "FacePaint.js" as FacePaint
+import "CardSchedule.js" as Schedule
 
-// The standalone face card. Service.qml reports a face verdict for sudo, or
-// for a polkit prompt where the host does not draw the card in its own dialog
+// The standalone face card. Service.qml reports face events for sudo, or for
+// a polkit prompt where the host does not draw the card in its own dialog
 // (stock Omarchy), and this panel drops the same 220 px card the fork draws in
-// its own surfaces in under the bar on the focused screen: it boots, then locks
-// on or misses, then fades. It takes no input and never sits on the lock
-// screen.
+// its own surfaces in under the bar on the focused screen: it opens scanning
+// when the scan starts, plays the verdict, then fades. It takes no input and
+// never sits on the lock screen. CardFace.qml draws it and decides when each
+// state shows; journal events, `show` and `replay` all reach it through
+// show().
 //
 // The card is drawn the way the fork's host draws it, at op level 3: the frame
 // is numbers from FaceCardFrame.js, painted by FacePaint.js on dark glass with
@@ -23,9 +25,11 @@ import "FacePaint.js" as FacePaint
 // { "id": "markgroves.polkit-face", "style": "radar" }, written through the
 // shell's updateEntryInline like any plugin's own settings.
 //
-//   omarchy-shell face-card show scanning|recognized|notRecognized
+//   omarchy-shell face-card show scanning|recognized|notRecognized|cancel
+//   omarchy-shell face-card replay "scanning:0,recognized:800"
 //   omarchy-shell face-card demo
 //   omarchy-shell face-card close
+//   omarchy-shell face-card stats
 //   omarchy-shell face-card style hud|radar|holo
 //   omarchy-shell face-card styles
 Item {
@@ -36,22 +40,6 @@ Item {
   property var service: null   // injected by the host: this plugin's Service.qml
 
   readonly property int side: 220
-  readonly property int opLevel: 3
-
-  property bool opened: false
-  property string cardState: "scanning"
-  property real clock: 0
-  property real enteredAt: 0
-  property real scanStartedAt: 0
-  // A verdict that arrives before the card has finished booting waits for it.
-  property string pendingResult: ""
-  property real resultDueAt: 0
-  property real closeAt: 0
-  // A card opened with no verdict (only `face-card show scanning` does that)
-  // gives up after this.
-  readonly property int scanTimeoutMs: 15000
-  // Reading time after a result's own hold.
-  readonly property int lingerMs: 500
 
   // This plugin's own row in shell.json.
   property string shellConfigText: ""
@@ -60,29 +48,32 @@ Item {
     ? root.settings.style : FaceCard.DEFAULT_STYLE
 
   property var theme: FacePaint.FALLBACK
-  readonly property var glassTheme: FacePaint.deriveGlass(root.theme)
-  readonly property var roles: root.glassTheme.roles
-  property var ops: []
 
-  function show(state) {
-    if (state === "cancel") { close(); return }
-    if (state !== "scanning" && state !== "recognized" && state !== "notRecognized") return
+  // True from a real face event (the journal's) until its card has gone. A
+  // real event ends a preview (`show`, `replay`, `demo`) at once, dropping
+  // its queued states, so a scripted verdict never plays into a real scan,
+  // and no preview starts while a real card is up.
+  property bool realShowing: false
+  readonly property string refused: "refused: the card is showing a real face scan"
 
-    if (!root.opened || state === "scanning") {
-      if (!root.opened || root.cardState !== "scanning") {
-        root.cardState = "scanning"
-        root.enteredAt = root.clock
-        root.scanStartedAt = root.clock
-      }
-      root.pendingResult = ""
-      root.opened = true
-      root.closeAt = root.clock + root.scanTimeoutMs
+  // The one way in for a face event, whoever reports it.
+  function show(state, real) {
+    if (real && !root.realShowing) {
+      root.stopReplay()
+      face.close()
+    } else if (!real && root.realShowing) {
+      return false
     }
-    if (state === "scanning") return
+    face.show(state)
+    if (real && face.needsWindow) root.realShowing = true
+    return true
+  }
 
-    root.pendingResult = state
-    root.resultDueAt = root.scanStartedAt + Math.max(0, Number(FaceCard.scanMs()) || 0)
-    root.closeAt = Math.max(root.resultDueAt, root.clock) + FaceCard.holdMs(state) + root.lingerMs
+  Connections {
+    target: face
+    function onNeedsWindowChanged() {
+      if (!face.needsWindow) root.realShowing = false
+    }
   }
 
   function ownEntry(text, id) {
@@ -109,68 +100,98 @@ Item {
   }
 
   function close() {
-    demoTimer.stop()
-    root.opened = false
-    root.pendingResult = ""
+    root.stopReplay()
+    face.close()
   }
 
-  function tick() {
-    if (root.pendingResult !== "" && root.clock >= root.resultDueAt) {
-      root.cardState = root.pendingResult
-      root.enteredAt = root.clock
-      root.pendingResult = ""
-    }
-    if (root.opened && root.clock >= root.closeAt) root.opened = false
-    root.ops = FaceCard.frame(root.side, {
-      state: root.cardState, clock: root.clock, elapsed: root.clock - root.enteredAt, host: root.opLevel,
-      style: root.style
-    })
-    sharp.requestPaint()
-    if (root.bloom) glow.requestPaint()
+  // A replay feeds show() at times relative to the call, as journal events
+  // would arrive. A new replay replaces one still running, card included, the
+  // way a real event does. Callers refuse while a real showing is up.
+  property var replayEvents: []
+  property real replayStartedAt: 0
+
+  function startReplay(script) {
+    var events = Schedule.parseReplay(script)
+    if (!events || events.length === 0) return null
+    root.stopReplay()
+    face.close()
+    root.replayEvents = events.slice()
+    root.replayStartedAt = Date.now()
+    root.feedReplay()
+    return events
+  }
+
+  function feedReplay() {
+    var now = Date.now()
+    while (root.replayEvents.length && root.replayStartedAt + root.replayEvents[0].at <= now)
+      root.show(root.replayEvents.shift().state)
+    if (root.replayEvents.length === 0) return
+    replayTimer.interval = Math.max(1, Math.ceil(root.replayStartedAt + root.replayEvents[0].at - now))
+    replayTimer.restart()
+  }
+
+  function stopReplay() {
+    root.replayEvents = []
+    replayTimer.stop()
+  }
+
+  Timer {
+    id: replayTimer
+    onTriggered: root.feedReplay()
   }
 
   Connections {
     target: root.service
     function onEventSerialChanged() {
       var e = root.service.lastEvent
-      if (e) root.show(e.state)
+      if (e) root.show(e.state, true)
     }
   }
 
   IpcHandler {
     target: "face-card"
-    function show(state: string): string { root.show(state); return root.opened ? root.cardState : "closed" }
+    function show(state: string): string {
+      if (!root.show(state, false)) return root.refused
+      return face.shownState || "closed"
+    }
+    // Events at milliseconds from now, through the same path as the journal's:
+    // replay "scanning:0,recognized:800"
+    function replay(script: string): string {
+      if (root.realShowing) return root.refused
+      var events = root.startReplay(script)
+      if (!events) return "could not read the replay: give state:ms pairs such as scanning:0,recognized:800 (states: "
+        + Schedule.STATES.join(" ") + ", 0 to 60000 ms)"
+      return "replaying " + events.length + " events over " + events[events.length - 1].at + " ms"
+    }
     function demo(): string {
-      root.show("scanning")
-      demoTimer.restart()
+      if (root.realShowing) return root.refused
+      root.startReplay("scanning:0,recognized:2400")
       return "ok"
     }
     function close(): string { root.close(); return "ok" }
+    // The last finished showing's face-probe line.
+    function stats(): string { return JSON.stringify(face.lastProbe || {}) }
     function style(name: string): string {
       if (!root.setStyle(name)) return "could not set the style to " + name + " (styles: " + FaceCard.STYLES.join(" ") + ")"
       return name
     }
     function styles(): string { return root.style + " (styles: " + FaceCard.STYLES.join(" ") + ")" }
-    function state(): string { return root.opened ? (root.pendingResult || root.cardState) : "closed" }
+    function state(): string { return face.phase === "open" ? face.shownState : face.phase }
     // What the service sees: whether the host draws polkit prompts itself,
     // which PAM services get a card, and whether the journal is followed.
     function status(): string {
       var s = root.service
       return JSON.stringify({
-        opened: root.opened,
-        state: root.cardState,
+        opened: face.phase !== "closed",
+        state: face.shownState,
+        queued: face.queued,
+        quality: face.qualityLevel,
         style: root.style,
         hostDrawsPolkit: !!(s && s.hostDrawsPolkit),
         services: s ? s.services : null,
         journal: !!(s && s.journal && s.journal.running)
       })
     }
-  }
-
-  Timer {
-    id: demoTimer
-    interval: 2400
-    onTriggered: root.show("recognized")
   }
 
   FileView {
@@ -193,9 +214,6 @@ Item {
     }
   }
 
-  // The bloom needs a GPU; on the software scene graph the card is drawn sharp.
-  readonly property bool bloom: GraphicsInfo.api !== GraphicsInfo.Software
-
   PanelWindow {
     id: panel
 
@@ -205,7 +223,7 @@ Item {
       for (var i = 0; i < screens.length; i++) if (screens[i].name === name) return screens[i]
       return screens.length > 0 ? screens[0] : null
     }
-    visible: root.opened || card.opacity > 0
+    visible: face.needsWindow
     anchors { top: true; left: true; right: true }
     implicitHeight: root.side + Style.space(96)
     color: "transparent"
@@ -215,82 +233,19 @@ Item {
     exclusionMode: ExclusionMode.Ignore
     mask: Region {}
 
-    FrameAnimation {
-      running: panel.visible
-      onTriggered: {
-        // Capped like the host's presented-frame step, so a stall is not a jump.
-        root.clock += Math.min(frameTime * 1000, 50)
-        root.tick()
-      }
-    }
-
-    Item {
-      id: card
-      width: root.side
-      height: root.side
+    CardFace {
+      id: face
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.top: parent.top
       anchors.topMargin: Style.space(64)
-
-      opacity: root.opened ? 1 : 0
-      scale: root.opened ? 1 : 0.97
-      Behavior on opacity {
-        NumberAnimation { duration: Style.duration(root.opened ? 180 : 120); easing.type: Easing.OutCubic }
-      }
-      Behavior on scale {
-        NumberAnimation { duration: Style.duration(180); easing.type: Easing.Bezier; easing.bezierCurve: Style.easeOut }
-      }
-
-      Rectangle {
-        anchors.fill: parent
-        radius: Math.round(root.side * 0.045)
-        border.width: 1
-        border.color: root.glassTheme.edge
-        gradient: Gradient {
-          GradientStop { position: 0; color: Qt.tint(root.glassTheme.panel, Qt.alpha(root.glassTheme.edge, 0.55)) }
-          GradientStop { position: 0.45; color: root.glassTheme.panel }
-          GradientStop { position: 1; color: root.glassTheme.panel }
-        }
-      }
-
-      // A half-resolution glow layer blurred twice on the GPU, a tight halo
-      // and a wide bloom, under the sharp strokes.
-      Canvas {
-        id: glow
-        width: root.side / 2
-        height: root.side / 2
-        visible: false
-        renderTarget: Canvas.Image
-        renderStrategy: Canvas.Cooperative
-        onPaint: FacePaint.paintOps(getContext("2d"), root.ops, true, 0.5, root.roles, true)
-      }
-      MultiEffect {
-        anchors.fill: parent
-        source: glow
-        visible: root.bloom
-        autoPaddingEnabled: true
-        blurEnabled: true
-        blur: 1.0
-        blurMax: 48
-        blurMultiplier: 0.6
-        opacity: 0.95
-      }
-      MultiEffect {
-        anchors.fill: parent
-        source: glow
-        visible: root.bloom
-        autoPaddingEnabled: true
-        blurEnabled: true
-        blur: 0.55
-        blurMax: 12
-      }
-      Canvas {
-        id: sharp
-        anchors.fill: parent
-        renderTarget: Canvas.Image
-        renderStrategy: Canvas.Cooperative
-        onPaint: FacePaint.paintOps(getContext("2d"), root.ops, false, 1, root.roles, true)
-      }
+      side: root.side
+      style: root.style
+      theme: root.theme
+      enterMs: Style.duration(180)
+      exitMs: Style.duration(120)
+      easeOut: Style.easeOut
+      surface: "sudo"
+      windowName: "markgroves-face-card"
     }
   }
 }
