@@ -218,7 +218,7 @@ The card builds a frame only once the last one has painted, and both of its laye
 
 #### Checking the card
 
-`replay` takes `state:ms` pairs (states `scanning`, `recognized`, `notRecognized` and `cancel`, 0 to 60000 ms after the call) and feeds them to the card exactly as journal events would arrive, so any real sequence can be played without a camera. A new replay replaces one still running, and `close` stops it.
+`replay` takes `state:ms` pairs (states `scanning`, `recognized`, `notRecognized` and `cancel`, 0 to 60000 ms after the call) and feeds them to the card exactly as journal events would arrive, so any real sequence can be played without a camera. A new replay replaces one still running, and `close` stops it. A real face event ends a replay, `show` or `demo` at once and drops what it had queued, so a scripted verdict never plays into a real scan; while a real card is up, `show`, `replay` and `demo` are refused.
 
 The card logs these JSON lines to the shell's journal, for the face verification harness to read against a recording:
 

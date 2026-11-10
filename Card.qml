@@ -49,9 +49,31 @@ Item {
 
   property var theme: FacePaint.FALLBACK
 
+  // True from a real face event (the journal's) until its card has gone. A
+  // real event ends a preview (`show`, `replay`, `demo`) at once, dropping
+  // its queued states, so a scripted verdict never plays into a real scan,
+  // and no preview starts while a real card is up.
+  property bool realShowing: false
+  readonly property string refused: "refused: the card is showing a real face scan"
+
   // The one way in for a face event, whoever reports it.
-  function show(state) {
+  function show(state, real) {
+    if (real && !root.realShowing) {
+      root.stopReplay()
+      face.close()
+    } else if (!real && root.realShowing) {
+      return false
+    }
     face.show(state)
+    if (real && face.needsWindow) root.realShowing = true
+    return true
+  }
+
+  Connections {
+    target: face
+    function onNeedsWindowChanged() {
+      if (!face.needsWindow) root.realShowing = false
+    }
   }
 
   function ownEntry(text, id) {
@@ -119,22 +141,27 @@ Item {
     target: root.service
     function onEventSerialChanged() {
       var e = root.service.lastEvent
-      if (e) root.show(e.state)
+      if (e) root.show(e.state, true)
     }
   }
 
   IpcHandler {
     target: "face-card"
-    function show(state: string): string { root.show(state); return face.shownState || "closed" }
+    function show(state: string): string {
+      if (!root.show(state, false)) return root.refused
+      return face.shownState || "closed"
+    }
     // Events at milliseconds from now, through the same path as the journal's:
     // replay "scanning:0,recognized:800"
     function replay(script: string): string {
+      if (root.realShowing) return root.refused
       var events = root.startReplay(script)
       if (!events) return "could not read the replay: give state:ms pairs such as scanning:0,recognized:800 (states: "
         + Schedule.STATES.join(" ") + ", 0 to 60000 ms)"
       return "replaying " + events.length + " events over " + events[events.length - 1].at + " ms"
     }
     function demo(): string {
+      if (root.realShowing) return root.refused
       root.startReplay("scanning:0,recognized:2400")
       return "ok"
     }
