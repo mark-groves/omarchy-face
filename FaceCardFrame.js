@@ -266,7 +266,7 @@ function hudHead(u, y) {
   if (y <= HUD_TAPER) return [P[0] * fullness, y, P[2]]
   var k = clamp01((y - HUD_TAPER) / (HUD_BOT - HUD_TAPER))
   var s = Math.sqrt(Math.max(0, 1 - k * k))
-  var zc = (profileAt(HEAD_Y, HEAD_FRONT, HUD_TAPER) + profileAt(HEAD_Y, HEAD_BACK, HUD_TAPER)) / 2
+  var zc = hudTaperZ()
   return [P[0] * fullness * s, y, zc + (P[2] - zc) * s]
 }
 
@@ -641,6 +641,20 @@ var SEG_LINES = {
   g: [0.12, 0.5, 0.88, 0.5]
 }
 
+// seg7's tables: the segments in a..g order (bit k is segment k, whose
+// character code is 97 + k), each glyph's lit segments as a mask, and
+// scratch for the cells of the string being drawn.
+var SEG_LINE = [SEG_LINES.a, SEG_LINES.b, SEG_LINES.c, SEG_LINES.d, SEG_LINES.e, SEG_LINES.f, SEG_LINES.g]
+var SEG7_MASK = {}
+;(function () {
+  for (var c in SEG7) {
+    var bits = 0
+    for (var k = 0; k < 7; k++) if (SEG7[c].indexOf("abcdefg".charAt(k)) !== -1) bits |= 1 << k
+    SEG7_MASK[c] = bits
+  }
+})()
+var SEG_CELL = [], SEG_DOT = [], SEG_PREV = []
+
 // Seven-segment text. (x, y) is the top-left of the first cell, `align`
 // 1 right-aligns the string on x. A "." attaches to the previous cell.
 //
@@ -693,20 +707,6 @@ function seg7(p, role, a, ghost, w, x, y, cw, ch, pitch, str, align, fx) {
     }
   }
 }
-
-// seg7's tables: the segments in a..g order (bit k is segment k, whose
-// character code is 97 + k), each glyph's lit segments as a mask, and
-// scratch for the cells of the string being drawn.
-var SEG_LINE = [SEG_LINES.a, SEG_LINES.b, SEG_LINES.c, SEG_LINES.d, SEG_LINES.e, SEG_LINES.f, SEG_LINES.g]
-var SEG7_MASK = {}
-;(function () {
-  for (var c in SEG7) {
-    var bits = 0
-    for (var k = 0; k < 7; k++) if (SEG7[c].indexOf("abcdefg".charAt(k)) !== -1) bits |= 1 << k
-    SEG7_MASK[c] = bits
-  }
-})()
-var SEG_CELL = [], SEG_DOT = [], SEG_PREV = []
 
 var HEX_DIGITS = "0123456789ABCDEF"
 
@@ -949,6 +949,9 @@ var HUD_SIL = { lx: [], ly: [], rx: [], ry: [], al: [], ar: [], hl: [], hr: [] }
 // this is a memo, not state: a frame draws the same whatever came before.
 var HUD_DN = { js: [], hx: [], hy: [] }
 
+// headRowPoint()'s answer: the x and z of the point it was asked for.
+var HP_X = 0, HP_Z = 0
+
 // The scan plane's cut through the head at height y, as a screen polyline
 // that follows the surface: {x, y, v} per sample, v the visibility.
 function hudSliceLineInto(F, y, n, xs, ys, vs) {
@@ -968,7 +971,7 @@ function hudSliceLineInto(F, y, n, xs, ys, vs) {
   if (tapered) {
     var tk = clamp01((yc - HUD_TAPER) / (HUD_BOT - HUD_TAPER))
     ts = Math.sqrt(Math.max(0, 1 - tk * tk))
-    tzc = (profileAt(HEAD_Y, HEAD_FRONT, HUD_TAPER) + profileAt(HEAD_Y, HEAD_BACK, HUD_TAPER)) / 2
+    tzc = hudTaperZ()
   }
   var T = hudSliceBearings(n)
   var cw = F.cw, sw = F.sw, cp = F.cp, sp = F.sp, scale = F.scale, cx = F.cx, cy = F.cy, RF = F.RF
@@ -4239,6 +4242,13 @@ var NECK_TOP = 0.56
 var HOLO_SL0 = HEAD_TOP + 0.05
 var HOLO_SL1 = HEAD_CHIN - 0.012
 
+// The depth the HUD's head tapers towards under HUD_TAPER: the middle of
+// the skull's front and back profiles there. Declared after the profiles,
+// so the code above it reads them through here.
+function hudTaperZ() {
+  return (profileAt(HEAD_Y, HEAD_FRONT, HUD_TAPER) + profileAt(HEAD_Y, HEAD_BACK, HUD_TAPER)) / 2
+}
+
 function profileAt(ys, vs, y) {
   var n = ys.length
   if (y <= ys[0]) return vs[0]
@@ -4292,7 +4302,6 @@ function bearingTable(us) {
 }
 
 var HEAD_ROW = { y: 0, W: 0, ey: 0, zh: 0, zd: 0, g: [0, 0, 0, 0, 0, 0] }
-var HP_X = 0, HP_Z = 0
 
 function headRowAt(y) {
   var H = HEAD_ROW
