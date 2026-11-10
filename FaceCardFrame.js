@@ -491,14 +491,18 @@ function pen(ctx, gain, halo) {
   // Runs of strokes in one pen (ticks, glyph segments) repeat the same
   // role, alpha and width, so the last answer is kept and handed back; a
   // run of one width repeats its width step too.
-  var lastRole = -1, lastA = 0, lastW = 0, lastG = null
+  //
+  // A group is its path op, built when the group is: the recorder's
+  // [OP_PATH, role, alpha, width, cmds, glow?], and group() hands back its
+  // command list. A flush hands the ops over as they are.
+  var lastRole = -1, lastA = 0, lastW = 0, lastC = null
   var stepW = -1, stepIw = 1
   function group(role, a, w) {
-    if (role === lastRole && a === lastA && w === lastW) return lastG
+    if (role === lastRole && a === lastA && w === lastW) return lastC
     lastRole = role
     lastA = a
     lastW = w
-    lastG = null
+    lastC = null
     var ia = Math.round((a < 0 ? 0 : (a > 1 ? 1 : a)) * 32)
     if (ia <= 0) return null
     var ig = 0
@@ -516,59 +520,60 @@ function pen(ctx, gain, halo) {
     }
     var iw = stepIw
     var key = role + 8 * (ia + 33 * (ig + 17 * iw))
-    var g = groups.get(key)
-    if (!g) {
-      g = { role: role, a: ia / 32, w: iw / 4, g: ig / 16, cmds: [] }
-      groups.set(key, g)
-      order.push(g)
+    var c = groups.get(key)
+    if (!c) {
+      c = []
+      var r = opRole(role)
+      order.push(LUMEN && ig > 0 ? [OP_PATH, r, ia / 32, iw / 4, c, ig / 16] : [OP_PATH, r, ia / 32, iw / 4, c])
+      groups.set(key, c)
     }
-    lastG = g
-    return g
+    lastC = c
+    return c
   }
 
   return {
     line: function (role, a, w, x0, y0, x1, y1) {
-      var g = group(role, a, w)
-      if (g) g.cmds.push([0, x0, y0], [1, x1, y1])
+      var c = group(role, a, w)
+      if (c) c.push([0, x0, y0], [1, x1, y1])
     },
     poly: function (role, a, w, pts) {
       if (pts.length < 2) return
-      var g = group(role, a, w)
-      if (!g) return
-      g.cmds.push([0, pts[0][0], pts[0][1]])
-      for (var i = 1; i < pts.length; i++) g.cmds.push([1, pts[i][0], pts[i][1]])
+      var c = group(role, a, w)
+      if (!c) return
+      c.push([0, pts[0][0], pts[0][1]])
+      for (var i = 1; i < pts.length; i++) c.push([1, pts[i][0], pts[i][1]])
     },
     // poly() over points `from`..`to` of two flat coordinate lists.
     polyXY: function (role, a, w, xs, ys, from, to) {
       if (to - from < 1) return
-      var g = group(role, a, w)
-      if (!g) return
-      var c = g.cmds
+      var c = group(role, a, w)
+      if (!c) return
       c.push([0, xs[from], ys[from]])
       for (var i = from + 1; i <= to; i++) c.push([1, xs[i], ys[i]])
     },
     arc: function (role, a, w, x, y, r, a0, a1) {
       if (a1 <= a0 || r <= 0) return
-      var g = group(role, a, w)
-      if (g) g.cmds.push([0, x + Math.cos(a0) * r, y + Math.sin(a0) * r], [3, x, y, r, a0, a1])
+      var c = group(role, a, w)
+      if (c) c.push([0, x + Math.cos(a0) * r, y + Math.sin(a0) * r], [3, x, y, r, a0, a1])
     },
-    // A group's commands go out as they are: the recorder takes the list
-    // itself rather than a copy rebuilt through moveTo and lineTo, so each
-    // command is allocated once.
+    // The ops go out as they were built; a list too long for one path is
+    // cut into several, never between a subpath and its moveTo.
     flush: function () {
+      var ops = ctx.ops
       for (var i = 0; i < order.length; i++) {
-        var g = order[i]
-        var cmds = g.cmds
+        var op = order[i]
+        var cmds = op[4]
         if (cmds.length <= PATH_CHUNK) {
-          ctx.path(g.role, g.a, g.w, g.g, cmds)
+          ops.push(op)
           continue
         }
         var at = 0
         while (at < cmds.length) {
           var end = Math.min(cmds.length, at + PATH_CHUNK)
-          // Never split a subpath from its moveTo.
           while (end < cmds.length && cmds[end][0] !== 0) end++
-          ctx.path(g.role, g.a, g.w, g.g, cmds.slice(at, end))
+          var part = op.slice()
+          part[4] = cmds.slice(at, end)
+          ops.push(part)
           at = end
         }
       }
@@ -576,7 +581,7 @@ function pen(ctx, gain, halo) {
       order = []
       groups.clear()
       lastRole = -1
-      lastG = null
+      lastC = null
     }
   }
 }
@@ -1624,12 +1629,21 @@ function paintHud(ctx, size, spec) {
     flush()
   }
 
-  // Draw the dots.
+  // Draw the dots. How much of a dot's alpha lights the bloom: the crest
+  // riding the plane, the flash behind a lock's wave, and the rim where the
+  // surface turns away; none below 0.06.
+  var dotGlow = LUMEN && !bad, glowK = HUD_HK < 1 ? 0.5 : 1
   for (i = 0; i < nDD; i++) {
-    var hot = LUMEN && (dCr[i] > 0.45 || dMid[i] > 0.7 || (dRim[i] > 0.75 && dB[i] > 0.9) || dSpec[i] > 0.6)
-    var dsz = dSz[i]
-    ctx.rect(hot ? hotRole : tint, dA[i], dX[i] - dsz / 2, dY[i] - dsz / 2, dsz, dsz,
-      LUMEN && !bad ? hudGlow(dA[i], dCr[i], dMid[i], dRim[i], dB[i]) : 0)
+    var dcr = dCr[i], dmid = dMid[i]
+    var hot = LUMEN && (dcr > 0.45 || dmid > 0.7 || (dRim[i] > 0.75 && dB[i] > 0.9) || dSpec[i] > 0.6)
+    var dsz = dSz[i], da = dA[i]
+    var dg = 0
+    if (dotGlow) {
+      dg = da * (1.7 * dcr + 0.5 * dmid + 0.25 * dRim[i] * dB[i])
+      dg *= glowK
+      dg = dg > 0.06 ? (dg > 1 ? 1 : dg) : 0
+    }
+    ctx.rect(hot ? hotRole : tint, da, dX[i] - dsz / 2, dY[i] - dsz / 2, dsz, dsz, dg)
   }
   ctx.glow = 0
 
@@ -1894,13 +1908,6 @@ function paintHud(ctx, size, spec) {
   crisp.flush()
 }
 
-// How much of a dot's alpha lights the bloom: the crest riding the plane, the
-// flash behind a lock's wave, and the rim where the surface turns away.
-function hudGlow(a, crest, mid, rim, b) {
-  var g = a * (1.7 * crest + 0.5 * mid + 0.25 * rim * b)
-  g *= HUD_HK < 1 ? 0.5 : 1
-  return g > 0.06 ? clamp01(g) : 0
-}
 
 // --- corner readouts, shared by every style ---------------------------------
 
@@ -2582,6 +2589,9 @@ function markFaceVertex(tab, X, Y, lift, key) {
   return tab[key] || (tab[key] = headFaceVertex(X, Y, lift))
 }
 
+// Scratch for a measurement line's points.
+var MARK_RUN_X = [], MARK_RUN_Y = []
+
 function faceMarkers(halo, crisp, o) {
   var mode = FEAT.mode
   var U = o.U
@@ -2656,7 +2666,12 @@ function faceMarkers(halo, crisp, o) {
     } else {
       // A distance line: a solid hairline with a tick at each step, longer
       // at the ends and the middle, and a pulse running along it.
-      crisp.poly(role, la * 0.62 * o.gain, lw, run.map(function (r) { return [r.x, r.y] }))
+      var rX = MARK_RUN_X, rY = MARK_RUN_Y
+      for (j = 0; j < run.length; j++) {
+        rX[j] = run[j].x
+        rY[j] = run[j].y
+      }
+      crisp.polyXY(role, la * 0.62 * o.gain, lw, rX, rY, 0, run.length - 1)
       for (j = 0; j < run.length; j += 2) {
         var e0 = run[Math.max(0, j - 1)], e1 = run[Math.min(run.length - 1, j + 1)]
         var tx = e1.x - e0.x, ty = e1.y - e0.y
@@ -3263,9 +3278,17 @@ var RADAR_BUF = { x: [], y: [], a: [], h: [] }
 function frac(v) { return v - Math.floor(v) }
 function smooth01(v) { return v * v * (3 - 2 * v) }
 
-// An L-bracket at (x, y) opening toward (dx, dy).
+// An L-bracket at (x, y) opening toward (dx, dy). Its three points go out
+// through scratch lists rather than a list of pairs.
+var BRACKET_X = [0, 0, 0], BRACKET_Y = [0, 0, 0]
 function bracketCorner(p, role, a, w, x, y, dx, dy, len) {
-  p.poly(role, a, w, [[x + dx * len, y], [x, y], [x, y + dy * len]])
+  BRACKET_X[0] = x + dx * len
+  BRACKET_Y[0] = y
+  BRACKET_X[1] = x
+  BRACKET_Y[1] = y
+  BRACKET_X[2] = x
+  BRACKET_Y[2] = y + dy * len
+  p.polyXY(role, a, w, BRACKET_X, BRACKET_Y, 0, 2)
 }
 
 function bracketBox(p, role, a, w, x, y, h, len) {
@@ -3797,10 +3820,11 @@ function paintRadar(ctx, size, spec) {
       lastOx = ox
     }
   }
-  var contourA = function (P) { return (0.2 + 0.8 * TN[P.ci]) * lightAt(P.j, refreshOf(P.r)) * (ok ? 0.8 : 0.9) }
-  var contourH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * (0.3 + 0.7 * TN[P.ci]); return h > 0.14 ? h * 0.65 : 0 }
-  var outlineA = function (P) { return (0.55 + 0.45 * TN[P.ci]) * vJ[P.j] * (0.4 + 0.6 * clamp01(lightAt(P.j, refreshOf(P.r)))) }
-  var outlineH = function (P) { var h = heatAt(P.j, P.r, frontOf(P.r)) * (0.55 + 0.45 * TN[P.ci]) * vJ[P.j]; return h > 0.12 ? h : 0 }
+  // Off a lock refreshOf() and frontOf() are 0, so a piece skips them.
+  var contourA = function (P) { return (0.2 + 0.8 * TN[P.ci]) * lightAt(P.j, ok ? refreshOf(P.r) : 0) * (ok ? 0.8 : 0.9) }
+  var contourH = function (P) { var h = heatAt(P.j, P.r, ok ? frontOf(P.r) : 0) * (0.3 + 0.7 * TN[P.ci]); return h > 0.14 ? h * 0.65 : 0 }
+  var outlineA = function (P) { return (0.55 + 0.45 * TN[P.ci]) * vJ[P.j] * (0.4 + 0.6 * clamp01(lightAt(P.j, ok ? refreshOf(P.r) : 0))) }
+  var outlineH = function (P) { var h = heatAt(P.j, P.r, ok ? frontOf(P.r) : 0) * (0.55 + 0.45 * TN[P.ci]) * vJ[P.j]; return h > 0.12 ? h : 0 }
   // One alpha per piece of a chain, into a scratch list, so the strokes that
   // share a chain work it out once.
   function chainAlpha(chain, alphaOf, out) {
@@ -5867,6 +5891,15 @@ function scanMs() {
 
 // --- the value-spec boundary ------------------------------------------------
 
+// The role an op carries for a role the drawing code asks for: ink is the
+// foreground, glass draws the foreground in the tint, and roles past the
+// error role only exist on a level-2 host.
+function opRole(r) {
+  if (r === ROLE_INK) return ROLE_FG
+  if (GLASS && r === ROLE_FG) return TINT
+  return LUMEN || r <= ROLE_ERROR ? r : ROLE_FG
+}
+
 // Stands in for a 2D context so the drawing code above is unchanged, and
 // records what it would have drawn instead of drawing it.
 function recorder() {
@@ -5875,12 +5908,8 @@ function recorder() {
   var stack = []
   var st = { stroke: [ROLE_ACCENT, 1], fill: [ROLE_ACCENT, 1], width: 1, glow: 0 }
 
-  // Roles past the error role only exist on a level-2 host.
-  function role(r) {
-    if (r === ROLE_INK) return ROLE_FG
-    if (GLASS && r === ROLE_FG) return TINT
-    return LUMEN || r <= ROLE_ERROR ? r : ROLE_FG
-  }
+  var role = opRole
+  // The pens hand their path ops straight to `ops` (pen().flush).
   function lit(op) {
     if (LUMEN && st.glow > 0) op.push(clamp01(st.glow))
     ops.push(op)
@@ -5907,16 +5936,6 @@ function recorder() {
       if (cmds && cmds.length) lit([OP_PATH, role(st.stroke[0]), st.stroke[1], st.width, cmds])
       cmds = null
     },
-    // A whole stroked path in one call, for the pens: the same op as
-    // strokeStyle, lineWidth, glow, beginPath, the commands and stroke, with
-    // the command list taken as it is. Leaves the stroke state alone; the
-    // pens set the glow back to 0 when they are done.
-    path: function (r, a, w, glow, list) {
-      if (!list.length) return
-      a = clamp01(a)
-      if (LUMEN && glow > 0) ops.push([OP_PATH, role(r), a, w, list, clamp01(glow)])
-      else ops.push([OP_PATH, role(r), a, w, list])
-    },
     fillRect: function (x, y, w, h) {
       if (st.fill && st.fill.__grad) {
         var g = st.fill
@@ -5929,10 +5948,13 @@ function recorder() {
     // token, and with `glow` in place of the glow state for this one op.
     // Neither the fill nor the glow state changes, so a later fillRect must
     // set its own fillStyle, as every one here does.
+    // A dot is the commonest op of all (750 a frame on the HUD), so opRole()
+    // and clamp01() are written out here.
     rect: function (r, a, x, y, w, h, glow) {
-      a = clamp01(a)
-      if (LUMEN && glow > 0) ops.push([OP_RECT, role(r), a, x, y, w, h, clamp01(glow)])
-      else ops.push([OP_RECT, role(r), a, x, y, w, h])
+      a = a < 0 ? 0 : (a > 1 ? 1 : a)
+      var rr = r === ROLE_INK ? ROLE_FG : (GLASS && r === ROLE_FG ? TINT : (LUMEN || r <= ROLE_ERROR ? r : ROLE_FG))
+      if (LUMEN && glow > 0) ops.push([OP_RECT, rr, a, x, y, w, h, glow > 1 ? 1 : glow])
+      else ops.push([OP_RECT, rr, a, x, y, w, h])
     },
     // Level 2 only: switch later ops between normal and additive light.
     blend: function (mode) { if (LUMEN) ops.push([OP_BLEND, mode ? 1 : 0]) },
