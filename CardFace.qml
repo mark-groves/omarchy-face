@@ -144,9 +144,15 @@ Item {
   property real showingStart: 0
   function clockAt(now) { return root.clockBase + Math.max(0, now - root.showingStart) }
 
-  // Set once a sharp layer has painted in this showing. Until then the layers
-  // stay hidden, so a frame left from the last showing never shows.
+  // Set once a sharp layer has painted a frame built in this showing, and the
+  // glow layer likewise. Until then each stays hidden, so a frame left from
+  // the last showing never shows: a paint asked for just before the window
+  // unmapped only runs once it maps again, and a canvas paints itself once,
+  // empty, when it first becomes available.
   property bool contentReady: false
+  property bool glowReady: false
+  // The first frame of a showing paints the glow whatever its quality level.
+  property bool glowDue: false
   property bool awaitingEntrance: false
   property var stats: null
   property var firstRect: null
@@ -156,6 +162,8 @@ Item {
   function beginShowing(now) {
     root.showingStart = now
     root.contentReady = false
+    root.glowReady = false
+    root.glowDue = true
     root.awaitingEntrance = true
     root.firstRect = null
     root.moved = false
@@ -303,11 +311,17 @@ Item {
     layer.inFlightSince = built
     layer.requestPaint()
     root.dispatches++
-    if (root.bloom && root.dispatches % root.glowEvery === 0 && glowLayer.available
+    if (root.bloom && (root.glowDue || root.dispatches % root.glowEvery === 0) && glowLayer.available
         && !(glowLayer.inFlightSince > 0 && built - glowLayer.inFlightSince < root.paintStallMs)) {
+      root.glowDue = false
       glowLayer.inFlightSince = built
       glowLayer.requestPaint()
     }
+  }
+
+  // Whether a paint dispatched at this time carries a frame of this showing.
+  function paintIsCurrent(dispatched) {
+    return dispatched > 0 && dispatched >= root.showingStart && root.schedule.phase !== "closed"
   }
 
   function noteFrame(ms) {
@@ -326,9 +340,9 @@ Item {
     var now = Date.now()
     var dispatched = layer.inFlightSince
     layer.inFlightSince = 0
-    if (layer !== root.targetLayer) return
+    if (layer !== root.targetLayer || !root.paintIsCurrent(dispatched)) return
     var s = root.stats
-    if (s && dispatched > 0) {
+    if (s) {
       var ms = now - dispatched
       s.paints++
       s.paintN++
@@ -337,7 +351,7 @@ Item {
       root.notePaint(ms)
     }
     if (root.liveLayer !== layer) root.retire(root.liveLayer, layer)
-    if (!root.contentReady && root.schedule.phase !== "closed") root.contentReady = true
+    root.contentReady = true
     if (root.awaitingEntrance && root.schedule.phase === "open") root.enter()
   }
 
@@ -489,7 +503,10 @@ Item {
 
       onPaint: FacePaint.paintOps(getContext("2d"), root.ops, true, 0.5, root.roles, true)
       onPainted: {
+        var dispatched = inFlightSince
         inFlightSince = 0
+        if (!root.paintIsCurrent(dispatched)) return
+        root.glowReady = true
         if (root.stats) root.stats.glowPaints++
       }
       onAvailableChanged: inFlightSince = 0
@@ -497,7 +514,7 @@ Item {
     MultiEffect {
       anchors.fill: parent
       source: glowLayer
-      visible: root.bloom && root.contentReady
+      visible: root.bloom && root.contentReady && root.glowReady
       autoPaddingEnabled: true
       blurEnabled: true
       blur: 1.0
@@ -508,7 +525,7 @@ Item {
     MultiEffect {
       anchors.fill: parent
       source: glowLayer
-      visible: root.bloom && root.contentReady
+      visible: root.bloom && root.contentReady && root.glowReady
       autoPaddingEnabled: true
       blurEnabled: true
       blur: 0.55
